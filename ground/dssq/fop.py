@@ -1,4 +1,4 @@
-"""Ground commanding: simplified FOP-1 (CCSDS 232.1-B-2) + command verification.
+r"""Ground commanding: simplified FOP-1 (CCSDS 232.1-B-2) + command verification.
 
 Uplink is half-duplex: the spacecraft listens between its own transmissions,
 so the GDS radiates CLTUs immediately after it has received a CADU (the

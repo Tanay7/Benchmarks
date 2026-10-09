@@ -21,6 +21,10 @@ static bool rpc_set_partition(int p) {
   g_fsw.egse_set_partition(p);
   return true;
 }
+static bool rpc_set_sdls_sn(int sn) {         // restore SDLS anti-replay state after reboot
+  g_fsw.egse_set_sdls_sn((uint32_t)sn);
+  return true;
+}
 static bool rpc_hardline_cltu(String hex) {   // bench "umbilical" commanding
   return g_fsw.egse_hardline_cltu(hex);
 }
@@ -31,6 +35,7 @@ void setup() {
   Bridge.begin();
   Monitor.begin();
   Bridge.provide_safe("set_partition", rpc_set_partition);
+  Bridge.provide_safe("set_sdls_sn", rpc_set_sdls_sn);
   Bridge.provide_safe("hl_cltu", rpc_hardline_cltu);
   g_fsw.setup();
 }

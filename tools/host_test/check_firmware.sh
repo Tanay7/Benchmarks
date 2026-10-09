@@ -33,6 +33,6 @@ check "$SK/sketch.ino"
 while IFS= read -r f; do check "$f"; done < <(find "$SK/src" -name '*.cpp' | sort)
 check "$SK/src/fsw/status_display.cpp" -DVGQ_SC_OLED=1
 FP="$ROOT/ground/frontpanel/dssq_frontpanel/dssq_frontpanel.ino"
-[[ -f "$FP" ]] && check "$FP" -DFP_HOST_CHECK=1
+[[ -f "$FP" ]] && check "$FP"
 rm -f /tmp/fwcheck.$$
 exit $fail

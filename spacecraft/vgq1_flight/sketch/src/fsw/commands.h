@@ -18,6 +18,9 @@ enum Opcode : uint8_t {
   OP_PKTRATE = 0x06, OP_PLAYBACK = 0x07, OP_SSRCLEAR = 0x08, OP_PING = 0x09, OP_SENSORS = 0x0A,
   OP_RSTCNT = 0x0B, OP_REBOOT = 0x0C, OP_MAGCC = 0x0D, OP_CMDLOSS = 0x0E, OP_FDIRMASK = 0x0F,
   OP_TXINHIBIT = 0x10, OP_EVRLEVEL = 0x11, OP_TIMECORR = 0x12,
+  OP_RFSCAN = 0x13,      // u8 first_ch, u8 last_ch : ambient-noise spectrum survey
+  OP_HIBERNATE = 0x14,   // u16 beacon_s : Wake-on-Radio hibernation with periodic beacon
+  OP_CHANNEL = 0x15,     // u8 ch, u16 revert_s : coordinated channel change (auto-revert)
 };
 
 enum CmdError : uint8_t {

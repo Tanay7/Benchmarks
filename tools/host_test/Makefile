@@ -3,6 +3,7 @@
 FLIGHT := ../../spacecraft/vgq1_flight/sketch/src
 SRCS   := host_test.cpp $(FLIGHT)/ccsds/crc16.cpp $(FLIGHT)/ccsds/randomizer.cpp \
           $(FLIGHT)/ccsds/reed_solomon.cpp $(FLIGHT)/ccsds/tm.cpp $(FLIGHT)/ccsds/tc.cpp \
+          $(FLIGHT)/ccsds/sha256.cpp $(FLIGHT)/ccsds/sdls.cpp \
           $(FLIGHT)/fsw/tlm_packets.cpp $(FLIGHT)/fsw/commands.cpp \
           $(FLIGHT)/fsw/ssr.cpp $(FLIGHT)/fsw/attitude.cpp
 CXX    ?= g++

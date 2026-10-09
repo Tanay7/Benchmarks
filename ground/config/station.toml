@@ -16,6 +16,8 @@ rx_line_loss_db = 1.0       # coax + connectors between antenna and E22
 name = "VGQ-1"
 scid = 0x0A7
 distance_km = 0.0           # enter the measured path length for OWLT / link budget
+antenna_gain_dbi = 2.15     # spacecraft antenna (half-wave dipole / whip ~ 2 dBi)
+tx_line_loss_db = 0.5
 
 [radio]
 port = "/dev/ttyUSB0"       # E22-400TBH-02 USB-UART (check with: ls /dev/serial/by-id/)
@@ -33,23 +35,52 @@ rssi_noise = true           # enables C0 C1 C2 C3 ambient-noise queries
 power = 0                   # ground TX (uplink) power code; 0 = maximum
 channel = 23                # 410.125 + 23 = 433.125 MHz — check your band plan / licence
 rssi_byte = true            # E22 appends packet RSSI to every received packet
-lbt = false
+lbt = false                 # set true to make the ground listen-before-talk on uplink
 noise_bw_hz = 125000.0      # ASSUMED LoRa bandwidth for C/N0 estimates
 noise_poll_s = 20.0
 radio_latency_s = 0.0       # calibrated radio pipeline delay for time correlation
+# Channels YOU may use (licence + band plan). E22 grid: 410.125 + CH MHz.
+# Default 20..24 = 430.125..434.125 MHz (70 cm amateur band, Region 1/3; avoids the
+# 435-438 MHz satellite segment). US (Region 2, 420-450 MHz) operators can widen it.
+allowed_channels = [20, 21, 22, 23, 24]
 
 [gds]
 archive_dir = "archive"
 http_host = "127.0.0.1"     # 0.0.0.0 exposes the dashboard (and COMMANDING) to your LAN
 http_port = 8080
+http_token = ""             # REQUIRED if http_host is not 127.0.0.1 (X-DSSQ-Token header)
 los_timeout_s = 90.0
-frontpanel_port = ""        # e.g. "/dev/ttyACM0" for the GIGA R1 front panel
-frontpanel_bridge = false   # true: drive the OLED from the VENTUNO Q MCU via App Lab Bridge
+frontpanel = true           # VENTUNO Q MCU front panel (OLED + CardKB) via arduino-router
+rcu = true                  # VENTUNO Q MCU drives the ground E22 M0/M1/AUX (jumpers removed)
+router_address = ""         # default unix:///var/run/arduino-router.sock
 console_interval_s = 10.0
+
+[sdls]
+enabled = false             # true after running tools/gen_sdls_key.py (both ends!)
+spi = 1
+key_file = "config/sdls_key.hex"
+
+[linkmgr]
+mode = "ADVISE"             # OFF | ADVISE | AUTO
+target_margin_db = 6.0
+period_s = 60.0
+holdoff_s = 600.0
+min_rate = 0                # 0.3 kbit/s
+max_rate = 4                # 9.6 kbit/s
+revert_s = 180              # spacecraft auto-revert window for coordinated changes
+
+[interop]
+tm_frames_udp = ""          # e.g. "127.0.0.1:10015" -> YAMCS / OpenC3 TM frame link
+tm_packets_udp = ""         # e.g. "127.0.0.1:10016" -> packet link
+tc_frames_udp_listen = ""   # e.g. "127.0.0.1:10025" <- TC frames from an external MCS
+
+[science]
+r_outboard_m = 1.0          # boom distance of the outboard RM3100 from the bus centre
+r_inboard_m = 0.5           # boom distance of the inboard RM3100
 
 [commanding]
 t1_s = 45.0                 # FOP-1 retransmission timer
 tx_limit = 3                # transmissions per AD frame before suspending
 window = 5                  # max outstanding AD frames
 verify_timeout_s = 300.0
-require_two_person_for_hazardous = false   # true: second CardKB must authorise
+require_two_person_for_hazardous = false   # true: 2nd operator authorises (CardKB #2 'Y' or web AUTH)

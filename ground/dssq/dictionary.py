@@ -27,7 +27,7 @@ AIR_RATES_BPS = {0: 300, 1: 1200, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400,
 
 FDIR_BITS = ["RADIO_CFG", "AUX_TIMEOUT", "PA_OVERTEMP", "AVI_OVERTEMP", "CMD_LOSS", "I2C_BUS",
              "SENSOR_LOST", "LOOP_OVERRUN", "VC_CONGEST", "LOW_BUS_V", "FARM_LOCKOUT",
-             "TX_INHIBIT", "RATE_REVERT"]
+             "TX_INHIBIT", "RATE_REVERT", "SDLS_AUTH", "HIBERNATE"]
 SENSOR_BITS = ["MPU9250", "AK8963", "RM3100_OB", "RM3100_IB", "MMC5603", "VEML7700", "BME690",
                "AS7265X", "AS7343", "NICLA_ENV", "NICLA_ME", "CSS", "TCA9548A", "PA_NTC",
                "BUS_MON"]
@@ -78,6 +78,9 @@ PACKETS: dict[int, dict] = {
         ("vc0_backlog", "H", None, "B", "VC0 queued octets", (None, None, 600, 900)),
         ("vc1_backlog", "H", None, "B", "VC1 queued octets", (None, None, 600, 900)),
         ("vc2_backlog", "H", None, "B", "VC2 queued octets", None),
+        ("sdls_enabled", "B", None, "", "Uplink authentication active (SDLS)", None),
+        ("sdls_auth_fail", "H", None, "", "TC frames rejected by SDLS", (None, None, 1, 10)),
+        ("sdls_last_sn", "I", None, "", "Last authenticated SDLS sequence number", None),
     ]},
     0x011: {"name": "RF", "desc": "Telecom subsystem (E22-400T37S)", "fields": [
         ("air_rate_code", "B", None, "", "E22 air data rate code", None),
@@ -168,6 +171,7 @@ PACKETS: dict[int, dict] = {
 
 PACKETS_BY_NAME = {v["name"]: k for k, v in PACKETS.items()}
 APID_EVR = 0x012
+APID_RFSCAN = 0x015          # variable length: first_ch u8, count u8, duration_ms u16, noise i8[count]
 
 
 # --------------------------------------------------------------------------------
@@ -214,12 +218,29 @@ COMMANDS: dict[str, CommandDef] = {c.mnemonic: c for c in [
                "Silence the transmitter for N seconds (auto re-enable)"),
     CommandDef("EVRLEVEL", 0x11, [("level", "B", 0, 4, None)], False, "Minimum EVR severity downlinked"),
     CommandDef("TIMECORR", 0x12, [], False, "Generate a TIMECORR packet now"),
+    CommandDef("RFSCAN", 0x13, [("first_ch", "B", 0, 83, None), ("last_ch", "B", 0, 83, None)], False,
+               "Spacecraft RF survey: ambient noise on each E22 channel (downlink paused)"),
+    CommandDef("HIBERNATE", 0x14, [("beacon_s", "H", 60, 3600, None)], True,
+               "Wake-on-Radio hibernation, one HK beacon every beacon_s (wake with WAKE)"),
+    CommandDef("CHANNEL", 0x15, [("ch", "B", 0, 83, None), ("revert_s", "H", 60, 3600, None)], True,
+               "Change RF channel; reverts after revert_s unless a TC arrives on the new channel"),
 ]}
 
 # COP-1 control commands handled by the ground FOP (Type-BC frames), not opcodes.
 DIRECTIVES = {
     "UNLOCK": "COP-1 Unlock (clears FARM Lockout)",
     "SETVR": "COP-1 Set V(R) <n> (resynchronise sequence numbers)",
+}
+
+# Ground-station directives (executed by the GDS / Radio Control Unit, not uplinked
+# as such). Those touching the ground radio need the RCU (GIGA R1 driving M0/M1).
+GROUND_DIRECTIVES = {
+    "GSCAN": "GSCAN [first last] - ground RF survey with the station E22 (needs RCU)",
+    "WAKE": "WAKE - wake a hibernating spacecraft (WOR-transmitter MODE SAFE, needs RCU)",
+    "LINKRATE": "LINKRATE <code> - coordinated air-rate change, both ends (needs RCU)",
+    "LINKCHAN": "LINKCHAN <ch> - coordinated channel change, both ends (needs RCU)",
+    "LINKMGR": "LINKMGR OFF|ADVISE|AUTO - adaptive link manager",
+    "RADIO": "RADIO - read back and show the ground E22 configuration (needs RCU)",
 }
 
 

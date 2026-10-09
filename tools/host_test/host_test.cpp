@@ -22,6 +22,8 @@
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/crc16.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/randomizer.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/reed_solomon.h"
+#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/sdls.h"
+#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/sha256.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tc.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tm.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/fsw/attitude.h"
@@ -232,11 +234,13 @@ int main(int argc, char** argv) {
     hk.bus_voltage_mV = 12034; hk.bus_current_mA = -1250; hk.loop_max_ms = 42; hk.loop_overruns = 1;
     hk.i2c_errors = 2; hk.ssr_fill_permille = 512; hk.ssr_dropped = 0; hk.vc0_backlog = 10;
     hk.vc1_backlog = 200; hk.vc2_backlog = 0;
+    hk.sdls_enabled = 1; hk.sdls_auth_fail = 3; hk.sdls_last_sn = 123456789;
     size_t n = vgq::pack_hk(hk, pl);
-    CHECK(n == 52, "HK packet is 52 octets");
+    CHECK(n == 59, "HK packet is 59 octets");
     emit("HK", vgq::APID_HK, n, "fsw_mode=3,sclk_partition=12,uptime_s=86400,fdir_flags=20,"
          "farm_vr=55,avionics_temp=31.25,pa_temp=-5.5,bus_voltage=12.034,bus_current=-1.25,"
-         "ssr_fill=51.2,vc1_backlog=200,cmd_loss_timer_s=3600");
+         "ssr_fill=51.2,vc1_backlog=200,cmd_loss_timer_s=3600,sdls_enabled=1,sdls_auth_fail=3,"
+         "sdls_last_sn=123456789");
 
     vgq::RfPacket rf{};
     rf.air_rate_code = 2; rf.tx_power_code = 0; rf.channel = 23; rf.e22_cfg_ok = 1;
@@ -286,6 +290,11 @@ int main(int argc, char** argv) {
     vgq::CmdVerPacket cv{5, vgq::OP_PING, vgq::STAGE_EXECUTED, 0, 0xDEADBEEF};
     n = vgq::pack_cmdver(cv, pl);
     emit("CMDVER", vgq::APID_CMDVER, n, "tc_seq=5,opcode=9,stage=2,ground_tag=3735928559");
+
+    const int8_t noise[5] = {-118, -121, -97, -128, -120};
+    n = vgq::pack_rfscan(20, 5, 812, noise, pl);
+    CHECK(n == 9, "RFSCAN packet is 4 + N octets");
+    emit("RFSCAN", vgq::APID_RFSCAN, n, "first_ch=20,count=5,duration_ms=812,noise=-118;-121;-97;None;-120");
 
     vgq::TimeCorrPacket tc{17, 4000, 1234, 2, 950};
     n = vgq::pack_timecorr(tc, pl);
@@ -362,6 +371,59 @@ int main(int argc, char** argv) {
     vgq::Vec3 s_est;
     const bool sok = vgq::css_sun_vector(counts, dark, 50, s_est);
     CHECK(sok && vgq::v_dot(s_est, s_true) > 0.99999f, "Pyramid CSS sun vector inside FOV");
+  }
+
+  // ---- SHA-256 / HMAC-SHA-256 (FIPS 180-4, RFC 4231) and SDLS ------------------------
+  {
+    uint8_t d[32];
+    Sha256 sh; sh.update((const uint8_t*)"abc", 3); sh.final(d);
+    CHECK(hex(d, 32) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "SHA-256(\"abc\") (FIPS 180-4 example)");
+    uint8_t k1[20]; std::memset(k1, 0x0b, sizeof k1);
+    hmac_sha256(k1, 20, (const uint8_t*)"Hi There", 8, nullptr, 0, nullptr, 0, d);
+    CHECK(hex(d, 32) == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+          "HMAC-SHA-256 RFC 4231 test case 1");
+    hmac_sha256((const uint8_t*)"Jefe", 4, (const uint8_t*)"what do ya want ", 16,
+                (const uint8_t*)"for nothing?", 12, nullptr, 0, d);
+    CHECK(hex(d, 32) == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+          "HMAC-SHA-256 RFC 4231 test case 2 (multi-part input)");
+
+    // Build an SDLS-protected TC frame exactly as the ground does, verify it in flight code.
+    uint8_t key[32];
+    for (int i = 0; i < 32; ++i) key[i] = (uint8_t)i;
+    const uint8_t payload[] = {0x18, 0xC0, 0xC0, 0x00, 0x00, 0x00, 0x01};    // NOOP TC packet
+    const uint16_t len = (uint16_t)(kTcPriHdrLen + kSdlsHdrLen + sizeof payload + kSdlsMacLen + 2);
+    uint8_t fr[64] = {0};
+    put_u16(fr, (uint16_t)(kSpacecraftId & 0x3FF));
+    put_u16(fr + 2, (uint16_t)(len - 1));
+    fr[4] = 0;
+    put_u16(fr + 5, 1);                       // SPI
+    put_u32(fr + 7, 7);                       // sequence number
+    std::memcpy(fr + 11, payload, sizeof payload);
+    uint8_t mac[32];
+    hmac_sha256(key, 32, fr, 5, fr + 5, 6, fr + 11, sizeof payload, mac);
+    std::memcpy(fr + 11 + sizeof payload, mac, kSdlsMacLen);
+    put_u16(fr + len - 2, crc16_ccitt(fr, len - 2));
+    FILE* f = std::fopen((out + "/sdls_frame.txt").c_str(), "w");
+    if (f) { std::fprintf(f, "%s\n", hex(fr, len).c_str()); std::fclose(f); }
+
+    Sdls sdls;
+    sdls.init(key, 32, 1);
+    TcFrame tf;
+    CHECK(tc_parse(fr, len, tf) == TC_OK && sdls.process(fr, tf) == Sdls::SDLS_OK &&
+          tf.data_len == sizeof payload && std::memcmp(tf.data, payload, sizeof payload) == 0,
+          "SDLS: authentic frame accepted, data field unwrapped");
+    TcFrame t2;
+    tc_parse(fr, len, t2);
+    CHECK(sdls.process(fr, t2) == Sdls::SDLS_REPLAY, "SDLS: replayed frame rejected");
+    uint8_t bad[64];
+    std::memcpy(bad, fr, len);
+    put_u32(bad + 7, 8);                      // new SN but old MAC -> forged
+    put_u16(bad + len - 2, crc16_ccitt(bad, len - 2));
+    TcFrame t3;
+    tc_parse(bad, len, t3);
+    CHECK(sdls.process(bad, t3) == Sdls::SDLS_BAD_MAC && sdls.last_sn() == 7,
+          "SDLS: forged frame rejected without advancing anti-replay state");
   }
 
   std::printf("\n%s (%d failure%s)\n", g_fail ? "HOST TEST FAILED" : "HOST TEST PASSED", g_fail,

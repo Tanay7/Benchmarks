@@ -89,7 +89,30 @@ def test_flight_telemetry_packets_decommutate(vectors):
         for kv in expect.split(","):
             k, v = kv.split("=")
             got = values[k]
+            if isinstance(got, list):
+                got = ";".join(str(x) for x in got)
             if isinstance(got, float):
                 assert abs(got - float(v)) <= max(1e-3, abs(float(v)) * 1e-5), (name, k, got, v)
             else:
                 assert str(got) == v, (name, k, got, v)
+
+
+def test_flight_sdls_frame_verifies_on_ground(vectors):
+    """Frame built with the flight HMAC code must verify with Python's hmac module."""
+    from dssq.ccsds.sdls import SdlsReceiver
+    frame = bytes.fromhex((vectors / "sdls_frame.txt").read_text().strip())
+    info = parse_tc_frame(frame)
+    assert info is not None
+    rx = SdlsReceiver(bytes(range(32)), spi=1)
+    body, verdict = rx.process(frame, info.data)
+    assert verdict == "OK" and body == bytes.fromhex("18c0c000000001") and rx.last_sn == 7
+
+
+def test_ground_sdls_frame_layout_matches_flight(vectors):
+    """Ground-built protected frame equals the flight-built one for the same key/SN."""
+    from dssq.ccsds.sdls import SdlsSender
+    from dssq.ccsds.tc import build_tc_frame
+    flight = bytes.fromhex((vectors / "sdls_frame.txt").read_text().strip())
+    tx = SdlsSender(bytes(range(32)), spi=1)
+    tx.sn = 6                                   # next_sn() -> 7
+    assert build_tc_frame(bytes.fromhex("18c0c000000001"), seq=0, sdls=tx) == flight

@@ -29,6 +29,7 @@ DATA = Path(__file__).resolve().parent / "egse_data"
 DATA.mkdir(parents=True, exist_ok=True)
 BOOT_FILE = DATA / "boot_count.txt"
 QUEUE = DATA / "hardline_queue.txt"
+SN_FILE = DATA / "sdls_last_sn.txt"
 
 # CCSDS 255-bit randomizer (h(x)=x^8+x^7+x^5+x^3+1), needed to peek at frame headers
 def _rand_seq(n=8):
@@ -43,7 +44,7 @@ def _rand_seq(n=8):
     return bytes(out)
 
 RAND = _rand_seq()
-state = {"cadus": 0, "last_status": {}, "boot_pending": None, "evrs": 0,
+state = {"cadus": 0, "last_status": {}, "boot_pending": None, "evrs": 0, "sn_pending": None,
          "vc_counts": {}, "last_print": 0.0, "partition": None}
 
 
@@ -89,10 +90,17 @@ def on_evr(text: str):
     log(f"EVR  {text}")
 
 
+def on_sdls_sn(sn: int):
+    # Persist the uplink anti-replay counter so a reboot cannot re-open old SNs.
+    SN_FILE.write_text(str(sn))
+
+
 def on_boot(reset_cause: int):
     n = int(BOOT_FILE.read_text().strip() or 0) + 1 if BOOT_FILE.exists() else 1
     BOOT_FILE.write_text(str(n))
     state["boot_pending"] = n          # answered from the loop (no Bridge.call in handlers)
+    if SN_FILE.exists():
+        state["sn_pending"] = int(SN_FILE.read_text().strip() or 0)
     log(f"flight computer boot #{n} (reset cause {reset_cause})")
 
 
@@ -127,6 +135,13 @@ def loop():
             state["boot_pending"] = None
         except Exception as e:  # MCU busy or restarting: retry next loop
             log(f"set_partition failed ({e}); retrying")
+    if state["sn_pending"] is not None:
+        try:
+            Bridge.call("set_sdls_sn", state["sn_pending"], timeout=5)
+            log(f"restored SDLS anti-replay SN {state['sn_pending']}")
+            state["sn_pending"] = None
+        except Exception as e:
+            log(f"set_sdls_sn failed ({e}); retrying")
     if QUEUE.exists() and QUEUE.stat().st_size:
         lines = QUEUE.read_text().split()
         QUEUE.write_text("")
@@ -149,7 +164,10 @@ Bridge.provide("tm_cadu", on_cadu)
 Bridge.provide("sc_status", on_status)
 Bridge.provide("sc_evr", on_evr)
 Bridge.provide("sc_boot", on_boot)
+Bridge.provide("sdls_sn", on_sdls_sn)
 log(f"VGQ-1 EGSE started, archive at {DATA}")
 if BOOT_FILE.exists():   # MCU may have booted before this app: re-send the current partition
     state["boot_pending"] = int(BOOT_FILE.read_text().strip() or 0)
+if SN_FILE.exists():
+    state["sn_pending"] = int(SN_FILE.read_text().strip() or 0)
 App.run(user_loop=loop)

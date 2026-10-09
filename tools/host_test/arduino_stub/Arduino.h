@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <string>
+#include <ctype.h>
+#include <stdlib.h>
 #define HIGH 1
 #define LOW 0
 #define INPUT 0
@@ -28,6 +30,7 @@ inline void noInterrupts() {}
 inline void interrupts() {}
 inline void yield() {}
 template <class T, class L> inline auto min(const T& a, const L& b) -> decltype(a < b ? a : b) { return a < b ? a : b; }
+template <class T, class L, class H> inline T constrain(T x, L lo, H hi) { return x < (T)lo ? (T)lo : (x > (T)hi ? (T)hi : x); }
 template <class T, class L> inline auto max(const T& a, const L& b) -> decltype(a < b ? b : a) { return a < b ? b : a; }
 class String {
  public:

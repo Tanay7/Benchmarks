@@ -28,6 +28,7 @@ enum Apid : uint16_t {
   APID_ATT      = 0x021,   // attitude: IMU, ARU quaternion, sun sensors, TRIAD
   APID_SPEC     = 0x022,   // spectrometers AS7265x + AS7343
   APID_ENV      = 0x023,   // environment: BME690, Nicla Sense Env/ME, VEML7700
+  APID_RFSCAN   = 0x015,   // RF spectrum survey (ambient noise per E22 channel)
   APID_TC       = 0x0C0,   // telecommand packets (uplink)
 };
 
@@ -52,6 +53,8 @@ enum FdirBit : uint16_t {
   FDIR_FARM_LOCKOUT = 1u << 10,
   FDIR_TX_INHIBIT   = 1u << 11,
   FDIR_RATE_REVERT  = 1u << 12,
+  FDIR_SDLS_AUTH    = 1u << 13,   // authentication failures seen on the uplink
+  FDIR_HIBERNATE    = 1u << 14,   // informational: spacecraft is hibernating (WOR)
 };
 
 // Sensor index bits (HK.sensor_health / sensor enable mask)
@@ -62,7 +65,7 @@ enum SensorBit : uint16_t {
   SNS_TCA9548A = 1u << 12, SNS_PA_NTC = 1u << 13, SNS_BUS_MON = 1u << 14,
 };
 
-struct HkPacket {                 // APID 0x010, 52 octets
+struct HkPacket {                 // APID 0x010, 59 octets
   uint8_t  fsw_mode;
   uint16_t sclk_partition;
   uint32_t uptime_s;
@@ -90,6 +93,9 @@ struct HkPacket {                 // APID 0x010, 52 octets
   uint16_t vc0_backlog;
   uint16_t vc1_backlog;
   uint16_t vc2_backlog;
+  uint8_t  sdls_enabled;          // 1 = uplink authentication active
+  uint16_t sdls_auth_fail;        // frames rejected by SDLS (bad MAC / replay / SPI)
+  uint32_t sdls_last_sn;          // last authenticated sequence number
 };
 
 struct RfPacket {                 // APID 0x011, 38 octets
@@ -194,6 +200,10 @@ size_t pack_mag(const MagPacket& p, uint8_t* out);
 size_t pack_att(const AttPacket& p, uint8_t* out);
 size_t pack_spec(const SpecPacket& p, uint8_t* out);
 size_t pack_env(const EnvPacket& p, uint8_t* out);
+// RFSCAN: first channel, count, scan duration (ms), noise dBm per channel (int8,
+// -128 = no reading). Up to 84 channels (410.125 .. 493.125 MHz).
+size_t pack_rfscan(uint8_t first_ch, uint8_t count, uint16_t duration_ms, const int8_t* noise,
+                   uint8_t* out);
 // EVR: severity (0 DIAG..4 FATAL), 16-bit event id, ASCII text (<= 80 chars).
 size_t pack_evr(uint8_t severity, uint16_t event_id, const char* text, uint8_t* out);
 

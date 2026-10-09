@@ -4,7 +4,7 @@ from __future__ import annotations
 import struct
 
 from .ccsds.packets import SpacePacket
-from .dictionary import APID_EVR, EVR_SEVERITY, NA, PACKETS, checked_limits
+from .dictionary import APID_EVR, APID_RFSCAN, EVR_SEVERITY, NA, PACKETS, checked_limits
 
 
 class Decommutator:
@@ -18,6 +18,8 @@ class Decommutator:
     def packet_name(apid: int) -> str:
         if apid == APID_EVR:
             return "EVR"
+        if apid == APID_RFSCAN:
+            return "RFSCAN"
         return PACKETS.get(apid, {}).get("name", f"APID_{apid:03X}")
 
     def expected_length(self, apid: int) -> int | None:
@@ -31,6 +33,12 @@ class Decommutator:
             return {"severity": EVR_SEVERITY.get(d[0], str(d[0])),
                     "event_id": int.from_bytes(d[1:3], "big"),
                     "text": d[3:].decode("ascii", "replace")}
+        if pkt.apid == APID_RFSCAN:
+            d = pkt.user_data
+            n = d[1]
+            noise = [None if b == 0x80 else (b - 256 if b > 127 else b) for b in d[4:4 + n]]
+            return {"first_ch": d[0], "count": n, "duration_ms": int.from_bytes(d[2:4], "big"),
+                    "noise": noise}
         spec = PACKETS.get(pkt.apid)
         if spec is None:
             raise KeyError(f"unknown APID 0x{pkt.apid:03X}")

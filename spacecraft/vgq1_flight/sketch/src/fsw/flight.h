@@ -13,6 +13,7 @@
 #pragma once
 #include <Arduino.h>
 #include "../config.h"
+#include "../ccsds/sdls.h"
 #include "../ccsds/tc.h"
 #include "../ccsds/tm.h"
 #include "../drivers/e22.h"
@@ -35,6 +36,7 @@ class Flight {
 
   // ---- EGSE (Linux side) hooks, executed in the loop thread via provide_safe ----
   void egse_set_partition(int p);
+  void egse_set_sdls_sn(uint32_t sn) { sdls_.set_last_sn(sn); }
   bool egse_hardline_cltu(const String& hex);   // umbilical commanding for bench I&T
 
  private:
@@ -53,6 +55,9 @@ class Flight {
   void send_next_frame(uint32_t now);
   uint32_t frame_period_ms() const;
   void apply_radio_config(uint32_t now);
+  void service_scan(uint32_t now);
+  void enter_hibernate(uint16_t beacon_s);
+  void exit_hibernate(const char* why);
   void process_tc(const uint8_t* info, size_t n, bool hardline);
 
   // commanding
@@ -117,10 +122,24 @@ class Flight {
   bool tx_inhibit_ = false;
   uint32_t tx_inhibit_until_ms_ = 0;
   bool radio_cfg_ok_ = false, radio_reconfig_pending_ = false;
-  uint8_t pending_air_rate_ = 0xFF;
-  uint8_t rate_change_after_frames_ = 0;
-  uint8_t revert_air_rate_ = 0xFF;
+  // Coordinated radio change (air rate / channel): applied after N more frames at
+  // the old setting, reverted automatically unless the ground proves it followed
+  // by getting a valid TC through on the new setting.
+  E22Config pending_cfg_, revert_cfg_;
+  bool pending_cfg_valid_ = false, revert_armed_ = false;
+  uint8_t cfg_change_after_frames_ = 0;
   uint32_t revert_deadline_ms_ = 0, revert_window_ms_ = 0;
+  // RF spectrum survey
+  enum ScanState : uint8_t { SCAN_IDLE, SCAN_SET, SCAN_SETTLE, SCAN_WAIT_REPLY };
+  ScanState scan_state_ = SCAN_IDLE;
+  uint8_t scan_first_ = 0, scan_last_ = 0, scan_ch_ = 0;
+  int8_t scan_noise_[84];
+  uint32_t scan_t0_ = 0, scan_step_ms_ = 0;
+  // Wake-on-Radio hibernation
+  bool hibernating_ = false;
+  uint16_t beacon_s_ = 600;
+  uint8_t mode_before_hib_ = MODE_SAFE;
+  ccsds::Sdls sdls_;
   bool timecorr_request_ = false;
   bool reboot_pending_ = false;
   uint8_t reboot_after_frames_ = 0;

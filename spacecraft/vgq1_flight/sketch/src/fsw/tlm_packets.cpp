@@ -30,6 +30,7 @@ size_t pack_hk(const HkPacket& p, uint8_t* out) {
   w.u16(p.loop_max_ms); w.u16(p.loop_overruns); w.u16(p.i2c_errors);
   w.u16(p.ssr_fill_permille); w.u16(p.ssr_dropped);
   w.u16(p.vc0_backlog); w.u16(p.vc1_backlog); w.u16(p.vc2_backlog);
+  w.u8(p.sdls_enabled); w.u16(p.sdls_auth_fail); w.u32(p.sdls_last_sn);
   return w.n;
 }
 
@@ -98,6 +99,14 @@ size_t pack_env(const EnvPacket& p, uint8_t* out) {
   w.f32(p.nme_p_hPa); w.i16(p.nme_t_cC); w.u16(p.nme_rh_cpct); w.u16(p.nme_iaq);
   w.u32(p.nme_co2eq_ppm); w.f32(p.nme_bvoc_ppm); w.u8(p.nme_accuracy);
   w.f32(p.veml_lux);
+  return w.n;
+}
+
+size_t pack_rfscan(uint8_t first_ch, uint8_t count, uint16_t duration_ms, const int8_t* noise,
+                   uint8_t* out) {
+  W w(out);
+  w.u8(first_ch); w.u8(count); w.u16(duration_ms);
+  for (uint8_t i = 0; i < count; ++i) w.i8(noise[i]);
   return w.n;
 }
 
