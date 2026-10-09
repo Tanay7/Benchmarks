@@ -26,7 +26,7 @@ enum Opcode : uint8_t {
 
 enum CmdError : uint8_t {
   CE_OK = 0, CE_UNKNOWN_OPCODE = 1, CE_BAD_LENGTH = 2, CE_BAD_ARGUMENT = 3,
-  CE_NOT_ALLOWED = 4, CE_HARDWARE = 5, CE_BAD_MAGIC = 6,
+  CE_HARDWARE = 5, CE_BAD_MAGIC = 6,      // 4 retired (was NOT_ALLOWED_IN_MODE)
 };
 
 enum CmdStage : uint8_t { STAGE_ACCEPTED = 1, STAGE_EXECUTED = 2, STAGE_FAILED = 3 };

@@ -149,17 +149,12 @@ class SimSpacecraft:
         self.tx_duty_hist = deque(maxlen=60)
         self.evr_q: list[tuple[int, int, str]] = [(1, 0x0001, "BOOT VGQ-1 FSW 1.0 (SIMULATOR)")]
         self.rfscan_req = None
-        self.ping_tag = 0
 
     # ================================================================ RCU (sim)
     def rcu_set_mode(self, mode: int) -> bool:
         self.g_mode = mode & 3
         return True
 
-    def rcu_aux(self) -> bool:
-        return True
-
-    # ===================================================== GDS-facing interface
     def read(self) -> bytes:
         now = self.clock()
         self._run_spacecraft(now)

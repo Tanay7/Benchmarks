@@ -22,10 +22,6 @@ class Decommutator:
             return "RFSCAN"
         return PACKETS.get(apid, {}).get("name", f"APID_{apid:03X}")
 
-    def expected_length(self, apid: int) -> int | None:
-        s = self._fmt.get(apid)
-        return s.size if s else None
-
     def decode(self, pkt: SpacePacket) -> dict:
         """Returns {field: engineering value}. Unavailable sentinels map to None."""
         if pkt.apid == APID_EVR:

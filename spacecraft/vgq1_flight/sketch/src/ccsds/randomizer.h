@@ -15,6 +15,4 @@
 namespace ccsds {
 // XORs `len` octets in place with the sequence (restarting at bit 0).
 void randomize(uint8_t* data, size_t len);
-// Returns the i-th octet of the 255-octet periodic sequence (for tests).
-uint8_t randomizer_octet(size_t i);
 }

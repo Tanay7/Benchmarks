@@ -62,8 +62,9 @@ int main(int argc, char** argv) {
 
   // ---- Randomizer --------------------------------------------------------------
   const uint8_t prefix[5] = {0xFF, 0x48, 0x0E, 0xC0, 0x9A};
-  bool rok = true;
-  for (int i = 0; i < 5; ++i) rok &= randomizer_octet(i) == prefix[i];
+  uint8_t zeros[5] = {0, 0, 0, 0, 0};
+  randomize(zeros, sizeof zeros);              // randomizing zeros yields the sequence itself
+  const bool rok = std::memcmp(zeros, prefix, 5) == 0;
   CHECK(rok, "randomizer prefix FF 48 0E C0 9A (CCSDS 131.0-B)");
 
   // ---- Dual basis tables -------------------------------------------------------

@@ -22,7 +22,7 @@ FARM_STATES = {1: "OPEN", 2: "WAIT", 3: "LOCKOUT"}
 EVR_SEVERITY = {0: "DIAG", 1: "INFO", 2: "WARN", 3: "ERROR", 4: "FATAL"}
 CMD_STAGES = {1: "ACCEPTED", 2: "EXECUTED", 3: "FAILED"}
 CMD_ERRORS = {0: "OK", 1: "UNKNOWN_OPCODE", 2: "BAD_LENGTH", 3: "BAD_ARGUMENT",
-              4: "NOT_ALLOWED_IN_MODE", 5: "HARDWARE_FAULT", 6: "BAD_MAGIC"}
+              5: "HARDWARE_FAULT", 6: "BAD_MAGIC"}
 AIR_RATES_BPS = {0: 2400, 1: 2400, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}  # E22-400T37S
 
 FDIR_BITS = ["RADIO_CFG", "AUX_TIMEOUT", "PA_OVERTEMP", "AVI_OVERTEMP", "CMD_LOSS", "I2C_BUS",
@@ -30,11 +30,8 @@ FDIR_BITS = ["RADIO_CFG", "AUX_TIMEOUT", "PA_OVERTEMP", "AVI_OVERTEMP", "CMD_LOS
              "TX_INHIBIT", "RATE_REVERT", "SDLS_AUTH", "HIBERNATE", "RADIO_FAULT"]
 SENSOR_BITS = ["NICLA_ME", "ME_QUAT", "ME_ACC", "ME_GYRO", "ME_MAG", "ME_BARO", "ME_BSEC",
                "NICLA_ENV", "ENV_TH", "ENV_IAQ", "ENV_OAQ", "AS7265X", "RM3100_OB", "RM3100_IB"]
-# Instruments that can be switched with the SENSORS command (enable-mask bits).
-SENSOR_ENABLE_BITS = {"NICLA_ME": 0, "NICLA_ENV": 7, "AS7265X": 11, "RM3100_OB": 12, "RM3100_IB": 13}
 RADIO_FAULTS = {0: "NONE", 1: "UNDER-VOLTAGE", 2: "OVER-VOLTAGE", 3: "OVER-TEMPERATURE",
                 4: "OVER-VOLTAGE+OVER-TEMPERATURE"}
-AS7265X_GAINS = {0: "1x", 1: "3.7x", 2: "16x", 3: "64x"}
 
 AS7265X_NM = [410, 435, 460, 485, 510, 535, 560, 585, 610, 645, 680, 705, 730, 760, 810, 860,
               900, 940]
@@ -164,7 +161,6 @@ PACKETS: dict[int, dict] = {
     ]},
 }
 
-PACKETS_BY_NAME = {v["name"]: k for k, v in PACKETS.items()}
 APID_EVR = 0x012
 APID_RFSCAN = 0x015          # variable length: first_ch u8, count u8, duration_ms u16, noise i8[count]
 

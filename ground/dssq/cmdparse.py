@@ -18,6 +18,7 @@ import struct
 from dataclasses import dataclass
 
 from .ccsds.packets import build_packet
+from .ccsds.tc import bc_set_vr, bc_unlock
 from .dictionary import COMMANDS, DIRECTIVES
 
 APID_TC = 0x0C0
@@ -73,14 +74,13 @@ def parse(text: str) -> ParsedCommand:
         if mn == "UNLOCK":
             if len(toks) != 1:
                 raise CommandError("UNLOCK takes no argument")
-            return ParsedCommand("UNLOCK", "BC", "UNLOCK", None, {}, False, b"\x00")
+            return ParsedCommand("UNLOCK", "BC", "UNLOCK", None, {}, False, bc_unlock())
         if len(toks) != 2:
             raise CommandError("usage: SETVR <0-255>")
         vr = _num(toks[1])
         if not 0 <= vr <= 255:
             raise CommandError("V(R) must be 0..255")
-        return ParsedCommand(f"SETVR {vr}", "BC", "SETVR", None, {"vr": vr}, False,
-                             bytes([0x82, 0x00, vr]))
+        return ParsedCommand(f"SETVR {vr}", "BC", "SETVR", None, {"vr": vr}, False, bc_set_vr(vr))
     c = COMMANDS.get(mn)
     if c is None:
         raise CommandError(f"unknown command '{mn}' (try HELP)")

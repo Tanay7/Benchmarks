@@ -57,10 +57,12 @@ def build_cltu(frame: bytes) -> bytes:
 
 
 def bc_unlock() -> bytes:
+    """COP-1 Unlock control command (CCSDS 232.0-B-4, Type-BC data field)."""
     return b"\x00"
 
 
 def bc_set_vr(vr: int) -> bytes:
+    """COP-1 Set V(R) control command."""
     return bytes([0x82, 0x00, vr & 0xFF])
 
 

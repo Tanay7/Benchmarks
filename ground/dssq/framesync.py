@@ -33,7 +33,6 @@ class RawCadu:
     rssi_dbm: int | None
     ert: float              # UNIX time the last octet of the packet was read
     asm_errors: int
-    sync_state: str
 
 
 @dataclass
@@ -129,7 +128,7 @@ class FrameSynchronizer:
         self.stats["cadus"] += 1
         self.stats["asm_found"] += 1
         self.stats["asm_bit_errors"] += errors
-        return RawCadu(cadu, rssi, now, errors, self.state)
+        return RawCadu(cadu, rssi, now, errors)
 
     def _step(self, now):
         b = self.buf

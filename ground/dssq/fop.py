@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from .ccsds.tc import build_cltu, build_tc_frame
 from .ccsds.tm import Clcw
 from .cmdparse import ParsedCommand, tc_packet
+from .dictionary import CMD_ERRORS
 
 
 @dataclass
@@ -42,7 +43,6 @@ class CommandRecord:
     t_accepted: float | None = None
     t_done: float | None = None
     detail: str = ""
-    ground_tag: int | None = None
     farm_b_at_tx: int | None = None    # bypass frames are confirmed by the FARM-B counter
     history: list = field(default_factory=list)
 
@@ -80,15 +80,12 @@ class Fop1:
         self.all: list[CommandRecord] = []
         self._ids = itertools.count(1)
         self._tc_seq = 0
-        self._last_send = 0.0
         self.events: list[tuple[float, str]] = []
 
     # ----------------------------------------------------------------- operator
     def submit(self, cmd: ParsedCommand, now: float | None = None) -> CommandRecord:
         now = now or time.time()
         r = CommandRecord(next(self._ids), cmd, now)
-        if cmd.mnemonic == "PING":
-            r.ground_tag = cmd.args.get("tag")
         r.set("QUEUED", t=now)
         self.all.append(r)
         if cmd.kind in ("BD", "BC"):
@@ -153,7 +150,6 @@ class Fop1:
         if r.t_accepted is None:
             r.t_accepted = now
         r.t_done = now
-        from .dictionary import CMD_ERRORS
         r.set(stage, CMD_ERRORS.get(v.get("error_code"), str(v.get("error_code"))), now)
         self.sent = [s for s in self.sent if s is not r]
         return r

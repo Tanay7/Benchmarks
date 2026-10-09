@@ -75,17 +75,6 @@ bool E22::command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len
   return got == reply_len;
 }
 
-bool E22::read_config(E22Config& c) {
-  const Mode prev = mode_;
-  if (!set_mode(CONFIG)) return false;
-  const uint8_t cmd[3] = {0xC1, 0x00, 0x09};
-  uint8_t r[12];
-  const bool ok = command(cmd, 3, r, 12, 1000) && r[0] == 0xC1 && r[1] == 0x00 && r[2] == 0x09;
-  if (ok) c.from_regs(r + 3);
-  set_mode(prev == CONFIG ? NORMAL : prev);
-  return ok;
-}
-
 bool E22::read_product_info(uint8_t info[7]) {
   const Mode prev = mode_;
   if (!set_mode(CONFIG)) return false;

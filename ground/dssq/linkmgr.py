@@ -32,7 +32,6 @@ class LinkManager:
         self.last_eval = 0.0
         self.last_action = -1e9
         self.recommendation: dict | None = None
-        self._frames_prev = None
 
     def evaluate(self, now: float, rx: dict, rate_code: int, power_code: int | None) -> dict | None:
         if self.mode == "OFF" or now - self.last_eval < self.period_s:

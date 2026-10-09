@@ -61,7 +61,6 @@ class E22 {
 
   // Writes, then reads back and compares. Leaves the module in NORMAL mode.
   bool configure(const E22Config& c, bool save);
-  bool read_config(E22Config& c);
   bool read_product_info(uint8_t info[7]);
 
   // Queues `n` octets for transmission (non-blocking: the core UART TX ring is

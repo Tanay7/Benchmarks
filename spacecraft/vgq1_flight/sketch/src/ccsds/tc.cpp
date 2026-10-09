@@ -58,7 +58,7 @@ size_t cltu_decode(const uint8_t* in, size_t len, uint8_t* out, size_t cap, BchS
   // given the packetised LoRa link).
   size_t i = 0;
   for (; i + 1 < len; ++i)
-    if (in[i] == 0xEB && in[i + 1] == 0x90) break;
+    if (in[i] == (uint8_t)(kCltuStart >> 8) && in[i + 1] == (uint8_t)kCltuStart) break;
   if (i + 1 >= len) return 0;
   i += 2;
 

@@ -26,6 +26,8 @@ except ImportError:  # the simulator and tests do not need pyserial
 AIR_RATES = {0: "2.4k", 1: "2.4k", 2: "2.4k", 3: "4.8k", 4: "9.6k", 5: "19.2k", 6: "38.4k", 7: "62.5k"}
 UART_RATES = {0: 1200, 1: 2400, 2: 4800, 3: 9600, 4: 19200, 5: 38400, 6: 57600, 7: 115200}
 SUBPKT = {0: 240, 1: 128, 2: 64, 3: 32}
+# Ambient-noise RSSI query, normal mode (needs REG1 bit 5). Reply: C1 00 02 <noise> <last RSSI>
+NOISE_QUERY = bytes([0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02])
 
 
 def regs_from_cfg(c: dict) -> bytes:
@@ -69,10 +71,6 @@ class E22Serial:
     def write(self, data: bytes):
         self.ser.write(data)
         self.ser.flush()
-
-    def request_noise(self):
-        """Ambient-noise RSSI query (requires REG1 bit 5). Reply: C1 00 02 <noise> <last>."""
-        self.write(bytes([0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02]))
 
     def close(self):
         self.ser.close()

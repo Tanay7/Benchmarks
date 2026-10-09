@@ -40,11 +40,12 @@ from .ccsds.tm import decode_codeblock
 from .cmdparse import CommandError, help_text, parse
 from .config import load_config
 from .decom import Decommutator
-from .dictionary import (AIR_RATES_BPS, APID_EVR, CMD_STAGES, FDIR_BITS, MODES, PACKETS,
-                         SENSOR_BITS)
+from .dictionary import (AIR_RATES_BPS, APID_EVR, CMD_STAGES, FARM_STATES, FDIR_BITS, MODES,
+                         RADIO_FAULTS, RESET_CAUSES, SENSOR_BITS)
 from .fop import Fop1
 from .framesync import RADIO_FAULTS, FrameSynchronizer, NoiseReply, RadioFault, RawCadu
 from .linkmgr import LinkManager
+from .radio.e22 import NOISE_QUERY
 from .rxstats import ReceiverStats, Window
 
 log = logging.getLogger("dssq")
@@ -312,7 +313,7 @@ class GroundStation:
             self.noise_wait_until = now + 1.0
             self.sync.expect_noise_reply = True
             self.rx.noise_queries += 1
-            self.outbox.append(bytes([0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02]))
+            self.outbox.append(NOISE_QUERY)
 
     def _radiate(self, cltu: bytes, now: float, source: str):
         self.outbox.append(cltu)
@@ -563,7 +564,10 @@ class GroundStation:
                             "fdir": [n for i, n in enumerate(FDIR_BITS) if fdir >> i & 1],
                             "sensors_ok": [n for i, n in enumerate(SENSOR_BITS) if sns >> i & 1],
                             "sensors_missing": [n for i, n in enumerate(SENSOR_BITS) if not sns >> i & 1],
-                            "air_rate_bps": AIR_RATES_BPS.get(self.rx.sc_rf.get("air_rate_code"))},
+                            "air_rate_bps": AIR_RATES_BPS.get(self.rx.sc_rf.get("air_rate_code")),
+                            "reset_cause": RESET_CAUSES.get(hk.get("reset_cause")),
+                            "farm_state": FARM_STATES.get(hk.get("farm_state")),
+                            "radio_fault": RADIO_FAULTS.get(hk.get("radio_fault"))},
                 "time": {"partition": self.partition, "last_sclk": self.last_sclk,
                          "scet_of_last_sclk": self.corr.scet(self.last_sclk) if self.last_sclk else None,
                          "corr_samples": len(self.corr.samples), "drift_ppm": self.corr.drift_ppm,

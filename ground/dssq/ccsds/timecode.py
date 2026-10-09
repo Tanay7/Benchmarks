@@ -37,9 +37,6 @@ class CucTime:
         coarse = int(s)
         return cls(coarse, int(round((s - coarse) * 65536)) & 0xFFFF)
 
-    def sclk_string(self, partition: int) -> str:
-        """JPL-style SCLK string: partition/coarse.fine (fine in 1/65536 ticks)."""
-        return f"{partition}/{self.coarse:010d}.{self.fine:05d}"
 
 
 class SclkCorrelator:

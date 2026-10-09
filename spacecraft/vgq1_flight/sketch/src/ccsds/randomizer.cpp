@@ -26,11 +26,6 @@ void build() {
 }
 }  // namespace
 
-uint8_t randomizer_octet(size_t i) {
-  if (!g_ready) build();
-  return g_seq[i % 255];
-}
-
 void randomize(uint8_t* data, size_t len) {
   if (!g_ready) build();
   for (size_t i = 0; i < len; ++i) data[i] ^= g_seq[i % 255];

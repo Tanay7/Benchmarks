@@ -24,8 +24,6 @@ inline void delayMicroseconds(unsigned int) {}
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
 inline int digitalRead(int) { return 1; }
-inline int analogRead(int) { return 0; }
-inline void analogReadResolution(int) {}
 inline void noInterrupts() {}
 inline void interrupts() {}
 inline void yield() {}

@@ -71,7 +71,6 @@ static const size_t   kTcMaxFrameLen = 64;        // mission limit (fits one E22
 
 // ---- Big-endian helpers -------------------------------------------------------
 inline void put_u16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
-inline void put_u24(uint8_t* p, uint32_t v) { p[0] = (uint8_t)(v >> 16); p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)v; }
 inline void put_u32(uint8_t* p, uint32_t v) {
   p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
 }

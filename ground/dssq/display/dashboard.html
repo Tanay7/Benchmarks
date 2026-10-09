@@ -275,7 +275,8 @@ function framesPackets(){const vc=S.vc;rows("fp-vc",Object.entries(vc).map(([k,v
   rows("fp-clcw",[["Report value N(R)",fi(c.nr)],["Lockout",{v:c.lockout?"YES":"no",c:c.lockout?"bad":""}],["Retransmit",c.retransmit?"YES":"no"],["FARM-B counter",fi(c.farm_b)],
     ["FOP V(S)",fi(c.vs)],["Outstanding AD frames",fi(c.outstanding)],["Queued",fi(c.queued)],["FOP suspended",{v:c.suspended?"YES":"no",c:c.suspended?"warn":""}]]);}
 function spacecraft(){tlmTable("sc-hk","HK");tlmTable("sc-rf","RF");const d=S.decoded;
-  rows("sc-fdir",[["Mode",d.mode||"—"],["FDIR active",{v:d.fdir.length?d.fdir.join(", "):"none",c:d.fdir.length?"warn":"ok"}],
+  rows("sc-fdir",[["Mode",d.mode||"—"],["Last reset cause",d.reset_cause||"—"],["FARM-1 state",d.farm_state||"—"],
+    ["E22 self-report",{v:d.radio_fault||"—",c:d.radio_fault&&d.radio_fault!=="NONE"?"bad":""}],["FDIR active",{v:d.fdir.length?d.fdir.join(", "):"none",c:d.fdir.length?"warn":"ok"}],
     ["Sensors OK",d.sensors_ok.join(" ")||"—"],["Sensors missing",{v:d.sensors_missing.join(" ")||"none",c:d.sensors_missing.length?"warn":""}],["Downlink air rate",fi(d.air_rate_bps,"bit/s")]]);
   $("sc-anom").innerHTML=S.anomalies.slice().reverse().map(a=>`<div>${utc(a.t)} ${a.param} = ${f(a.value,3)} (μ ${f(a.mean,3)}, σ ${f(a.sigma,3)}, z ${f(a.z,1)})</div>`).join("")||"<div class=dim>none</div>";}
 function q2e(w,x,y,z){const yaw=Math.atan2(2*(w*z+x*y),1-2*(y*y+z*z)),pitch=Math.asin(Math.max(-1,Math.min(1,2*(w*y-z*x)))),roll=Math.atan2(2*(w*x+y*z),1-2*(x*x+y*y));return [yaw,pitch,roll].map(r=>r*180/Math.PI)}

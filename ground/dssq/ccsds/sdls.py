@@ -41,9 +41,6 @@ class SdlsSender:
             self.sn_file.write_text(str(self.sn))
         return self.sn
 
-    def overhead(self) -> int:
-        return SDLS_HDR_LEN + SDLS_MAC_LEN if self.enabled else 0
-
 
 class SdlsReceiver:
     """Reference verifier (used by the software spacecraft simulator and tests)."""
