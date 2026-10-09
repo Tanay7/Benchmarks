@@ -31,7 +31,7 @@ check() {   # $1 = file, rest = extra flags
 SK="$ROOT/spacecraft/vgq1_flight/sketch"
 check "$SK/sketch.ino"
 while IFS= read -r f; do check "$f"; done < <(find "$SK/src" -name '*.cpp' | sort)
-FP="$ROOT/ground/frontpanel/dssq_frontpanel/dssq_frontpanel.ino"
+FP="$ROOT/ground/station_io/sketch/sketch.ino"
 [[ -f "$FP" ]] && check "$FP"
 rm -f /tmp/fwcheck.$$
 exit $fail

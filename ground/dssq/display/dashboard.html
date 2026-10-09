@@ -271,7 +271,7 @@ function framesPackets(){const vc=S.vc;rows("fp-vc",Object.entries(vc).map(([k,v
     ["APID","count","seq gaps","lost","last seq","age","latency mean s","min","max","size B","VC"]);
   const t=S.time;rows("fp-time",[["SCLK partition (boot #)",fi(t.partition)],["Last SCLK",f(t.last_sclk,3,"s")],["SCET of last SCLK",utc(t.scet_of_last_sclk)],
     ["Correlation samples",fi(t.corr_samples)],["Clock drift",f(t.drift_ppm,2,"ppm")],["Fit residual RMS",f(t.residual_rms_ms,2,"ms")],["OWLT (configured)",f(t.owlt_s*1e6,2,"µs")]]);
-  const fr=Object.values(S.tlm).find(p=>p.values&&p.values.farm_vr!==undefined);const c=S.cop;
+  const c=S.cop;
   rows("fp-clcw",[["Report value N(R)",fi(c.nr)],["Lockout",{v:c.lockout?"YES":"no",c:c.lockout?"bad":""}],["Retransmit",c.retransmit?"YES":"no"],["FARM-B counter",fi(c.farm_b)],
     ["FOP V(S)",fi(c.vs)],["Outstanding AD frames",fi(c.outstanding)],["Queued",fi(c.queued)],["FOP suspended",{v:c.suspended?"YES":"no",c:c.suspended?"warn":""}]]);}
 function spacecraft(){tlmTable("sc-hk","HK");tlmTable("sc-rf","RF");const d=S.decoded;

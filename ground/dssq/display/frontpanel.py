@@ -1,7 +1,7 @@
 """Station I/O + Radio Control Unit link (VENTUNO Q Linux <-> its own MCU).
 
 The GDS runs as an ordinary Linux service on the VENTUNO Q's Dragonwing CPU and
-talks to the board's STM32H5 (sketch ground/frontpanel/dssq_frontpanel) through
+talks to the board's STM32H5 (App Lab app ground/station_io) through
 the Arduino Router: `pip install arduino-router-bridge`, socket
 unix:///var/run/arduino-router.sock. No App Lab container is required. The web
 dashboard is the station's only display; the MCU provides the CardKB keyboards,
