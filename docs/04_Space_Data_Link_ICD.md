@@ -175,9 +175,9 @@ SCLK -> SCET by least squares per partition (drift in ppm and residual RMS on th
 | UNO Q | `tm_cadu` (notify) | MCU -> Linux EGSE | CADU, hex (archived) |
 | UNO Q | `sc_status`, `sc_evr`, `sc_boot`, `sdls_sn` (notify) | MCU -> EGSE | JSON status, EVR text, reset cause, SN |
 | UNO Q | `set_partition`, `set_sdls_sn`, `hl_cltu` (provide_safe) | EGSE -> MCU | boot count, SN restore, hardline CLTU (<= 100 octets: 256-octet inbound RPC buffer) |
-| VENTUNO Q | `fp_line` (provide_safe) | GDS -> MCU | `S|aos|alarm|uplink`, `Q|confirm-id` |
+| VENTUNO Q | `fp_line` (provide_safe) | GDS -> MCU | `S\|aos\|alarm\|uplink`, `Q\|confirm-id` |
 | VENTUNO Q | `rcu_mode` (provide_safe, called) | GDS -> MCU | E22 mode 0-3, returns AUX |
-| VENTUNO Q | `fp_in` (notify) | MCU -> GDS | `K|typed`, `CMD|text`, `CONFIRM|id`, `AUTH|id`, `H|hello` |
+| VENTUNO Q | `fp_in` (notify) | MCU -> GDS | `K\|typed`, `CMD\|text`, `CONFIRM\|id`, `AUTH\|id`, `H\|hello` |
 
 `provide_safe` handlers run in the sketch's loop thread (Arduino_RouterBridge 0.4.3; plain
 `provide` handlers would run in a 500-octet-stack bridge thread). The flight loop never calls

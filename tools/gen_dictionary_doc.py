@@ -27,6 +27,11 @@ CODE = {"B": "u8", "b": "i8", "H": "u16", "h": "i16", "I": "u32", "i": "i32", "f
 SEV = ["DIAG", "INFO", "WARN", "ERROR", "FATAL"]
 
 
+def _c(text) -> str:
+    """Escapes "|" so free text cannot split a Markdown table cell."""
+    return str(text).replace("|", "\\|")
+
+
 def packets() -> list[str]:
     out = []
     for apid, spec in PACKETS.items():
@@ -38,7 +43,7 @@ def packets() -> list[str]:
         for i, (name, code, scale, unit, desc, lim) in enumerate(spec["fields"]):
             lim_s = " / ".join("-" if x is None else f"{x:g}" for x in lim) if lim else ""
             sc = "raw" if scale is None else f"{scale:g}"
-            out.append(f"| {i} | {off} | `{name}` | {CODE[code]} | {sc} | {unit} | {lim_s} | {desc} |")
+            out.append(f"| {i} | {off} | `{name}` | {CODE[code]} | {sc} | {_c(unit)} | {lim_s} | {_c(desc)} |")
             off += struct.calcsize(">" + code)
         out.append("")
     return out
@@ -48,9 +53,9 @@ def commands() -> list[str]:
     out = ["| Mnemonic | Opcode | Arguments (name: type, range) | Hazardous | Description |",
            "|---|---|---|---|---|"]
     for c in sorted(COMMANDS.values(), key=lambda c: c.opcode):
-        args = ", ".join(f"{n}: {CODE[t]} {lo}..{hi}" + (f" ({'/'.join(e)})" if e else "")
+        args = ", ".join(f"{n}: {CODE[t]} {lo}..{hi}" + (f" ({', '.join(f'{k}={v}' for k, v in e.items())})" if e else "")
                          for n, t, lo, hi, e in c.args) or "-"
-        out.append(f"| `{c.mnemonic}` | 0x{c.opcode:02X} | {args} | {'YES' if c.hazardous else ''} | {c.desc} |")
+        out.append(f"| `{c.mnemonic}` | 0x{c.opcode:02X} | {args} | {'YES' if c.hazardous else ''} | {_c(c.desc)} |")
     return out
 
 
@@ -63,7 +68,7 @@ def evrs() -> list[str]:
     out = ["| Event id | Severity | Text (printf format) |", "|---|---|---|"]
     for k in sorted(rows):
         sev, text = rows[k]
-        out.append(f"| {k} | {sev} | `{text}` |")
+        out.append(f"| {k} | {sev} | `{_c(text)}` |")
     return out
 
 
@@ -107,16 +112,16 @@ def main():
         "### HK.sensor_health (and the SENSORS enable mask: bits 0, 7, 11, 12, 13)", "",
         "| Bit | Name |", "|---|---|", *[f"| {i} | {n} |" for i, n in enumerate(SENSOR_BITS)], "",
         "### HK.radio_fault (E22 abnormal-status self-report)", "",
-        "| Code | Meaning |", "|---|---|", *[f"| {k} | {v} |" for k, v in RADIO_FAULTS.items()], "",
+        "| Code | Meaning |", "|---|---|", *[f"| {k} | {_c(v)} |" for k, v in RADIO_FAULTS.items()], "",
         "## 4 Telecommands (uplinked; APID 0x0C0, user data = opcode + arguments)", "",
         "Typed identically on the web console and on CardKB #1. Hazardous commands need CONFIRM (and "
         "2nd-operator AUTH when the two-person rule is enabled). Prefix any command with `BD` to send it "
         "as a COP-1 bypass (Type-BD) frame.", "",
         *commands(), "",
         "### COP-1 control directives (Type-BC frames)", "", "| Directive | Meaning |", "|---|---|",
-        *[f"| `{k}` | {v} |" for k, v in DIRECTIVES.items()], "",
+        *[f"| `{k}` | {_c(v)} |" for k, v in DIRECTIVES.items()], "",
         "### Ground-station directives (executed by the GDS / Radio Control Unit)", "",
-        "| Directive | Meaning |", "|---|---|", *[f"| `{k}` | {v} |" for k, v in GROUND_DIRECTIVES.items()], "",
+        "| Directive | Meaning |", "|---|---|", *[f"| `{k}` | {_c(v)} |" for k, v in GROUND_DIRECTIVES.items()], "",
         "## 5 Event reports (EVR, APID 0x012)", "",
         "Extracted from `flight.cpp`. `+n` = base id plus a code (e.g. the TC rejection reason).", "",
         *evrs(), "",

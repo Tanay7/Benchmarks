@@ -274,12 +274,12 @@ Typed identically on the web console and on CardKB #1. Hazardous commands need C
 | Mnemonic | Opcode | Arguments (name: type, range) | Hazardous | Description |
 |---|---|---|---|---|
 | `NOOP` | 0x01 | - |  | No operation (link check, advances counters) |
-| `MODE` | 0x02 | mode: u8 1..4 (SAFE/CRUISE/ENCOUNTER/ENC/TEST) |  | Set flight-software mode: SAFE | CRUISE | ENCOUNTER | TEST |
+| `MODE` | 0x02 | mode: u8 1..4 (SAFE=1, CRUISE=2, ENCOUNTER=3, ENC=3, TEST=4) |  | Set flight-software mode: SAFE \| CRUISE \| ENCOUNTER \| TEST |
 | `TXPWR` | 0x03 | code: u8 0..3 |  | Set E22 TX power code (NO effect on the E22-400T37S: every code is 37 dBm) |
 | `AIRRATE` | 0x04 | code: u8 0..7, revert_s: u16 60..3600 | YES | Change air data rate (T37S: 0-2 = 2.4k, 3 = 4.8k, 4 = 9.6k ... 7 = 62.5k); spacecraft reverts after revert_s unless a TC is received |
 | `FPERIOD` | 0x05 | ms: u16 500..60000 |  | Requested frame period (flight enforces the duty-cycle limit) |
 | `PKTRATE` | 0x06 | apid: u16 16..35, period_s: u16 0..3600 |  | Set generation period of a telemetry packet (0 = off) |
-| `PLAYBACK` | 0x07 | start: u8 0..1 (START/STOP) |  | Start/stop solid-state-recorder playback on VC2 |
+| `PLAYBACK` | 0x07 | start: u8 0..1 (START=1, STOP=0) |  | Start/stop solid-state-recorder playback on VC2 |
 | `SSRCLEAR` | 0x08 | - | YES | Erase the solid-state recorder |
 | `PING` | 0x09 | tag: u32 0..4294967295 |  | Echo tag in CMDVER (round-trip time measurement) |
 | `SENSORS` | 0x0A | mask: u16 0..65535 |  | Instrument enable mask (b0 Nicla ME, b7 Nicla Env, b11 AS7265X, b12/b13 RM3100) |
@@ -311,7 +311,7 @@ Typed identically on the web console and on CardKB #1. Hazardous commands need C
 | `WAKE` | WAKE - wake a hibernating spacecraft (WOR-transmitter MODE SAFE, needs RCU) |
 | `LINKRATE` | LINKRATE <code> - coordinated air-rate change, both ends (needs RCU) |
 | `LINKCHAN` | LINKCHAN <ch> - coordinated channel change, both ends (needs RCU) |
-| `LINKMGR` | LINKMGR OFF|ADVISE|AUTO - adaptive link manager |
+| `LINKMGR` | LINKMGR OFF\|ADVISE\|AUTO - adaptive link manager |
 | `RADIO` | RADIO - read back and show the ground E22 configuration (needs RCU) |
 
 ## 5 Event reports (EVR, APID 0x012)

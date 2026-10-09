@@ -85,11 +85,11 @@ this design; where a datasheet gives no value, the test *is* the measurement.
 | ID | Test | Method | Pass / record |
 |---|---|---|---|
 | T-SC-01 | Nicla Sense ME attitude | rotate the board 90 deg about each axis | fusion and TRIAD Euler angles follow; their difference (SCIENCE tab) stays a few degrees when still |
-| T-SC-02 | Accelerometer | board still, each axis up | |a| = 1.000 +/- 0.02 g |
+| T-SC-02 | Accelerometer | board still, each axis up | magnitude of a = 1.000 +/- 0.02 g |
 | T-SC-03 | Spectrometer | cover / daylight / `SPECCFG 2 50 1` (white lamp) | spectrum changes as expected; lamp state shown |
 | T-SC-04 | Nicla Sense Env | breathe near it | humidity and eCO2/TVOC rise |
 | T-SC-05 | RM3100 noise | `MAGCC 200`, quiet room, 10 min | RMS fluctuation (MAG `ob_rms`) record; field magnitude matches the WMM total field for the site within a few uT (hard-iron of the boom area) |
-| T-SC-06 | **BMM150 scale** | rotate the Nicla slowly through all orientations | MAG `body` |B| stays constant and equals the site's WMM total field; if it differs by a factor, set `kAruMagUtPerLsb` = WMM total / measured counts magnitude |
+| T-SC-06 | **BMM150 scale** | rotate the Nicla slowly through all orientations | MAG `body` field magnitude stays constant and equals the site's WMM total field; if it differs by a factor, set `kAruMagUtPerLsb` = WMM total / measured counts magnitude |
 | T-SC-07 | PA-off sampling | ENCOUNTER, 1 h | MAG `flags` bit 0 never set |
 
 ### 2.5 Fault protection
