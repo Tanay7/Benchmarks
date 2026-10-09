@@ -21,6 +21,7 @@ enum Opcode : uint8_t {
   OP_RFSCAN = 0x13,      // u8 first_ch, u8 last_ch : ambient-noise spectrum survey
   OP_HIBERNATE = 0x14,   // u16 beacon_s : Wake-on-Radio hibernation with periodic beacon
   OP_CHANNEL = 0x15,     // u8 ch, u16 revert_s : coordinated channel change (auto-revert)
+  OP_SPECCFG = 0x16,     // u8 gain 0..3, u8 int_cycles 1..255, u8 lamps 0..7 : AS7265X setup
 };
 
 enum CmdError : uint8_t {
@@ -33,6 +34,8 @@ enum CmdStage : uint8_t { STAGE_ACCEPTED = 1, STAGE_EXECUTED = 2, STAGE_FAILED =
 struct Command {
   uint8_t opcode = 0;
   uint8_t a8 = 0;      // first 8-bit argument
+  uint8_t b8 = 0;      // second 8-bit argument
+  uint8_t c8 = 0;      // third 8-bit argument
   uint16_t a16 = 0;    // first 16-bit argument
   uint16_t b16 = 0;    // second 16-bit argument
   uint32_t a32 = 0;    // 32-bit argument

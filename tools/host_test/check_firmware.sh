@@ -8,8 +8,8 @@
 # build in Arduino App Lab / IDE, which you must still run.
 #
 # Optional: export LIBS_DIR=<dir containing cloned Arduino libraries> to also
-# type-check code paths that use the vendor libraries (SparkFun AS7265x/AS7343,
-# SparkFun Toolkit, Arduino_NiclaSenseEnv, U8g2).
+# type-check code paths that use the vendor libraries (SparkFun Spectral Triad
+# AS7265X, Arduino_NiclaSenseEnv).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 STUB="$ROOT/tools/host_test/arduino_stub"
@@ -31,7 +31,6 @@ check() {   # $1 = file, rest = extra flags
 SK="$ROOT/spacecraft/vgq1_flight/sketch"
 check "$SK/sketch.ino"
 while IFS= read -r f; do check "$f"; done < <(find "$SK/src" -name '*.cpp' | sort)
-check "$SK/src/fsw/status_display.cpp" -DVGQ_SC_OLED=1
 FP="$ROOT/ground/frontpanel/dssq_frontpanel/dssq_frontpanel.ino"
 [[ -f "$FP" ]] && check "$FP"
 rm -f /tmp/fwcheck.$$

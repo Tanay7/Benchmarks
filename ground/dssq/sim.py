@@ -381,7 +381,7 @@ class SimSpacecraft:
             self.beacon_s = int.from_bytes(a, "big")
             self.fdir |= 1 << 14
             self._evr(2, 0x0800, f"HIBERNATE: beacon every {self.beacon_s} s")
-        elif opcode in (0x05, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x10, 0x11):
+        elif opcode in (0x05, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x16):
             pass                                            # accepted, no simulated effect
         elif opcode == 0x0C:
             err = 0 if a == b"\xb0\x07" else 6
@@ -398,14 +398,13 @@ class SimSpacecraft:
     def _hk(self, now):
         t = self._sclk(now)
         duty = sum(a for tt, a in self.tx_duty_hist if now - tt < 60) / 60
-        pa = 25 + 30 * duty + self.rng.gauss(0, 0.2)
-        p = struct.pack(">BHIBHHHHBBHHBBIhhHhHHHHHHHHBHI",
-                        self.mode, self.partition, int(t), 0, self.fdir, 0x1FFF, self.cmd_acc,
+        p = struct.pack(">BHIBHHHHBBHHBBIhB" + "H" * 10 + "BHI",
+                        self.mode, self.partition, int(t), 0, self.fdir, 0x3FFF, self.cmd_acc,
                         self.cmd_rej, self.last_opcode, self.last_status, self.tc_ok, self.tc_bad,
                         self.farm.state, self.farm.vr, int(max(0.0, now - self.last_tc_t)),
-                        int((31 + 4 * duty) * 100), int(pa * 100), int((12.1 - 0.4 * duty) * 1000),
-                        int(1300 * duty), 12, 0, 0, 120, 0, len(self.mux.buf[0]),
-                        len(self.mux.buf[1]), len(self.mux.buf[2]), int(self.sdls is not None),
+                        int((31 + 4 * duty + self.rng.gauss(0, 0.1)) * 100), 0, 0,
+                        120, 0, 0, 0, 0, 256, len(self.mux.buf[0]), len(self.mux.buf[1]),
+                        len(self.mux.buf[2]), int(self.sdls is not None),
                         self.sdls.failures if self.sdls else 0, self.sdls.last_sn if self.sdls else 0)
         self._emit(0x010, p, 0, now)
 
@@ -433,32 +432,39 @@ class SimSpacecraft:
     def _mag(self, now):
         g = self.rng.gauss
         tx = 2.0 if self.tx_duty_hist and now - self.tx_duty_hist[-1][0] < 4 else 0.0
-        def v(bx, by, bz, extra):
-            return [int((bx + g(0, 0.05)) * 1000), int((by + g(0, 0.05)) * 1000),
-                    int((bz + extra + g(0, 0.05)) * 1000), int(abs(g(30, 5)))]
-        ob, ib, bd = v(19.5, 0.5, 44.0, 0.1 * tx), v(19.6, 0.6, 44.0, 0.8 * tx), v(20.1, 0.2, 46.0, 3 * tx)
-        p = struct.pack(">BB", 4, 0x0F | (1 if tx else 0)) + struct.pack(">iiiH", *ob) + \
-            struct.pack(">iiiH", *ib) + struct.pack(">iiiH", *bd) + struct.pack(">h", 2650)
+
+        def v(bx, by, bz, extra, noise):
+            return [int((bx + g(0, noise)) * 1000), int((by + g(0, noise)) * 1000),
+                    int((bz + extra + g(0, noise)) * 1000), int(abs(g(noise * 600, 3)))]
+        ob = v(19.5, 0.5, 44.0, 0.1 * tx, 0.02)          # RM3100 at the boom tip
+        ib = v(19.6, 0.6, 44.0, 0.8 * tx, 0.02)          # RM3100 at mid-boom
+        bd = v(20.1, 0.2, 46.0, 3.0 * tx, 0.3)           # BMM150 on the bus (noisier)
+        p = struct.pack(">BB", 4, 0x0E) + struct.pack(">iiiH", *ob) + \
+            struct.pack(">iiiH", *ib) + struct.pack(">iiiH", *bd) + struct.pack(">H", 200)
         self._emit(0x020, p, 1, now)
 
     def _att(self, now):
         g = self.rng.gauss
-        css = [int(1500 + 900 * math.sin(now / 300 + k) + g(0, 10)) for k in range(4)]
-        p = struct.pack(">B3h3h3h4hB4H3h4h", 0x1F, int(g(0, 5)), int(g(0, 5)), 1000 + int(g(0, 3)),
-                        int(g(0, 30)), int(g(0, 30)), int(g(0, 30)), 195, 5, -440,
-                        16384, 0, 0, 0, 3, *css, 3000, -2000, 31800, 16300, 900, -800, 300)
+        # Slow yaw drift so both attitude solutions move; TRIAD tracks the fusion.
+        yaw = 0.05 * math.sin(now / 600)
+        qw, qz = math.cos(yaw / 2), math.sin(yaw / 2)
+        q = [int(qw * 16384), 0, 0, int(qz * 16384)]
+        qt = [int((qw + g(0, 0.002)) * 16384), int(g(0, 30)), int(g(0, 30)), int((qz + g(0, 0.002)) * 16384)]
+        p = struct.pack(">B3h3h3h4hH4h", 0x1F, int(g(0, 5)), int(g(0, 5)), 1000 + int(g(0, 3)),
+                        int(g(0, 3)), int(g(0, 3)), int(g(0, 3)), 195, 5, 440, *q, 35, *qt)
         self._emit(0x021, p, 1, now)
 
     def _spec(self, now):
         nm = [410, 435, 460, 485, 510, 535, 560, 585, 610, 645, 680, 705, 730, 760, 810, 860, 900, 940]
-        planck = [max(0.0, 40 * math.exp(-((w - 560) / 220) ** 2) + self.rng.gauss(0, 0.4)) for w in nm]
-        p = struct.pack(">BBB", 3, 2, 50) + struct.pack(">18f", *planck) + bytes([7]) + \
-            struct.pack(">18H", *[int(2000 + 100 * i + self.rng.gauss(0, 20)) for i in range(18)]) + bytes([24])
+        cal = [max(0.0, 40 * math.exp(-((w - 560) / 220) ** 2) + self.rng.gauss(0, 0.4)) for w in nm]
+        raw = [min(65535, int(c * 120 + self.rng.gauss(0, 15))) for c in cal]
+        p = struct.pack(">BBB", 1, 2, 50) + struct.pack(">18f", *cal) + struct.pack(">18H", *raw) + \
+            struct.pack(">3b", 24, 25, 25)
         self._emit(0x022, p, 1, now)
 
     def _env(self, now):
         g = self.rng.gauss
-        p = struct.pack(">HhIHIhHfffHfffhHHIfBf", 0x0F, int(2234 + g(0, 5)), int(101325 + g(0, 10)),
-                        int(4500 + g(0, 20)), 150000, 2210, 4600, 1.4, 0.21, 520.0, 18, 6.0, 21.0,
-                        1013.1, 2240, 4550, 42, 560, 0.8, 3, 640.0 + g(0, 5))
+        p = struct.pack(">HhHfffHffIhHHHIHIB", 0x7F, int(2210 + g(0, 5)), int(4600 + g(0, 20)), 1.4, 0.21,
+                        520.0, 18, 6.0, 21.0, int(101310 + g(0, 10)), int(2240 + g(0, 5)), 4550, 42, 40, 560,
+                        80, 152000, 3)
         self._emit(0x023, p, 1, now)

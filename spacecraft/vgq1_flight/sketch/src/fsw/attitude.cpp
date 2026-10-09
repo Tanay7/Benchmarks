@@ -14,23 +14,6 @@ Vec3 v_unit(const Vec3& a) {
   return {a.x / n, a.y / n, a.z / n};
 }
 
-bool css_sun_vector(const float counts[4], const float dark[4], float min_signal, Vec3& sun) {
-  float I[4];
-  float total = 0;
-  for (int i = 0; i < 4; ++i) {
-    I[i] = counts[i] - dark[i];
-    if (I[i] < 0) I[i] = 0;
-    total += I[i];
-  }
-  // All four cells must be lit for the linear (cosine) solution to hold.
-  for (int i = 0; i < 4; ++i)
-    if (I[i] < min_signal) return false;
-  const float k = 0.70710678f;               // sin45 = cos45
-  Vec3 s{(I[0] - I[1]) / (2 * k), (I[2] - I[3]) / (2 * k), total / (4 * k)};
-  sun = v_unit(s);
-  return sun.z > 0.70710678f - 1e-3f;          // inside the +/-45 deg validity cone
-}
-
 static void mat_to_quat(const float m[3][3], Quat& q) {
   // Shepperd's method (numerically robust).
   const float tr = m[0][0] + m[1][1] + m[2][2];

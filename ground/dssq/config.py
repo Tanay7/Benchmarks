@@ -22,7 +22,7 @@ DEFAULTS = {
               "air_rate": 2, "subpacket": 0, "rssi_noise": True, "fault_log": True, "power": 0, "channel": 23,
               "rssi_byte": True, "fixed": False, "relay": False, "lbt": False,
               "wor_role": False, "wor_cycle": 0, "noise_bw_hz": 125000.0,
-              "noise_poll_s": 20.0, "radio_latency_s": 0.0,
+              "noise_poll_s": 20.0, "radio_latency_s": 0.0, "rssi_cal_offset_db": 0.0,
               "allowed_channels": [20, 21, 22, 23, 24]},
     "sdls": {"enabled": False, "spi": 1, "key_file": "config/sdls_key.hex"},
     "linkmgr": {"mode": "ADVISE", "target_margin_db": 6.0, "period_s": 60.0, "holdoff_s": 600.0,

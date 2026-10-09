@@ -228,17 +228,17 @@ int main(int argc, char** argv) {
     vgq::HkPacket hk{};
     hk.fsw_mode = vgq::MODE_ENCOUNTER; hk.sclk_partition = 12; hk.uptime_s = 86400;
     hk.reset_cause = 0; hk.fdir_flags = vgq::FDIR_PA_OVERTEMP | vgq::FDIR_CMD_LOSS;
-    hk.sensor_health = 0x1FFF; hk.cmd_accepted = 100; hk.cmd_rejected = 3; hk.cmd_last_opcode = 9;
+    hk.sensor_health = 0x3FFF; hk.cmd_accepted = 100; hk.cmd_rejected = 3; hk.cmd_last_opcode = 9;
     hk.cmd_last_status = 0; hk.tc_frames_ok = 101; hk.tc_frames_bad = 4; hk.farm_state = 1;
-    hk.farm_vr = 55; hk.cmd_loss_timer_s = 3600; hk.avionics_temp_cC = 3125; hk.pa_temp_cC = -550;
-    hk.bus_voltage_mV = 12034; hk.bus_current_mA = -1250; hk.loop_max_ms = 42; hk.loop_overruns = 1;
-    hk.i2c_errors = 2; hk.ssr_fill_permille = 512; hk.ssr_dropped = 0; hk.vc0_backlog = 10;
-    hk.vc1_backlog = 200; hk.vc2_backlog = 0;
+    hk.farm_vr = 55; hk.cmd_loss_timer_s = 3600; hk.bus_temp_cC = 3125; hk.radio_fault = 3;
+    hk.radio_fault_reports = 17; hk.loop_max_ms = 42; hk.loop_overruns = 1;
+    hk.i2c_errors = 2; hk.ssr_fill_permille = 512; hk.ssr_dropped = 0; hk.ssr_kib = 256;
+    hk.vc0_backlog = 10; hk.vc1_backlog = 200; hk.vc2_backlog = 0;
     hk.sdls_enabled = 1; hk.sdls_auth_fail = 3; hk.sdls_last_sn = 123456789;
     size_t n = vgq::pack_hk(hk, pl);
-    CHECK(n == 59, "HK packet is 59 octets");
+    CHECK(n == 58, "HK packet is 58 octets");
     emit("HK", vgq::APID_HK, n, "fsw_mode=3,sclk_partition=12,uptime_s=86400,fdir_flags=20,"
-         "farm_vr=55,avionics_temp=31.25,pa_temp=-5.5,bus_voltage=12.034,bus_current=-1.25,"
+         "farm_vr=55,bus_temp=31.25,radio_fault=3,radio_fault_reports=17,ssr_kib=256,"
          "ssr_fill=51.2,vc1_backlog=200,cmd_loss_timer_s=3600,sdls_enabled=1,sdls_auth_fail=3,"
          "sdls_last_sn=123456789");
 
@@ -252,40 +252,42 @@ int main(int argc, char** argv) {
          "sc_noise_floor=-118.0,mcfc=200,last_airtime=0.9");
 
     vgq::MagPacket mg{};
-    mg.nsamples = 4; mg.flags = 0x0F;
-    mg.outboard = {12345, -23456, 45678, 50}; mg.inboard = {-1, 2, -3, 4};
-    mg.body = {vgq::kNaI32, vgq::kNaI32, vgq::kNaI32, vgq::kNaU16}; mg.body_temp_cC = 2500;
+    mg.nsamples = 4; mg.flags = 0x0B;
+    mg.outboard = {12345, -23456, 45678, 50};
+    mg.inboard = {vgq::kNaI32, vgq::kNaI32, vgq::kNaI32, vgq::kNaU16};
+    mg.body = {-1, 2, -3, 4}; mg.rm3100_cycle_count = 200;
     n = vgq::pack_mag(mg, pl);
     CHECK(n == 46, "MAG packet is 46 octets");
     emit("MAG", vgq::APID_MAG, n, "ob_b_x=12.345,ob_b_y=-23.456,ob_b_z=45.678,ob_rms=0.05,"
-         "ib_b_z=-0.003,body_b_x=None,body_rms=None,body_temp=25.0");
+         "ib_b_x=None,ib_rms=None,body_b_z=-0.003,rm3100_cc=200");
 
     vgq::AttPacket at{};
-    at.flags = 0x1F; at.acc_mg[2] = 1000; at.gyro_cdps[0] = -150; at.ak_dT[1] = 255;
-    at.q_aru[0] = 16384; at.aru_accuracy = 3; at.css_raw[3] = 4095; at.sun_body[2] = 32000;
-    at.q_triad[1] = -8192;
+    at.flags = 0x1F; at.acc_mg[2] = 1000; at.gyro_ddps[0] = -15; at.mag_dT[1] = 255;
+    at.q_fus[0] = 16384; at.q_fus_acc_mrad = 52; at.q_triad[1] = -8192;
     n = vgq::pack_att(at, pl);
-    CHECK(n == 50, "ATT packet is 50 octets");
-    emit("ATT", vgq::APID_ATT, n, "acc_z=1.0,gyro_x=-1.5,ak_y=25.5,q_aru_w=1.0,aru_accuracy=3,"
-         "css_3=4095,sun_z=1.0,q_triad_x=-0.5");
+    CHECK(n == 37, "ATT packet is 37 octets");
+    emit("ATT", vgq::APID_ATT, n, "acc_z=1.0,gyro_x=-1.5,mag_y=25.5,q_fus_w=1.0,q_fus_acc=0.052,"
+         "q_triad_x=-0.5");
 
     vgq::SpecPacket sp{};
-    sp.flags = 3; sp.as7265x_gain = 1; sp.as7265x_int_cycles = 50;
-    for (int i = 0; i < 18; ++i) { sp.as7265x_uW_cm2[i] = 1.5f * i; sp.as7343_counts[i] = (uint16_t)(1000 + i); }
-    sp.as7343_gain = 9; sp.as7265x_temp_c = -3;
+    sp.flags = 0x03; sp.gain_code = 2; sp.int_cycles = 50;
+    for (int i = 0; i < 18; ++i) { sp.cal_uW_cm2[i] = 1.5f * i; sp.raw[i] = (uint16_t)(1000 + i); }
+    sp.temp_c[0] = -3; sp.temp_c[1] = 25; sp.temp_c[2] = -128;
     n = vgq::pack_spec(sp, pl);
-    CHECK(n == 113, "SPEC packet is 113 octets");
-    emit("SPEC", vgq::APID_SPEC, n, "as7265x_410nm=0.0,as7265x_940nm=25.5,as7343_F_450_FZ=1000,"
-         "as7343_FD_3=1017,as7343_gain=9,as7265x_temp=-3.0");
+    CHECK(n == 114, "SPEC packet is 114 octets");
+    emit("SPEC", vgq::APID_SPEC, n, "flags=3,gain_code=2,cal_410nm=0.0,cal_940nm=25.5,raw_410nm=1000,"
+         "raw_940nm=1017,temp_0=-3.0,temp_1=25.0,temp_2=None");
 
     vgq::EnvPacket ev{};
-    ev.flags = 0xF; ev.bme_t_cC = 2234; ev.bme_p_Pa = 101325; ev.bme_rh_cpct = 4567;
-    ev.bme_gas_ohm = 150000; ev.nenv_iaq = 1.5f; ev.nenv_outdoor_aqi = 42; ev.nme_p_hPa = 1001.25f;
-    ev.nme_co2eq_ppm = 600; ev.veml_lux = 12345.5f;
+    ev.flags = 0x7F; ev.nenv_t_cC = 2234; ev.nenv_rh_cpct = 4567; ev.nenv_iaq = 1.5f;
+    ev.nenv_outdoor_aqi = 42; ev.nenv_no2_ppb = 12.25f; ev.nme_p_cPa = 100125; ev.nme_t_cC = -150;
+    ev.nme_iaq_s = 77; ev.nme_co2eq_ppm = 600; ev.nme_bvoc_cppm = 125; ev.nme_gas_ohm = 150000;
+    ev.nme_accuracy = 3;
     n = vgq::pack_env(ev, pl);
-    CHECK(n == 63, "ENV packet is 63 octets");
-    emit("ENV", vgq::APID_ENV, n, "bme_t=22.34,bme_p=1013.25,bme_rh=45.67,bme_gas=150000.0,"
-         "nenv_iaq=1.5,nenv_aqi=42,nme_p=1001.25,nme_co2eq=600,veml_lux=12345.5");
+    CHECK(n == 51, "ENV packet is 51 octets");
+    emit("ENV", vgq::APID_ENV, n, "nenv_t=22.34,nenv_rh=45.67,nenv_iaq=1.5,nenv_aqi=42,nenv_no2=12.25,"
+         "nme_p=1001.25,nme_t=-1.5,nme_iaq_s=77,nme_co2eq=600,nme_bvoc=1.25,nme_gas=150000,"
+         "nme_accuracy=3");
 
     vgq::CmdVerPacket cv{5, vgq::OP_PING, vgq::STAGE_EXECUTED, 0, 0xDEADBEEF};
     n = vgq::pack_cmdver(cv, pl);
@@ -361,16 +363,6 @@ int main(int argc, char** argv) {
     const bool ok = vgq::triad_ned(acc_b, mag_b, I, D, qe);
     const float dotq = std::fabs(qe.w * qt.w + qe.x * qt.x + qe.y * qt.y + qe.z * qt.z);
     CHECK(ok && dotq > 0.99999f, "TRIAD recovers the true attitude quaternion");
-
-    const float dark[4] = {10, 10, 10, 10};
-    const vgq::Vec3 s_true = vgq::v_unit({0.2f, -0.3f, 0.93f});
-    const float k = 0.70710678f;
-    const vgq::Vec3 nrm[4] = {{k, 0, k}, {-k, 0, k}, {0, k, k}, {0, -k, k}};
-    float counts[4];
-    for (int i = 0; i < 4; ++i) counts[i] = 10 + 3000 * vgq::v_dot(nrm[i], s_true);
-    vgq::Vec3 s_est;
-    const bool sok = vgq::css_sun_vector(counts, dark, 50, s_est);
-    CHECK(sok && vgq::v_dot(s_est, s_true) > 0.99999f, "Pyramid CSS sun vector inside FOV");
   }
 
   // ---- SHA-256 / HMAC-SHA-256 (FIPS 180-4, RFC 4231) and SDLS ------------------------

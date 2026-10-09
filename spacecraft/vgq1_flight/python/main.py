@@ -118,7 +118,7 @@ def print_board():
           f"pwr code {s.get('pwr')}  TX {'ON ' if s.get('tx') else 'off'}"
           f"{'  ** INHIBITED **' if s.get('inhibit') else ''}")
     print(f"| frame period {s.get('period_ms')} ms  radio busy {s.get('busy_ms')} ms  "
-          f"duty {s.get('duty_pct')} %  PA {s.get('pa_c')} C  Vrad {s.get('vrad')} V")
+          f"duty {s.get('duty_pct')} %  bus {s.get('bus_c')} C  E22 fault code {s.get('rf_fault')}")
     print(f"| uplink RSSI {s.get('ul_rssi')} dBm  noise {s.get('noise')} dBm  FARM state {s.get('farm')} "
           f"V(R) {s.get('vr')}  CMD acc {s.get('acc')} rej {s.get('rej')}")
     print(f"| FDIR 0x{s.get('fdir', 0):04X}  sensors 0x{s.get('sns', 0):04X}  VC0 {s.get('vc0')} B  "

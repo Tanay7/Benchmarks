@@ -50,8 +50,10 @@ class Window:
             f, c = math.floor(k), math.ceil(k)
             return s[f] if f == c else s[f] + (s[c] - s[f]) * (k - f)
 
+        sd = statistics.stdev(v) if len(v) > 1 else None          # sample standard deviation
         return {"n": len(v), "mean": statistics.fmean(v), "min": s[0], "max": s[-1],
                 "std": statistics.pstdev(v) if len(v) > 1 else 0.0,
+                "sem": None if sd is None else sd / math.sqrt(len(v)),  # standard error of the mean
                 "p10": pct(0.10), "p50": pct(0.50), "p90": pct(0.90), "last": v[-1],
                 "fade_depth": pct(0.90) - pct(0.10)}
 
@@ -77,6 +79,9 @@ class ReceiverStats:
         self.air_rate_code = int(r.get("air_rate", 2))
         self.noise_bw_hz = float(r.get("noise_bw_hz", 125e3))
         self.gr_dbi = float(st.get("antenna_gain_dbi", 2.15))
+        # Additive RSSI / noise calibration (measured against a signal generator or a
+        # known attenuator, docs/08 T-RF-02). The E22 reports integer dBm only.
+        self.rssi_cal_db = float(r.get("rssi_cal_offset_db", 0.0))
         self.rx_loss_db = float(st.get("rx_line_loss_db", 0.0))
         self.gt_dbi = float(sc.get("antenna_gain_dbi", 2.15))
         self.tx_loss_db = float(sc.get("tx_line_loss_db", 0.5))
@@ -236,6 +241,12 @@ class ReceiverStats:
         meas_pl = None if eirp is None or rssi is None else eirp + self.gr_dbi - self.rx_loss_db - rssi
         fspl = self.fspl_db(self.distance_km)
         excess = None if meas_pl is None or fspl is None else meas_pl - fspl
+        # Predicted (free-space) received power and margin, the "design" column of a
+        # link budget, next to the measured values.
+        pred_pr = None if eirp is None or fspl is None else eirp + self.gr_dbi - self.rx_loss_db - fspl
+        w10 = self.w["10m"]["rssi"].stats(now)
+        meas_pl_mean = None if eirp is None or not w10.get("n") else \
+            eirp + self.gr_dbi - self.rx_loss_db - w10["mean"]
         # range at which RSSI would hit the sensitivity estimate (free space + current excess)
         max_range = None
         if eirp is not None:
@@ -254,6 +265,8 @@ class ReceiverStats:
                       "time_in_lock_pct": 100 * self.lock_time_s / max(1e-9, now - self.t0)},
             "rf": {"freq_mhz": self.freq_mhz, "air_rate_bps": rb, "air_rate_code": self.air_rate_code,
                    "rssi_dbm": rssi, "noise_dbm": self.noise_dbm,
+                   "rssi_mw": None if rssi is None else dbm_to_mw(rssi),
+                   "rssi_resolution_db": 1.0, "rssi_cal_offset_db": self.rssi_cal_db,
                    "noise_age_s": None if not self.noise_t else now - self.noise_t,
                    "snr_est_db": None if rssi is None or self.noise_dbm is None else rssi - self.noise_dbm,
                    "pr_est_dbm": pr, "n0_est_dbm_hz": n0, "cn0_est_dbhz": cn0, "ebn0_est_db": ebn0,
@@ -265,6 +278,12 @@ class ReceiverStats:
                        "measured_path_loss_db_est": meas_pl, "distance_km": self.distance_km or None,
                        "owlt_s": (self.distance_km / C_KM_S) if self.distance_km else None,
                        "fspl_db": fspl, "excess_loss_db_est": excess,
+                       "sc_antenna_gain_dbi": self.gt_dbi, "sc_line_loss_db": self.tx_loss_db,
+                       "predicted_pr_dbm": pred_pr,
+                       "predicted_margin_db": None if pred_pr is None else pred_pr - self.sensitivity_est,
+                       "predicted_snr_db": None if pred_pr is None or self.noise_dbm is None
+                       else pred_pr - self.noise_dbm,
+                       "measured_path_loss_mean10m_db": meas_pl_mean,
                        "range_at_sensitivity_km_est": max_range},
             "windows": ws,
             "hist": {"rssi": self.rssi_hist.as_dict(), "snr": self.snr_hist.as_dict(),

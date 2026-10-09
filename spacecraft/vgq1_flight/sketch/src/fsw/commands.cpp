@@ -84,6 +84,10 @@ CmdError parse_tc_packet(const uint8_t* pkt, size_t len, Command& c) {
       if (na != 2) return CE_BAD_LENGTH;
       c.a16 = be16(a);
       return (c.a16 >= 60 && c.a16 <= 3600) ? CE_OK : CE_BAD_ARGUMENT;
+    case OP_SPECCFG:
+      if (na != 3) return CE_BAD_LENGTH;
+      c.a8 = a[0]; c.b8 = a[1]; c.c8 = a[2];
+      return (c.a8 <= 3 && c.b8 >= 1 && c.c8 <= 7) ? CE_OK : CE_BAD_ARGUMENT;
     case OP_CHANNEL:
       if (na != 3) return CE_BAD_LENGTH;
       c.a8 = a[0]; c.a16 = be16(a + 1);

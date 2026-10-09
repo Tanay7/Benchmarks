@@ -2,19 +2,9 @@
 #include <math.h>
 #include "../config.h"
 
-#if __has_include("../vendor/bme690/bme69x.h")
-#define VGQ_HAVE_BME690 1
-extern "C" {
-#include "../vendor/bme690/bme69x.h"
-}
-#endif
 #if __has_include(<SparkFun_AS7265X.h>)
 #define VGQ_HAVE_AS7265X 1
 #include <SparkFun_AS7265X.h>
-#endif
-#if __has_include(<SparkFun_AS7343.h>)
-#define VGQ_HAVE_AS7343 1
-#include <SparkFun_AS7343.h>
 #endif
 #if __has_include(<Arduino_NiclaSenseEnv.h>)
 #define VGQ_HAVE_NICLA_ENV 1
@@ -24,149 +14,73 @@ extern "C" {
 namespace vgq {
 
 // =============================================================================
-// BME690 via Bosch SensorAPI
-// =============================================================================
-#ifdef VGQ_HAVE_BME690
-namespace {
-struct BmeCtx { I2cBus* bus; int8_t ch; uint8_t addr; };
-BmeCtx g_bme_ctx;
-struct bme69x_dev g_bme;
-struct bme69x_conf g_bme_conf;
-struct bme69x_heatr_conf g_bme_heatr;
-
-BME69X_INTF_RET_TYPE bme_read(uint8_t reg, uint8_t* data, uint32_t len, void* intf) {
-  BmeCtx* c = static_cast<BmeCtx*>(intf);
-  if (!c->bus->select(c->ch)) return -1;
-  return c->bus->read(c->addr, reg, data, len) ? BME69X_INTF_RET_SUCCESS : -1;
-}
-BME69X_INTF_RET_TYPE bme_write(uint8_t reg, const uint8_t* data, uint32_t len, void* intf) {
-  BmeCtx* c = static_cast<BmeCtx*>(intf);
-  if (!c->bus->select(c->ch)) return -1;
-  return c->bus->write(c->addr, reg, data, len) ? BME69X_INTF_RET_SUCCESS : -1;
-}
-void bme_delay_us(uint32_t us, void*) {
-  if (us >= 2000) delay(us / 1000); else delayMicroseconds(us);
-}
-}  // namespace
-#endif
-
-bool Bme690::compiled_in() {
-#ifdef VGQ_HAVE_BME690
-  return true;
-#else
-  return false;
-#endif
-}
-
-bool Bme690::begin(I2cBus& bus, int8_t ch, uint8_t addr) {
-  ok_ = false;
-#ifdef VGQ_HAVE_BME690
-  if (!bus.select(ch)) return false;
-  if (!bus.probe(addr)) { addr = (addr == 0x76) ? 0x77 : 0x76; if (!bus.probe(addr)) return false; }
-  g_bme_ctx = {&bus, ch, addr};
-  g_bme.intf = BME69X_I2C_INTF;
-  g_bme.intf_ptr = &g_bme_ctx;
-  g_bme.read = bme_read;
-  g_bme.write = bme_write;
-  g_bme.delay_us = bme_delay_us;
-  g_bme.amb_temp = 25;
-  if (bme69x_init(&g_bme) != BME69X_OK) return false;
-  g_bme_conf.filter = BME69X_FILTER_OFF;
-  g_bme_conf.odr = BME69X_ODR_NONE;
-  g_bme_conf.os_hum = BME69X_OS_1X;
-  g_bme_conf.os_pres = BME69X_OS_16X;
-  g_bme_conf.os_temp = BME69X_OS_2X;
-  if (bme69x_set_conf(&g_bme_conf, &g_bme) != BME69X_OK) return false;
-  g_bme_heatr.enable = BME69X_ENABLE;
-  g_bme_heatr.heatr_temp = 300;     // degC
-  g_bme_heatr.heatr_dur = 100;      // ms
-  if (bme69x_set_heatr_conf(BME69X_FORCED_MODE, &g_bme_heatr, &g_bme) != BME69X_OK) return false;
-  ok_ = true;
-#else
-  (void)bus; (void)ch; (void)addr;
-#endif
-  return ok_;
-}
-
-bool Bme690::read(Bme690Reading& r) {
-#ifdef VGQ_HAVE_BME690
-  if (!ok_) return false;
-  if (bme69x_set_op_mode(BME69X_FORCED_MODE, &g_bme) != BME69X_OK) return false;
-  const uint32_t us = bme69x_get_meas_dur(BME69X_FORCED_MODE, &g_bme_conf, &g_bme) +
-                      (uint32_t)g_bme_heatr.heatr_dur * 1000UL;
-  g_bme.delay_us(us, g_bme.intf_ptr);
-  struct bme69x_data d;
-  uint8_t n = 0;
-  if (bme69x_get_data(BME69X_FORCED_MODE, &d, &n, &g_bme) != BME69X_OK || n == 0) return false;
-  r.t_c = d.temperature;            // BME69X_USE_FPU (default): floating-point outputs
-  r.p_pa = d.pressure;
-  r.rh_pct = d.humidity;
-  r.gas_ohm = d.gas_resistance;
-  r.gas_valid = (d.status & BME69X_GASM_VALID_MSK) && (d.status & BME69X_HEAT_STAB_MSK);
-  return true;
-#else
-  (void)r;
-  return false;
-#endif
-}
-
-// =============================================================================
-// Spectrometers
+// AS7265X (SparkFun Spectral Triad)
 // =============================================================================
 #ifdef VGQ_HAVE_AS7265X
 static AS7265X g_triad;
 #endif
-#ifdef VGQ_HAVE_AS7343
-static SfeAS7343ArdI2C g_as7343;
-#endif
 
-void Spectrometers::begin(I2cBus& bus, int8_t ch_triad, int8_t ch_as7343) {
-  bus_ = &bus; ch_t_ = ch_triad; ch_a_ = ch_as7343;
+bool Spectrometer::begin(I2cBus& bus) {
+  bus_ = &bus;
+  ok_ = false;
 #ifdef VGQ_HAVE_AS7265X
-  if (bus.select(ch_t_) && bus.probe(0x49) && g_triad.begin(bus.wire())) {
+  if (bus.probe(kAddr) && g_triad.begin(bus.wire())) {
     g_triad.disableIndicator();
-    g_triad.disableBulb(AS7265x_LED_WHITE);
-    g_triad.disableBulb(AS7265x_LED_IR);
-    g_triad.disableBulb(AS7265x_LED_UV);
-    g_triad.setGain(AS7265X_GAIN_16X);
-    g_triad.setIntegrationCycles(50);
-    triad_ok_ = true;
+    ok_ = configure(gain_, cycles_, 0);
   }
-  bus.restore_clock();               // AS7265X::begin() calls Wire.begin() (resets the clock)
+  bus.restore_clock();                       // AS7265X::begin() calls Wire.begin() (resets the clock)
 #endif
-#ifdef VGQ_HAVE_AS7343
-  if (bus.select(ch_a_) && bus.probe(0x39) && g_as7343.begin(kAS7343Addr, bus.wire())) {
-    as7343_ok_ = g_as7343.powerOn() && g_as7343.setAutoSmux(AUTOSMUX_18_CHANNELS) &&
-                 g_as7343.setAgain(AGAIN_64) && g_as7343.enableSpectralMeasurement();
-  }
-  bus.restore_clock();
+  return ok_;
+}
+
+bool Spectrometer::configure(uint8_t gain_code, uint8_t int_cycles, uint8_t lamps) {
+#ifdef VGQ_HAVE_AS7265X
+  if (!bus_ || int_cycles == 0) return false;
+  gain_ = gain_code & 3;                     // AS7265X_GAIN_1X / 37X / 16X / 64X = 0..3
+  cycles_ = int_cycles;
+  lamps_ = lamps & 7;
+  g_triad.setGain(gain_);
+  g_triad.setIntegrationCycles(cycles_);
+  g_triad.disableBulb(AS7265x_LED_WHITE);    // lamps are lit only during a measurement
+  g_triad.disableBulb(AS7265x_LED_IR);
+  g_triad.disableBulb(AS7265x_LED_UV);
+  return true;
+#else
+  (void)gain_code; (void)int_cycles; (void)lamps;
+  return false;
 #endif
 }
 
-void Spectrometers::read(SpecReading& r) {
-  r.triad_ok = r.as7343_ok = false;
+bool Spectrometer::read(SpecReading& r) {
+  r.ok = false;
 #ifdef VGQ_HAVE_AS7265X
-  if (triad_ok_ && bus_->select(ch_t_)) {
-    g_triad.takeMeasurements();      // one-shot, all 18 channels
-    const float v[18] = {
-        g_triad.getCalibratedA(), g_triad.getCalibratedB(), g_triad.getCalibratedC(),
-        g_triad.getCalibratedD(), g_triad.getCalibratedE(), g_triad.getCalibratedF(),
-        g_triad.getCalibratedG(), g_triad.getCalibratedH(), g_triad.getCalibratedR(),
-        g_triad.getCalibratedI(), g_triad.getCalibratedS(), g_triad.getCalibratedJ(),
-        g_triad.getCalibratedT(), g_triad.getCalibratedU(), g_triad.getCalibratedV(),
-        g_triad.getCalibratedW(), g_triad.getCalibratedK(), g_triad.getCalibratedL()};
-    for (int i = 0; i < 18; ++i) r.triad_uW_cm2[i] = v[i];
-    r.triad_temp_c = (int8_t)lroundf(g_triad.getTemperatureAverage());
-    r.triad_ok = true;
-  }
+  if (!ok_) return false;
+  if (lamps_ & 1) g_triad.enableBulb(AS7265x_LED_WHITE);   // active (illuminated) spectroscopy
+  if (lamps_ & 2) g_triad.enableBulb(AS7265x_LED_IR);
+  if (lamps_ & 4) g_triad.enableBulb(AS7265x_LED_UV);
+  g_triad.takeMeasurements();                // one-shot, all 18 channels
+  if (lamps_ & 1) g_triad.disableBulb(AS7265x_LED_WHITE);
+  if (lamps_ & 2) g_triad.disableBulb(AS7265x_LED_IR);
+  if (lamps_ & 4) g_triad.disableBulb(AS7265x_LED_UV);
+  // SparkFun channel letters in wavelength order:
+  // A410 B435 C460 D485 E510 F535 G560 H585 R610 I645 S680 J705 T730 U760 V810 W860 K900 L940
+  const float c[18] = {
+      g_triad.getCalibratedA(), g_triad.getCalibratedB(), g_triad.getCalibratedC(),
+      g_triad.getCalibratedD(), g_triad.getCalibratedE(), g_triad.getCalibratedF(),
+      g_triad.getCalibratedG(), g_triad.getCalibratedH(), g_triad.getCalibratedR(),
+      g_triad.getCalibratedI(), g_triad.getCalibratedS(), g_triad.getCalibratedJ(),
+      g_triad.getCalibratedT(), g_triad.getCalibratedU(), g_triad.getCalibratedV(),
+      g_triad.getCalibratedW(), g_triad.getCalibratedK(), g_triad.getCalibratedL()};
+  const uint16_t w[18] = {
+      g_triad.getA(), g_triad.getB(), g_triad.getC(), g_triad.getD(), g_triad.getE(),
+      g_triad.getF(), g_triad.getG(), g_triad.getH(), g_triad.getR(), g_triad.getI(),
+      g_triad.getS(), g_triad.getJ(), g_triad.getT(), g_triad.getU(), g_triad.getV(),
+      g_triad.getW(), g_triad.getK(), g_triad.getL()};
+  for (int i = 0; i < 18; ++i) { r.cal_uW_cm2[i] = c[i]; r.raw[i] = w[i]; }
+  for (uint8_t d = 0; d < 3; ++d) r.temp_c[d] = (int8_t)g_triad.getTemperature(d);
+  r.ok = true;
 #endif
-#ifdef VGQ_HAVE_AS7343
-  if (as7343_ok_ && bus_->select(ch_a_) && g_as7343.readSpectraDataFromSensor()) {
-    for (int i = 0; i < 18; ++i)
-      r.as7343_counts[i] = g_as7343.getChannelData((sfe_as7343_channel_t)i);
-    r.as7343_ok = true;
-  }
-#endif
+  return r.ok;
 }
 
 // =============================================================================
@@ -176,36 +90,40 @@ void Spectrometers::read(SpecReading& r) {
 static NiclaSenseEnv* g_nenv = nullptr;
 #endif
 
-bool NiclaEnv::begin(I2cBus& bus, int8_t ch) {
-  bus_ = &bus; ch_ = ch;
+bool NiclaEnv::begin(I2cBus& bus) {
+  bus_ = &bus;
   ok_ = false;
 #ifdef VGQ_HAVE_NICLA_ENV
-  if (!bus.select(ch) || !bus.probe(0x21)) return false;
+  if (!bus.probe(kAddr)) return false;
   if (!g_nenv) g_nenv = new NiclaSenseEnv(bus.wire());
   if (g_nenv->begin()) {
     g_nenv->indoorAirQualitySensor().setMode(IndoorAirQualitySensorMode::indoorAirQuality);
     g_nenv->outdoorAirQualitySensor().setMode(OutdoorAirQualitySensorMode::outdoorAirQuality);
     ok_ = true;
   }
-  bus.restore_clock();               // I2CDevice::begin() calls bus.begin()
+  bus.restore_clock();                       // I2CDevice::begin() calls bus.begin()
 #endif
   return ok_;
 }
 
 bool NiclaEnv::read(NiclaEnvReading& r) {
 #ifdef VGQ_HAVE_NICLA_ENV
-  if (!ok_ || !bus_->select(ch_)) return false;
+  if (!ok_) return false;
   auto& th = g_nenv->temperatureHumiditySensor();
   auto& ia = g_nenv->indoorAirQualitySensor();
   auto& oa = g_nenv->outdoorAirQualitySensor();
+  r.flags = 0;
   r.t_c = th.temperature();
   r.rh = th.humidity();
+  if (!isnan(r.t_c)) r.flags |= 1;
   r.iaq = ia.airQuality();
   r.tvoc = ia.TVOC();
   r.eco2 = ia.CO2();
+  if (!isnan(r.iaq)) r.flags |= 2;
   r.aqi = oa.airQualityIndex();
   r.no2 = oa.NO2();
   r.o3 = oa.O3();
+  if (!isnan(r.no2)) r.flags |= 4;
   return true;
 #else
   (void)r;
@@ -214,7 +132,7 @@ bool NiclaEnv::read(NiclaEnvReading& r) {
 }
 
 // =============================================================================
-// Nicla Sense ME Attitude Reference Unit (custom firmware, I2C target 0x2A)
+// Nicla Sense ME attitude reference unit (custom firmware, I2C target 0x2A)
 // =============================================================================
 uint8_t NiclaAru::crc8(const uint8_t* d, size_t n) {
   uint8_t c = 0;
@@ -225,59 +143,57 @@ uint8_t NiclaAru::crc8(const uint8_t* d, size_t n) {
   return c;
 }
 
-bool NiclaAru::begin(I2cBus& bus, int8_t ch) {
-  bus_ = &bus; ch_ = ch;
-  ok_ = bus.select(ch) && bus.probe(kAddr);
+bool NiclaAru::begin(I2cBus& bus) {
+  bus_ = &bus;
+  ok_ = bus.probe(kAddr);
   return ok_;
 }
 
-bool NiclaAru::read(AruReading& r) {
-  if (!ok_ || !bus_->select(ch_)) return false;
-  uint8_t b[kFrameLen];
-  if (!bus_->read_raw(kAddr, b, kFrameLen)) return false;
-  if (b[0] != 0xA7 || crc8(b, kFrameLen - 1) != b[kFrameLen - 1]) return false;
-  auto i16 = [&](int o) { return (int16_t)((b[o] << 8) | b[o + 1]); };
-  auto u16 = [&](int o) { return (uint16_t)((b[o] << 8) | b[o + 1]); };
-  auto u32 = [&](int o) {
-    return ((uint32_t)b[o] << 24) | ((uint32_t)b[o + 1] << 16) | ((uint32_t)b[o + 2] << 8) | b[o + 3];
-  };
-  r.seq = b[1]; r.flags = b[2]; r.quat_accuracy = b[3];
-  r.qw = i16(4) / 16384.0f; r.qx = i16(6) / 16384.0f; r.qy = i16(8) / 16384.0f; r.qz = i16(10) / 16384.0f;
-  r.p_hpa = u32(12) / 100.0f;
-  r.t_c = i16(16) / 100.0f;
-  r.rh = u16(18) / 100.0f;
-  r.iaq = u16(20);
-  r.co2eq = u32(22);
-  r.bvoc_ppm = u16(26) / 100.0f;
-  r.gas_ohm = u32(28);
-  r.bsec_accuracy = b[32];
+bool NiclaAru::page(uint8_t n, uint8_t magic, uint8_t* b) {
+  if (!ok_ || !bus_->write_raw(kAddr, &n, 1)) return false;   // select the page
+  if (!bus_->read_raw(kAddr, b, kPageLen)) return false;
+  return b[0] == magic && crc8(b, kPageLen - 1) == b[kPageLen - 1];
+}
+
+static inline int16_t be_i16(const uint8_t* p) { return (int16_t)((p[0] << 8) | p[1]); }
+static inline uint16_t be_u16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
+static inline uint32_t be_u32(const uint8_t* p) {
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+bool NiclaAru::read_motion(AruReading& r) {
+  uint8_t b[kPageLen];
+  if (!page(0, 0xA7, b)) return false;
+  const float q = 1.0f / 16384.0f;
+  r.seq = b[1];
+  r.motion_flags = b[2];
+  r.qw = be_i16(b + 3) * q; r.qx = be_i16(b + 5) * q; r.qy = be_i16(b + 7) * q; r.qz = be_i16(b + 9) * q;
+  r.quat_acc_mrad = be_u16(b + 11);
+  for (int i = 0; i < 3; ++i) {
+    r.acc_mg[i] = be_i16(b + 13 + 2 * i);
+    r.gyro_ddps[i] = be_i16(b + 19 + 2 * i);
+    r.mag_raw[i] = be_i16(b + 25 + 2 * i);
+  }
   // A frozen sequence counter means the Nicla firmware has stalled.
-  stale_ = (r.seq == last_seq_) ? (uint8_t)(stale_ + 1) : 0;
+  stale_ = (r.seq == last_seq_) ? (uint8_t)(stale_ < 255 ? stale_ + 1 : 255) : 0;
   last_seq_ = r.seq;
   return stale_ < 5;
 }
 
-// =============================================================================
-// Analog
-// =============================================================================
-void Analog::begin() { analogReadResolution(12); }
-
-void Analog::read_css(uint16_t out[4]) {
-  for (int i = 0; i < 4; ++i) out[i] = (uint16_t)analogRead(PIN_CSS[i]);
-}
-
-float Analog::pa_temp_c() {
-  // Divider: 3.3 V -- 10k fixed -- node -- NTC (10k @ 25 degC, B = 3950) -- GND
-  const int raw = analogRead(PIN_PA_NTC);
-  if (raw < 20 || raw > 4075) return NAN;               // open / short -> not fitted
-  const float r_ntc = 10000.0f * raw / (4095.0f - raw);
-  const float inv_t = 1.0f / 298.15f + logf(r_ntc / 10000.0f) / 3950.0f;   // Beta equation
-  return 1.0f / inv_t - 273.15f;
-}
-
-float Analog::vradio_v() {
-  const float v = analogRead(PIN_VRADIO) * kAdcRef / 4095.0f * kVradioDivider;
-  return v < 1.0f ? NAN : v;
+bool NiclaAru::read_env(AruReading& r) {
+  uint8_t b[kPageLen];
+  if (!page(1, 0xA8, b)) return false;
+  r.env_flags = b[2];
+  r.p_hpa = be_u32(b + 3) / 100.0f;
+  r.t_c = be_i16(b + 7) / 100.0f;
+  r.rh = be_u16(b + 9) / 100.0f;
+  r.iaq = be_u16(b + 11);
+  r.iaq_s = be_u16(b + 13);
+  r.co2eq = be_u32(b + 15);
+  r.bvoc_ppm = be_u16(b + 19) / 100.0f;
+  r.gas_ohm = be_u32(b + 21);
+  r.bsec_accuracy = b[25];
+  return true;
 }
 
 }  // namespace vgq

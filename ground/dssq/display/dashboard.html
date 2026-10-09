@@ -79,7 +79,8 @@ input[type=text]{width:100%;background:#050910;border:1px solid var(--line);colo
     <div class="panel wide"><h3>Receiver statistics <small>measured from the E22 RSSI octet, ambient-noise register, byte stream, frame sync and RS decoder. 1 min / 10 min / whole pass windows</small></h3>
       <div style="overflow:auto"><table id="rx-stats"></table></div></div>
     <div class="panel"><h3>RF &amp; link estimates <small>"est." = derived with stated assumptions</small></h3><table id="rx-rf"></table></div>
-    <div class="panel"><h3>Live link budget <small>measured path loss vs free space</small></h3><table id="rx-budget"></table></div>
+    <div class="panel wide"><h3>Link budget <small>design (free-space prediction for the configured distance) vs measured; FSPL = 32.44 + 20·log10(f MHz) + 20·log10(d km)</small></h3><table id="rx-budget"></table></div>
+    <div class="panel"><h3>RSSI detail <small>the E22 reports integer dBm (1 dB steps); means over many packets resolve finer, ± = standard error of the mean</small></h3><table id="rx-rssi"></table></div>
     <div class="panel"><h3>Two-way link <small>downlink (ground E22) vs uplink (spacecraft E22)</small></h3><table id="rx-2way"></table></div>
     <div class="panel"><h3>Frame synchronizer <small>CCSDS ASM 1ACFFC1D, search/lock/flywheel</small></h3><table id="rx-sync"></table></div>
     <div class="panel"><h3>Reed–Solomon (255,223) decoder <small>E=16, I=1, dual basis, shortened (200+32)</small></h3><table id="rx-dec"></table></div>
@@ -116,11 +117,11 @@ input[type=text]{width:100%;background:#050910;border:1px solid var(--line);colo
 <!-- ============================== SCIENCE ============================== -->
 <section data-tab="SCIENCE" class="hidden">
   <div class="grid">
-    <div class="panel"><h3>Magnetometers <small>dual-magnetometer separation of spacecraft field (1/r³)</small></h3><table id="sci-mag"></table></div>
-    <div class="panel"><h3>Attitude <small>TRIAD (gravity + B) vs ARU (BHI260AP fusion); Euler ZYX</small></h3><table id="sci-att"></table></div>
-    <div class="panel"><h3>Environment</h3><div class="scroll"><table id="sci-env"></table></div></div>
-    <div class="panel"><h3>AS7265x 18-band spectrum <small>µW/cm², 410–940 nm</small></h3><canvas id="sci-spec"></canvas></div>
-    <div class="panel"><h3>AS7343 14-channel counts</h3><canvas id="sci-spec2"></canvas></div>
+    <div class="panel"><h3>Magnetometers <small>RM3100 boom (outboard, optional inboard) + BMM150 body; dual-sensor separation of the spacecraft field (1/r³)</small></h3><table id="sci-mag"></table></div>
+    <div class="panel"><h3>Attitude <small>Nicla Sense ME: BHI260 fusion vs independent TRIAD (gravity + BMM150 field); Euler ZYX</small></h3><table id="sci-att"></table></div>
+    <div class="panel"><h3>Environment <small>Nicla Sense Env (HS4001, ZMOD4410, ZMOD4510) + Nicla Sense ME (BMP390, BME688/BSEC)</small></h3><div class="scroll"><table id="sci-env"></table></div></div>
+    <div class="panel"><h3>AS7265X calibrated spectrum <small>µW/cm², 18 bands 410–940 nm</small></h3><canvas id="sci-spec"></canvas></div>
+    <div class="panel"><h3>AS7265X raw counts &amp; instrument state</h3><canvas id="sci-spec2"></canvas><table id="sci-specinfo"></table></div>
   </div>
 </section>
 <!-- ============================== COMMANDING ============================== -->
@@ -132,6 +133,7 @@ input[type=text]{width:100%;background:#050910;border:1px solid var(--line);colo
       <div id="cmd-pending" style="margin-top:6px"></div></div>
     <div class="panel wide"><h3>Command history <small>QUEUED → RADIATED → ACCEPTED (CLCW) → EXECUTED (CMDVER)</small></h3><table id="cmd-hist"></table></div>
     <div class="panel"><h3>COP-1 / SDLS</h3><table id="cmd-cop"></table></div>
+    <div class="panel"><h3>Station I/O <small>VENTUNO Q MCU: CardKB keyboards, annunciator LEDs, Radio Control Unit</small></h3><table id="cmd-io"></table></div>
     <div class="panel"><h3>Console</h3><div class="log scroll" id="cmd-console"></div></div>
     <div class="panel"><h3>Dictionary</h3><div class="scroll"><table id="cmd-dict"></table></div></div>
   </div>
@@ -192,25 +194,36 @@ function header(){const rx=S.rx,rf=rx.rf;
   $("h-sclk").textContent=S.time.last_sclk===null?"—":S.time.partition+"/"+f(S.time.last_sclk,3);
   const c=S.cop;$("h-cop").textContent=`V(S)=${c.vs??"—"} N(R)=${c.nr} ${c.lockout?"LOCKOUT":c.suspended?"SUSP":"OK"}${c.sdls?" SDLS":""}`;}
 function stat3(name,key,d,unit){const W=S.rx.windows;const r=[name];for(const w of ["1m","10m","pass"]){const s=W[w][key];
-  r.push(s.n?f(s.mean,d):"—",s.n?f(s.std,d):"—",s.n?f(s.min,d):"—",s.n?f(s.p10,d):"—",s.n?f(s.p50,d):"—",s.n?f(s.p90,d):"—",s.n?f(s.max,d):"—",fi(s.n||0));}
+  r.push(s.n?f(s.mean,d):"—",N(s.sem)?"—":f(s.sem,d),s.n?f(s.std,d):"—",s.n?f(s.min,d):"—",s.n?f(s.p10,d):"—",s.n?f(s.p50,d):"—",s.n?f(s.p90,d):"—",s.n?f(s.max,d):"—",fi(s.n||0));}
   r.splice(1,0,N(W["1m"][key].last)?"—":f(W["1m"][key].last,d));r.push(unit);return r;}
 function receiver(){const rx=S.rx,rf=rx.rf,b=rx.budget,d=rx.decoder,fr=rx.frames,sy=S.sync;
-  const H=["metric","last"];for(const w of ["1 min","10 min","pass"])H.push(w+" mean","σ","min","p10","p50","p90","max","n");H.push("unit");
-  rows("rx-stats",[stat3("Packet RSSI","rssi",1,"dBm"),stat3("Noise floor","noise",1,"dBm"),stat3("SNR est (RSSI−noise)","snr",1,"dB"),
+  const H=["metric","last"];for(const w of ["1 min","10 min","pass"])H.push(w+" mean","± SEM","σ","min","p10","p50","p90","max","n");H.push("unit");
+  rows("rx-stats",[stat3("Packet RSSI","rssi",4,"dBm"),stat3("Noise floor","noise",4,"dBm"),stat3("SNR est (RSSI−noise)","snr",4,"dB"),
     stat3("Frame inter-arrival","iat",2,"s"),stat3("RS corrections / codeblock","rs",2,"sym"),stat3("ASM bit errors","asm",2,"bit")],H);
   const w1=rx.windows["1m"].rssi,w10=rx.windows["10m"].rssi;
   rows("rx-rf",[["Frequency (CH)",f(rf.freq_mhz,3,"MHz")],["Air data rate",fi(rf.air_rate_bps,"bit/s")+" (code "+rf.air_rate_code+")"],
-    ["Packet RSSI",f(rf.rssi_dbm,0,"dBm")],["Noise floor",f(rf.noise_dbm,0,"dBm")+" ("+(N(rf.noise_age_s)?"—":f(rf.noise_age_s,0,"s old"))+")"],
+    ["Packet RSSI (last, 1 dB steps)",f(rf.rssi_dbm,0,"dBm")],["Noise floor",f(rf.noise_dbm,0,"dBm")+" ("+(N(rf.noise_age_s)?"—":f(rf.noise_age_s,0,"s old"))+")"],
     ["SNR est",f(rf.snr_est_db,1,"dB")],["Pr est (noise removed)",f(rf.pr_est_dbm,1,"dBm")],["N0 est",f(rf.n0_est_dbm_hz,1,"dBm/Hz")],
     ["C/N0 est",f(rf.cn0_est_dbhz,1,"dB-Hz")],["Eb/N0 est",f(rf.ebn0_est_db,1,"dB")],["Sensitivity est",f(rf.sensitivity_est_dbm,0,"dBm")],
     [ "Link margin est",{v:f(rf.margin_est_db,1,"dB"),c:N(rf.margin_est_db)?"":rf.margin_est_db<3?"bad":rf.margin_est_db<6?"warn":"ok"}],
     ["Fade depth p90−p10 (1 m / 10 m)",(w1.n?f(w1.fade_depth,1):"—")+" / "+(w10.n?f(w10.fade_depth,1):"—")+" dB"],
     ["Assumed noise bandwidth",fi(rf.noise_bw_assumed_hz,"Hz")]]);
-  rows("rx-budget",[["S/C TX power (nominal for code)",f(b.sc_tx_power_dbm_nominal,1,"dBm")],["S/C EIRP est",f(b.sc_eirp_dbm_est,1,"dBm")],
-    ["Ground antenna gain",f(b.ground_gain_dbi,1,"dBi")],["Ground line loss",f(b.ground_line_loss_db,1,"dB")],["Measured path loss est",f(b.measured_path_loss_db_est,1,"dB")],
-    ["Distance (configured)",f(b.distance_km,3,"km")],["Free-space path loss",f(b.fspl_db,1,"dB")],
-    ["Excess loss est (terrain, fading, pointing)",{v:f(b.excess_loss_db_est,1,"dB"),c:N(b.excess_loss_db_est)?"":b.excess_loss_db_est>20?"warn":""}],
-    ["One-way light time",N(b.owlt_s)?"—":f(b.owlt_s*1e6,2,"µs")],["Range at sensitivity est (FSPL + excess)",fi(b.range_at_sensitivity_km_est,"km")]]);
+  const pm=(w,k)=>{const x=rx.windows[w][k];return x.n?f(x.mean,4)+(N(x.sem)?"":" ± "+f(x.sem,4))+" dBm (n="+x.n+")":"—"};
+  rows("rx-budget",[["Spacecraft TX power (E22-400T37S, fixed 37 dBm)",f(b.sc_tx_power_dbm_nominal,2,"dBm"),""],
+    ["− Spacecraft feeder loss",f(-b.sc_line_loss_db,2,"dB"),""],["+ Spacecraft antenna gain",f(b.sc_antenna_gain_dbi,2,"dBi"),""],
+    ["= EIRP",f(b.sc_eirp_dbm_est,2,"dBm"),""],["Distance (configured) / one-way light time",f(b.distance_km,3,"km"),N(b.owlt_s)?"—":f(b.owlt_s*1e6,3,"µs")],
+    ["− Free-space path loss (FSPL)",N(b.fspl_db)?"set [spacecraft] distance_km":f(-b.fspl_db,4,"dB"),"path loss: last "+f(b.measured_path_loss_db_est,2,"dB")+", 10-min mean "+f(b.measured_path_loss_mean10m_db,4,"dB")],
+    ["+ Ground antenna gain",f(b.ground_gain_dbi,2,"dBi"),""],["− Ground feeder loss",f(-b.ground_line_loss_db,2,"dB"),""],
+    ["= Received power",f(b.predicted_pr_dbm,4,"dBm"),pm("10m","rssi")],
+    ["Excess loss (measured − free space: terrain, fading, pointing)","—",{v:f(b.excess_loss_db_est,2,"dB"),c:N(b.excess_loss_db_est)?"":b.excess_loss_db_est>20?"warn":""}],
+    ["Noise floor (E22 ambient-noise register)","—",pm("10m","noise")],["SNR",f(b.predicted_snr_db,2,"dB"),f(rf.snr_est_db,2,"dB")],
+    ["Sensitivity (2.4k: EBYTE datasheet −126 dBm typ; faster rates scaled)",f(rf.sensitivity_est_dbm,1,"dBm"),f(rf.sensitivity_est_dbm,1,"dBm")],
+    ["= Link margin",{v:f(b.predicted_margin_db,2,"dB"),c:""},{v:f(rf.margin_est_db,2,"dB"),c:N(rf.margin_est_db)?"":rf.margin_est_db<3?"bad":rf.margin_est_db<6?"warn":"ok"}],
+    ["Range at sensitivity (free space + measured excess loss)","",fi(b.range_at_sensitivity_km_est,"km")]],["item","predicted (free space)","measured"]);
+  rows("rx-rssi",[["Last packet (instantaneous)",f(rf.rssi_dbm,0,"dBm")+"  (resolution "+f(rf.rssi_resolution_db,0,"dB")+")"],
+    ["Mean 1 min ± SEM",pm("1m","rssi")],["Mean 10 min ± SEM",pm("10m","rssi")],["Mean this pass ± SEM",pm("pass","rssi")],
+    ["Received power, linear (last)",N(rf.rssi_mw)?"—":(rf.rssi_mw*1e9).toPrecision(4)+" pW"],
+    ["Noise floor mean 10 min ± SEM",pm("10m","noise")],["Calibration offset applied",f(rf.rssi_cal_offset_db,2,"dB")+" ([radio] rssi_cal_offset_db)"]]);
   const tw=rx.two_way||{};
   rows("rx-2way",[["RSSI",f(rf.rssi_dbm,0,"dBm"),f(tw.uplink_rssi,0,"dBm")],["Noise floor",f(rf.noise_dbm,0,"dBm"),f(tw.sc_noise_floor,0,"dBm")],
     ["SNR est",f(rf.snr_est_db,1,"dB"),(N(tw.uplink_rssi)||N(tw.sc_noise_floor))?"—":f(tw.uplink_rssi-tw.sc_noise_floor,1,"dB")],
@@ -271,30 +284,38 @@ function science(){const m=S.tlm.MAG?S.tlm.MAG.values:null,cfg=S.science_cfg||{r
     const sc=["x","y","z"].map(a=>N(m["ob_b_"+a])||N(m["ib_b_"+a])?null:(m["ib_b_"+a]-m["ob_b_"+a])/(k-1));
     const amb=["x","y","z"].map((a,i)=>sc[i]===null?null:m["ob_b_"+a]-sc[i]);
     rows("sci-mag",[["Outboard RM3100",f(m.ob_b_x,3),f(m.ob_b_y,3),f(m.ob_b_z,3),f(mag(m.ob_b_x,m.ob_b_y,m.ob_b_z),3),f(m.ob_rms,3)],
-      ["Inboard RM3100",f(m.ib_b_x,3),f(m.ib_b_y,3),f(m.ib_b_z,3),f(mag(m.ib_b_x,m.ib_b_y,m.ib_b_z),3),f(m.ib_rms,3)],
-      ["Body MMC5603",f(m.body_b_x,3),f(m.body_b_y,3),f(m.body_b_z,3),f(mag(m.body_b_x,m.body_b_y,m.body_b_z),3),f(m.body_rms,3)],
+      ["Inboard RM3100 (optional)",f(m.ib_b_x,3),f(m.ib_b_y,3),f(m.ib_b_z,3),f(mag(m.ib_b_x,m.ib_b_y,m.ib_b_z),3),f(m.ib_rms,3)],
+      ["Body BMM150 (Nicla Sense ME)",f(m.body_b_x,3),f(m.body_b_y,3),f(m.body_b_z,3),f(mag(m.body_b_x,m.body_b_y,m.body_b_z),3),f(m.body_rms,3)],
       ["Gradient IB−OB",...["x","y","z"].map(a=>N(m["ib_b_"+a])||N(m["ob_b_"+a])?"—":f(m["ib_b_"+a]-m["ob_b_"+a],3)),"",""],
       ["S/C field @ OB (est)",...sc.map(v=>f(v,3)),sc[0]===null?"—":f(Math.hypot(...sc),3),""],
       ["Ambient field (corrected)",...amb.map(v=>f(v,3)),amb[0]===null?"—":f(Math.hypot(...amb),3),""],
-      ["Samples / TX keyed",fi(m.nsamples),m.flags&1?"TX keyed":"quiet","","",""]],["µT","Bx","By","Bz","|B|","RMS"]);}
+      ["Samples / PA during sampling",fi(m.nsamples),m.flags&1?"PA keyed":"PA off","RM3100 CC",fi(m.rm3100_cc),""]],["µT","Bx","By","Bz","|B|","RMS"]);}
   else rows("sci-mag",[["no MAG packet yet",""]]);
   const a=S.tlm.ATT?S.tlm.ATT.values:null;
-  if(a){const e1=N(a.q_triad_w)?null:q2e(a.q_triad_w,a.q_triad_x,a.q_triad_y,a.q_triad_z),e2=N(a.q_aru_w)?null:q2e(a.q_aru_w,a.q_aru_x,a.q_aru_y,a.q_aru_z);
-    rows("sci-att",[["TRIAD q (w x y z)",[a.q_triad_w,a.q_triad_x,a.q_triad_y,a.q_triad_z].map(v=>f(v,4)).join(" ")],["TRIAD yaw / pitch / roll",e1?e1.map(v=>f(v,1)).join(" / ")+" °":"—"],
-      ["ARU q (w x y z)",[a.q_aru_w,a.q_aru_x,a.q_aru_y,a.q_aru_z].map(v=>f(v,4)).join(" ")],["ARU yaw / pitch / roll",e2?e2.map(v=>f(v,1)).join(" / ")+" °":"—"],["ARU accuracy",fi(a.aru_accuracy)+" / 3"],
-      ["Sun vector (body)",[a.sun_x,a.sun_y,a.sun_z].map(v=>f(v,3)).join(" ")],["CSS counts",[a.css_0,a.css_1,a.css_2,a.css_3].map(v=>fi(v)).join(" ")],
-      ["Acceleration g",[a.acc_x,a.acc_y,a.acc_z].map(v=>f(v,3)).join(" ")],["Rate °/s",[a.gyro_x,a.gyro_y,a.gyro_z].map(v=>f(v,2)).join(" ")],["AK8963 µT",[a.ak_x,a.ak_y,a.ak_z].map(v=>f(v,1)).join(" ")]]);}
+  if(a){const e1=N(a.q_triad_w)?null:q2e(a.q_triad_w,a.q_triad_x,a.q_triad_y,a.q_triad_z),e2=N(a.q_fus_w)?null:q2e(a.q_fus_w,a.q_fus_x,a.q_fus_y,a.q_fus_z);
+    let dq="—";if(e1&&e2){const d=1-2*Math.pow(a.q_triad_w*a.q_fus_w+a.q_triad_x*a.q_fus_x+a.q_triad_y*a.q_fus_y+a.q_triad_z*a.q_fus_z,2);dq=f(Math.acos(Math.max(-1,Math.min(1,1-d)))*180/Math.PI,2,"°")}
+    rows("sci-att",[["BHI260 fusion q (w x y z)",[a.q_fus_w,a.q_fus_x,a.q_fus_y,a.q_fus_z].map(v=>f(v,4)).join(" ")],["Fusion yaw / pitch / roll",e2?e2.map(v=>f(v,2)).join(" / ")+" °":"—"],
+      ["Fusion accuracy estimate",N(a.q_fus_acc)?"—":f(a.q_fus_acc,3,"rad")+" ("+f(a.q_fus_acc*180/Math.PI,2,"°")+")"],
+      ["TRIAD q (w x y z)",[a.q_triad_w,a.q_triad_x,a.q_triad_y,a.q_triad_z].map(v=>f(v,4)).join(" ")],["TRIAD yaw / pitch / roll",e1?e1.map(v=>f(v,2)).join(" / ")+" °":"—"],
+      ["Fusion vs TRIAD difference",dq],["Acceleration g",[a.acc_x,a.acc_y,a.acc_z].map(v=>f(v,3)).join(" ")+(N(a.acc_x)?"":"  |a| "+f(Math.hypot(a.acc_x,a.acc_y,a.acc_z),3))],
+      ["Rate °/s",[a.gyro_x,a.gyro_y,a.gyro_z].map(v=>f(v,1)).join(" ")],["BMM150 µT",[a.mag_x,a.mag_y,a.mag_z].map(v=>f(v,1)).join(" ")+(N(a.mag_x)?"":"  |B| "+f(Math.hypot(a.mag_x,a.mag_y,a.mag_z),1))]]);}
   else rows("sci-att",[["no ATT packet yet",""]]);
   tlmTable("sci-env","ENV");const sp=S.tlm.SPEC?S.tlm.SPEC.values:null;
   if(sp){const nm=[410,435,460,485,510,535,560,585,610,645,680,705,730,760,810,860,900,940];const col=w=>w<450?"#8b5cf6":w<495?"#3b82f6":w<570?"#22c55e":w<590?"#eab308":w<620?"#f97316":w<700?"#ef4444":"#7f1d1d";
-    bars("sci-spec",nm.map(w=>sp["as7265x_"+w+"nm"]),nm.map(String),"#4fb3ff",{unit:"µW",colors:nm.map(col)});
-    const ch=["F_405_F1","F_425_F2","F_450_FZ","F_475_F3","F_515_F4","F_550_F5","F_555_FY","F_600_FXL","F_640_F6","F_690_F7","F_745_F8","NIR_855","VIS_1","FD_1"];
-    bars("sci-spec2",ch.map(c=>sp["as7343_"+c]),ch.map(c=>c.split("_")[1]),"#c792ea",{unit:"cts"});}}
+    bars("sci-spec",nm.map(w=>sp["cal_"+w+"nm"]),nm.map(String),"#4fb3ff",{unit:"µW",colors:nm.map(col)});
+    bars("sci-spec2",nm.map(w=>sp["raw_"+w+"nm"]),nm.map(String),"#c792ea",{unit:"cts"});
+    const G=["1x","3.7x","16x","64x"],L=[sp.flags&2?"white":"",sp.flags&4?"IR":"",sp.flags&8?"UV":""].filter(x=>x).join("+")||"off (passive)";
+    rows("sci-specinfo",[["Valid",sp.flags&1?"yes":"NO"],["Gain / integration",(G[sp.gain_code]||"?")+" / "+fi(sp.int_cycles)+" cycles = "+f(sp.int_cycles*2.8,1,"ms")],["Lamps",L],
+      ["Die temperature dev 0 / 1 / 2",[sp.temp_0,sp.temp_1,sp.temp_2].map(v=>f(v,0)).join(" / ")+" °C"]]);}}
 function commanding(){const c=S.cop;rows("cmd-cop",[["SDLS authentication",{v:c.sdls?"ON (HMAC-SHA-256)":"OFF — unauthenticated",c:c.sdls?"ok":"warn"}],["SDLS sequence number",fi(c.sdls_sn)],
     ["V(S)",fi(c.vs)],["N(R)",fi(c.nr)],["Lockout",c.lockout?"YES":"no"],["Retransmit flag",c.retransmit?"YES":"no"],["Outstanding / queued / bypass",`${c.outstanding} / ${c.queued} / ${c.pending_bypass}`]]);
   rows("cmd-hist",c.recent.slice().reverse().map(r=>["#"+r.id,r.text,r.kind,{v:r.state,c:r.state==="EXECUTED"?"ok":["FAILED","TIMEOUT","SUSPENDED"].includes(r.state)?"bad":"warn"},
     r.ns??"—",fi(r.tx),utc(r.t_queued).slice(11),N(r.t_radiated)?"—":utc(r.t_radiated).slice(11),N(r.t_accepted)?"—":utc(r.t_accepted).slice(11),N(r.t_done)?"—":utc(r.t_done).slice(11),f(r.rtlt_s,1,"s"),r.detail||""]),
     ["#","command","type","state","N(S)","tx","queued","radiated","accepted","done","radiate→done","detail"]);
+  const io=S.station_io||{};
+  rows("cmd-io",[["MCU link",io.connected?{v:"CONNECTED",c:"ok"}:{v:"no hello (station I/O off or MCU not running)",c:"warn"}],["Firmware",io.fw||"—"],
+    ["CardKB #1 (command entry)",io.kb1?{v:"present",c:"ok"}:"not detected"],["CardKB #2 (2nd operator, 'Y' = AUTH)",io.kb2?{v:"present",c:"ok"}:"not detected"],
+    ["Radio Control Unit",S.radio.rcu?{v:"active",c:"ok"}:"off"],["Typing on CardKB",{v:"> "+(io.input||"")+"_",c:""}]]);
   $("cmd-console").innerHTML=S.console.slice().reverse().map(([t,x])=>`<div>${utc(t).slice(11)} ${x}</div>`).join("");
   $("cmd-pending").innerHTML=S.pending_confirm.map(p=>`<div style="margin:4px 0"><span class="warn">⚠ #${p.id} ${p.text}</span>
      <button class="btn red" onclick="post('/api/confirm',{id:${p.id},role:'CONFIRM'})">CONFIRM</button>
@@ -311,13 +332,13 @@ function overview(){const rx=S.rx,rf=rx.rf,fr=rx.frames,hk=S.tlm.HK?S.tlm.HK.val
     ["SNR est",f(rf.snr_est_db,1),"","dB"],["Margin est",f(rf.margin_est_db,1),N(rf.margin_est_db)?"":rf.margin_est_db<3?"bad":rf.margin_est_db<6?"warn":"ok","dB vs "+f(rf.sensitivity_est_dbm,0)+" dBm"],
     ["Frames",fi(fr.ok),"","lost "+fi(fr.lost_mcfc)+" · FER "+pct(fr.fer)],["Info rate",f(fr.info_rate_bps,0),"","bit/s (60 s)"],
     ["RS corrected",fi(rx.decoder.symbols_corrected),"","sym · uncorr "+fi(rx.decoder.uncorrectable)],["S/C mode",S.decoded.mode||"—","","FDIR "+(S.decoded.fdir.length||0)],
-    ["PA temp",f(hk.pa_temp,1),"","°C"],["Radio bus",f(hk.bus_voltage,2),"","V · "+f(hk.bus_current,2)+" A"],["Uplink RSSI",f((rx.two_way||{}).uplink_rssi,0),"","dBm at S/C"],
+    ["Bus temp",f(hk.bus_temp,1),"","°C (Nicla Sense ME)"],["S/C radio health",hk.radio_fault?["","UNDER-V","OVER-V","OVER-TEMP","OV+OT"][hk.radio_fault]||"?":(N(hk.radio_fault)?"—":"OK"),hk.radio_fault?"bad":"ok","E22 self-report"],["Uplink RSSI",f((rx.two_way||{}).uplink_rssi,0),"","dBm at S/C"],
     ["Commands",fi(hk.cmd_accepted),"","acc · rej "+fi(hk.cmd_rejected)]];
   $("ov-tiles").innerHTML=T.map(([l,v,c,s])=>`<div class="tile"><div class="l">${l}</div><div class="v ${c}">${v}</div><div class="s">${s}</div></div>`).join("");
   const s=rx.series;series("ov-chart",[{v:s.rssi,c:"#4fb3ff"},{v:s.noise,c:"#ff8c42"},{v:s.snr,c:"#2ecc71"}]);
   const ok=n=>S.tlm[n]?dur(S.utc-S.tlm[n].ert)+" ago":"—";
   rows("ov-sc",[["Mode / uptime",(S.decoded.mode||"—")+" / "+dur(hk.uptime_s)],["SCLK partition",fi(hk.sclk_partition)],["FDIR",S.decoded.fdir.join(", ")||"none"],
-    ["Avionics / PA temp",f(hk.avionics_temp,1)+" / "+f(hk.pa_temp,1)+" °C"],["SSR fill",f(hk.ssr_fill,1,"%")],["Last HK / RF / MAG",ok("HK")+" / "+ok("RF")+" / "+ok("MAG")],
+    ["Bus temp / E22 fault reports",f(hk.bus_temp,1)+" °C / "+fi(hk.radio_fault_reports)],["SSR capacity",fi(hk.ssr_kib,"KiB")],["SSR fill",f(hk.ssr_fill,1,"%")],["Last HK / RF / MAG",ok("HK")+" / "+ok("RF")+" / "+ok("MAG")],
     ["SDLS auth failures",fi(hk.sdls_auth_fail)],["Sensors missing",S.decoded.sensors_missing.join(" ")||"none"]]);
   $("ov-events").innerHTML=S.events.slice(-14).reverse().map(e=>`<div class="${e.level==="ERROR"?"bad":e.level==="WARN"?"warn":""}">${utc(e.t).slice(11)} ${e.source} ${e.text}</div>`).join("");
   rows("ov-cmds",S.cop.recent.slice(-8).reverse().map(r=>["#"+r.id,r.text,{v:r.state,c:r.state==="EXECUTED"?"ok":["FAILED","TIMEOUT","SUSPENDED"].includes(r.state)?"bad":"warn"},f(r.rtlt_s,1,"s")]));}

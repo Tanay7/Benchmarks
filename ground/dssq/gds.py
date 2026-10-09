@@ -102,6 +102,9 @@ class GroundStation:
         self.pending_confirm: dict[int, dict] = {}
         self._confirm_ids = 1
         self.console_lines: deque = deque(maxlen=30)
+        # Station I/O MCU (CardKB keyboards, LEDs, RCU): filled by display/frontpanel.py
+        self.station_io: dict = {"connected_t": None, "fw": "", "rcu": False, "kb1": False,
+                                 "kb2": False, "input": ""}
         self.outbox: deque = deque()          # bytes to write to the radio
         self.external_tc: deque = deque()     # raw TC frames from an external MCS (UDP)
         self.last_noise_query = 0.0
@@ -153,7 +156,7 @@ class GroundStation:
                 self.sync.expect_noise_reply = False
             for item in self.sync.feed(data, now):
                 if isinstance(item, NoiseReply):
-                    self.rx.on_noise(item.noise_dbm, item.ert)
+                    self.rx.on_noise(item.noise_dbm + self.rx.rssi_cal_db, item.ert)
                 elif isinstance(item, RadioFault):
                     self._on_radio_fault(item)
                 elif isinstance(item, RawCadu):
@@ -183,13 +186,14 @@ class GroundStation:
             return
         f = res.frame
         self.ert_by_mcfc[f.mcfc] = (now, rc.rssi_dbm or 0)
+        rssi = None if rc.rssi_dbm is None else rc.rssi_dbm + self.rx.rssi_cal_db   # calibrated
         data_octets = 0
         pkts = []
         if f.vcid in self.extract:
             pkts = self.extract[f.vcid].push(f.vcfc, f.fhp, f.data)
             data_octets = sum(len(p.raw) for p in pkts)
-        self.rx.on_frame(now, rc.rssi_dbm, f.mcfc, f.is_oid, data_octets)
-        snr = None if rc.rssi_dbm is None or self.rx.noise_dbm is None else rc.rssi_dbm - self.rx.noise_dbm
+        self.rx.on_frame(now, rssi, f.mcfc, f.is_oid, data_octets)
+        snr = None if rssi is None or self.rx.noise_dbm is None else rssi - self.rx.noise_dbm
         self.archive.frame(ert=now, mcfc=f.mcfc, vcid=f.vcid, vcfc=f.vcfc, fhp=f.fhp,
                            rs=res.rs_corrected, rssi=rc.rssi_dbm, snr=snr, ok=1)
         if self._fwd_frames:
@@ -582,6 +586,9 @@ class GroundStation:
                 "events": list(self.events)[-80:],
                 "anomalies": list(self.anomaly.recent)[-20:],
                 "console": list(self.console_lines),
+                "station_io": {**self.station_io,
+                               "connected": bool(self.station_io["connected_t"]
+                                                 and now - self.station_io["connected_t"] < 12)},
                 "cmd_stages": CMD_STAGES,
             }
 

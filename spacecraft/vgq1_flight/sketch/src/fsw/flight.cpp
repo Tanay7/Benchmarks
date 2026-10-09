@@ -105,7 +105,6 @@ void Flight::setup() {
 #endif
   init_radio();
   init_sensors();
-  analog_.begin();
 
   last_valid_tc_ms_ = millis();
   set_mode(MODE_SAFE, "boot");          // like a real spacecraft: come up safe, wait for ground
@@ -159,30 +158,21 @@ void Flight::init_radio() {
 }
 
 void Flight::init_sensors() {
-  bus_.begin(SENSOR_WIRE, kTcaAddr, PIN_TCA_RESET, kI2cClockHz);
+  bus_.begin(SENSOR_WIRE, kI2cClockHz);
   uint16_t h = 0;
-  if (bus_.mux_present()) h |= SNS_TCA9548A;
-  if (imu_.begin(bus_, CH_IMU)) h |= SNS_MPU9250;
-  if (imu_.mag_ok()) h |= SNS_AK8963;
-  if (imu_.ok() && !imu_.mag_ok())
-    LOGF("WARN", "IMU WHO_AM_I=0x%02X without AK8963: MPU-6500 based clone?", imu_.who_am_i());
-  if (mag_ob_.begin(bus_, CH_MAG_OB)) h |= SNS_RM3100_OB;
-  if (mag_ib_.begin(bus_, CH_MAG_IB)) h |= SNS_RM3100_IB;
-  if (mag_body_.begin(bus_, CH_BODY)) h |= SNS_MMC5603;
-  if (veml_.begin(bus_, CH_SPEC2)) h |= SNS_VEML7700;
-  if (bme_.begin(bus_, CH_BODY)) h |= SNS_BME690;
-  spec_.begin(bus_, CH_SPEC1, CH_SPEC2);
-  if (spec_.triad_ok()) h |= SNS_AS7265X;
-  if (spec_.as7343_ok()) h |= SNS_AS7343;
-  if (nenv_.begin(bus_, CH_NENV)) h |= SNS_NICLA_ENV;
-  if (aru_.begin(bus_, CH_ARU)) h |= SNS_NICLA_ME;
-  if (ina_.begin(bus_, CH_BODY, 0.01f)) h |= SNS_BUS_MON;
-  bus_.select(-1);
-  h |= SNS_CSS;                                         // analog, always "present"
-  if (!isnan(analog_.pa_temp_c())) h |= SNS_PA_NTC;
+  if (aru_.begin(bus_)) {
+    h |= SNS_NICLA_ME;
+    if (aru_.read_motion(aru_last_)) aru_valid_ = true;
+  }
+  if (nenv_.begin(bus_)) h |= SNS_NICLA_ENV;
+  if (spec_.begin(bus_)) h |= SNS_AS7265X;
+  if (mag_ob_.begin(bus_, kRm3100ObAddr)) h |= SNS_RM3100_OB;
+  if (mag_ib_.begin(bus_, kRm3100IbAddr)) h |= SNS_RM3100_IB;     // optional second unit
   sensor_health_ = h;
-  LOGF("INFO", "sensor health 0x%04X (BME690 driver %s)", h,
-       Bme690::compiled_in() ? "compiled" : "NOT compiled - run tools/fetch_vendor_libs.sh");
+  LOGF("INFO", "instruments: Nicla ME %s, Nicla Env %s, AS7265X %s, RM3100 OB %s, RM3100 IB %s",
+       (h & SNS_NICLA_ME) ? "ok" : "ABSENT", (h & SNS_NICLA_ENV) ? "ok" : "ABSENT",
+       (h & SNS_AS7265X) ? "ok" : "ABSENT", (h & SNS_RM3100_OB) ? "ok" : "ABSENT",
+       (h & SNS_RM3100_IB) ? "ok" : "not fitted");
 }
 
 // =============================================================================
@@ -256,6 +246,20 @@ void Flight::process_rx_packet(uint32_t now) {
       fdir_flags_ |= FDIR_RADIO_FAULT;
       evr(3, 0x0310 + radio_fault_code_, "E22 reports %s - module RF output disabled",
           kRadioFault[radio_fault_code_]);
+      if (radio_fault_code_ == 1) fdir_flags_ |= FDIR_LOW_BUS_V;
+      if (radio_fault_code_ >= 3) {                  // over-temperature (3) or OV + OT (4)
+        fdir_flags_ |= FDIR_PA_OVERTEMP;
+        // The T37S cannot lower its output power: the thermal lever is duty
+        // cycle. Silence the PA for a cool-down, then resume at SAFE cadence
+        // (frame period doubled while PA_OVERTEMP stays set, frame_period_ms()).
+        if ((fdir_mask_ & FDIR_PA_OVERTEMP) && !tx_inhibit_) {
+          tx_inhibit_ = true;
+          tx_inhibit_until_ms_ = now + (uint32_t)kPaCooldownS * 1000UL;
+          fdir_flags_ |= FDIR_TX_INHIBIT;
+          evr(4, 0x0604, "PA over-temperature: transmitter OFF for %u s, SAFE", (unsigned)kPaCooldownS);
+          set_mode(MODE_SAFE, "PA over-temperature");
+        }
+      }
     }
     return;
   }
@@ -547,8 +551,14 @@ void Flight::execute(const uint8_t* pkt, size_t len, uint8_t tc_seq) {
       aux_timeouts_ = loop_overruns_ = 0; loop_max_ms_ = 0;
       break;
     case OP_REBOOT: reboot_pending_ = true; reboot_after_frames_ = 2; break;
-    case OP_MAGCC:
-      if (!mag_ob_.set_cycle_count(c.a16) && !mag_ib_.set_cycle_count(c.a16)) result = CE_HARDWARE;
+    case OP_MAGCC: {
+      const bool a = mag_ob_.ok() && mag_ob_.set_cycle_count(c.a16);
+      const bool b = mag_ib_.ok() && mag_ib_.set_cycle_count(c.a16);
+      if (!a && !b) result = CE_HARDWARE;
+      break;
+    }
+    case OP_SPECCFG:
+      if (!spec_.ok() || !spec_.configure(c.a8, c.b8, c.c8)) result = CE_HARDWARE;
       break;
     case OP_CMDLOSS: cmd_loss_s_ = c.a32; last_valid_tc_ms_ = millis(); break;
     case OP_FDIRMASK: fdir_mask_ = c.a16; break;
@@ -614,7 +624,8 @@ void Flight::tick_1hz(uint32_t now) {
                                     &Flight::gen_env};
   const bool pa_keyed = tx_state_ != TX_IDLE;
   for (int i = 0; i < P_COUNT; ++i) {
-    // SPEC (~0.5 s integration) and ENV (BME690 heater ~0.2 s) block the loop:
+    // SPEC (AS7265X integration, cycles x 2.8 ms per bank) and ENV (several Nicla
+    // Sense Env register transactions) block the loop:
     // run them only while the PA is off; they stay due and run on a later tick.
     if (pa_keyed && (i == P_SPEC || i == P_ENV)) continue;
     uint16_t period = kCadence[m][i];
@@ -642,27 +653,49 @@ void Flight::tick_1hz(uint32_t now) {
   notify_egse_status();
 }
 
+// Nicla Sense ME health bits from the ARU page flags.
+static const uint16_t kMeBits = SNS_ME_QUAT | SNS_ME_ACC | SNS_ME_GYRO | SNS_ME_MAG | SNS_ME_BARO |
+                                SNS_ME_BSEC;
+static const uint16_t kEnvBits = SNS_ENV_TH | SNS_ENV_IAQ | SNS_ENV_OAQ;
+static uint16_t me_bits(uint8_t mf, uint8_t ef) {
+  return (uint16_t)(((mf & 1) ? SNS_ME_QUAT : 0) | ((mf & 2) ? SNS_ME_ACC : 0) |
+                    ((mf & 4) ? SNS_ME_GYRO : 0) | ((mf & 8) ? SNS_ME_MAG : 0) |
+                    ((ef & 1) ? SNS_ME_BARO : 0) | ((ef & 2) ? SNS_ME_BSEC : 0));
+}
+
+// 1 Hz instrument sample, taken in a PA-off window (see loop()). Order matters
+// for efficiency: both RM3100 conversions are started first, the two Nicla Sense
+// ME pages are read while they convert (~2 x 3 ms of I2C at 100 kHz), and only
+// then are the magnetometers collected - so their ~6.8 ms conversion is hidden.
 void Flight::sample_fast() {
   if (tx_state_ != TX_IDLE) mag_tx_keyed_ = true;   // only if called outside a PA-off window
   const uint16_t en = sensor_enable_;
+  const bool ob = (en & SNS_RM3100_OB) && mag_ob_.start();
+  const bool ib = (en & SNS_RM3100_IB) && mag_ib_.start();
+
+  if ((en & SNS_NICLA_ME) && aru_.ok()) {
+    AruReading r = aru_last_;
+    if (aru_.read_motion(r)) {
+      aru_valid_ = true;
+      aru_fail_count_ = 0;
+      if (r.motion_flags & 8) {                      // BMM150 through the BHI260
+        for (int k = 0; k < 3; ++k) last_mag_ut_[k] = (float)r.mag_raw[k] * kAruMagUtPerLsb;
+        mstat_body_.add(last_mag_ut_[0], last_mag_ut_[1], last_mag_ut_[2]);
+      }
+      aru_env_valid_ = aru_.read_env(r);
+      if (aru_env_valid_ && (r.env_flags & 4)) bus_temp_c_ = r.t_c;
+      aru_last_ = r;
+      sensor_health_ = (uint16_t)((sensor_health_ & ~kMeBits) | SNS_NICLA_ME |
+                                  me_bits(r.motion_flags, aru_env_valid_ ? r.env_flags : 0));
+    } else {
+      aru_valid_ = aru_env_valid_ = false;
+      if (aru_fail_count_ < 255) ++aru_fail_count_;
+    }
+  }
+
   float x, y, z;
-  if ((en & SNS_RM3100_OB) && mag_ob_.ok() && mag_ob_.measure(x, y, z)) mstat_ob_.add(x, y, z);
-  if ((en & SNS_RM3100_IB) && mag_ib_.ok() && mag_ib_.measure(x, y, z)) mstat_ib_.add(x, y, z);
-  if ((en & SNS_MMC5603) && mag_body_.ok() && mag_body_.measure(x, y, z)) mstat_body_.add(x, y, z);
-  if ((en & SNS_MPU9250) && imu_.ok()) {
-    if (imu_.read()) { avi_temp_c_ = imu_.temp_c; sensor_fail_count_[0] = 0; }
-    else ++sensor_fail_count_[0];
-  }
-  if ((en & SNS_NICLA_ME) && aru_.ok()) aru_valid_ = aru_.read(aru_last_);
-  if (ina_.ok()) {
-    float v, i;
-    if (ina_.read(v, i)) { vradio_ = v; iradio_ = i; }
-  } else {
-    vradio_ = analog_.vradio_v();
-  }
-  analog_.read_css(css_);
-  pa_temp_c_ = analog_.pa_temp_c();
-  bus_.select(-1);
+  if (ob && mag_ob_.collect(x, y, z)) mstat_ob_.add(x, y, z);
+  if (ib && mag_ib_.collect(x, y, z)) mstat_ib_.add(x, y, z);
 }
 
 void Flight::gen_hk() {
@@ -682,15 +715,15 @@ void Flight::gen_hk() {
   p.farm_state = farm_.state();
   p.farm_vr = farm_.vr();
   p.cmd_loss_timer_s = (millis() - last_valid_tc_ms_) / 1000UL;
-  p.avionics_temp_cC = clamp_i16(avi_temp_c_ * 100.0f);
-  p.pa_temp_cC = clamp_i16(pa_temp_c_ * 100.0f);
-  p.bus_voltage_mV = isnan(vradio_) ? kNaU16 : (uint16_t)lroundf(vradio_ * 1000.0f);
-  p.bus_current_mA = clamp_i16(iradio_ * 1000.0f);
+  p.bus_temp_cC = clamp_i16(bus_temp_c_ * 100.0f);
+  p.radio_fault = radio_fault_code_;
+  p.radio_fault_reports = radio_fault_reports_;
   p.loop_max_ms = loop_max_ms_;
   p.loop_overruns = loop_overruns_;
   p.i2c_errors = (uint16_t)umin32(bus_.errors(), 65535);
   p.ssr_fill_permille = ssr_.fill_permille();
   p.ssr_dropped = (uint16_t)umin32(ssr_.dropped(), 65535);
+  p.ssr_kib = (uint16_t)(ssr_.capacity() / 1024);
   p.vc0_backlog = (uint16_t)vc_[0].bytes();
   p.vc1_backlog = (uint16_t)vc_[1].bytes();
   p.vc2_backlog = (uint16_t)vc_[2].bytes();
@@ -755,16 +788,16 @@ static MagVector mag_vec(const MagStats& s, bool ok) {
 
 void Flight::gen_mag() {
   MagPacket p{};
-  const uint8_t n = mstat_ob_.count() > mstat_body_.count() ? mstat_ob_.count() : mstat_body_.count();
+  uint8_t n = mstat_ob_.count();
+  if (mstat_ib_.count() > n) n = mstat_ib_.count();
+  if (mstat_body_.count() > n) n = mstat_body_.count();
   p.nsamples = n;
-  p.flags = (mag_tx_keyed_ ? 1 : 0) | (mstat_ob_.count() ? 2 : 0) | (mstat_ib_.count() ? 4 : 0) |
-            (mstat_body_.count() ? 8 : 0);
+  p.flags = (uint8_t)((mag_tx_keyed_ ? 1 : 0) | (mstat_ob_.count() ? 2 : 0) |
+                      (mstat_ib_.count() ? 4 : 0) | (mstat_body_.count() ? 8 : 0));
   p.outboard = mag_vec(mstat_ob_, mag_ob_.ok());
   p.inboard = mag_vec(mstat_ib_, mag_ib_.ok());
-  p.body = mag_vec(mstat_body_, mag_body_.ok());
-  float t;
-  if (mag_body_.ok() && mag_body_.temperature(t)) body_temp_c_ = t;
-  p.body_temp_cC = clamp_i16(body_temp_c_ * 100.0f);
+  p.body = mag_vec(mstat_body_, true);
+  p.rm3100_cycle_count = mag_ob_.ok() ? mag_ob_.cycle_count() : mag_ib_.cycle_count();
   mstat_ob_.reset(); mstat_ib_.reset(); mstat_body_.reset();
   mag_tx_keyed_ = false;
   uint8_t b[64];
@@ -773,42 +806,35 @@ void Flight::gen_mag() {
 
 void Flight::gen_att() {
   AttPacket p{};
-  for (int i = 0; i < 3; ++i) { p.acc_mg[i] = p.gyro_cdps[i] = p.ak_dT[i] = kNaI16; p.sun_body[i] = kNaI16; }
-  for (int i = 0; i < 4; ++i) { p.q_aru[i] = kNaI16; p.q_triad[i] = kNaI16; }
-  if (imu_.ok()) {
-    p.flags |= 1;
-    p.acc_mg[0] = clamp_i16(imu_.ax_g * 1000); p.acc_mg[1] = clamp_i16(imu_.ay_g * 1000);
-    p.acc_mg[2] = clamp_i16(imu_.az_g * 1000);
-    p.gyro_cdps[0] = clamp_i16(imu_.gx_dps * 100); p.gyro_cdps[1] = clamp_i16(imu_.gy_dps * 100);
-    p.gyro_cdps[2] = clamp_i16(imu_.gz_dps * 100);
-  }
-  if (imu_.mag_ok()) {
-    p.flags |= 0x10;
-    p.ak_dT[0] = clamp_i16(imu_.mx_uT * 10); p.ak_dT[1] = clamp_i16(imu_.my_uT * 10);
-    p.ak_dT[2] = clamp_i16(imu_.mz_uT * 10);
-  }
+  for (int i = 0; i < 3; ++i) p.acc_mg[i] = p.gyro_ddps[i] = p.mag_dT[i] = kNaI16;
+  for (int i = 0; i < 4; ++i) p.q_fus[i] = p.q_triad[i] = kNaI16;
+  p.q_fus_acc_mrad = kNaU16;
   if (aru_valid_) {
-    p.flags |= 2;
-    p.q_aru[0] = clamp_i16(aru_last_.qw * 16384); p.q_aru[1] = clamp_i16(aru_last_.qx * 16384);
-    p.q_aru[2] = clamp_i16(aru_last_.qy * 16384); p.q_aru[3] = clamp_i16(aru_last_.qz * 16384);
-    p.aru_accuracy = aru_last_.quat_accuracy;
-  }
-  float cnt[4];
-  for (int i = 0; i < 4; ++i) { p.css_raw[i] = css_[i]; cnt[i] = css_[i]; }
-  Vec3 sun;
-  if (css_sun_vector(cnt, kCssDark, kCssMinSignal, sun)) {
-    p.flags |= 4;
-    p.sun_body[0] = clamp_i16(sun.x * 32000); p.sun_body[1] = clamp_i16(sun.y * 32000);
-    p.sun_body[2] = clamp_i16(sun.z * 32000);
-  }
-  if (imu_.ok() && imu_.mag_ok()) {
-    const Vec3 a{imu_.ax_g, imu_.ay_g, imu_.az_g}, m{imu_.mx_uT, imu_.my_uT, imu_.mz_uT};
-    const float an = v_norm(a);
-    Quat q;
-    if (an > 0.9f && an < 1.1f && triad_ned(a, m, kGeomagInclDeg, kGeomagDeclDeg, q)) {
+    const AruReading& r = aru_last_;
+    if (r.motion_flags & 1) {
+      p.flags |= 1;
+      p.q_fus[0] = clamp_i16(r.qw * 16384.0f); p.q_fus[1] = clamp_i16(r.qx * 16384.0f);
+      p.q_fus[2] = clamp_i16(r.qy * 16384.0f); p.q_fus[3] = clamp_i16(r.qz * 16384.0f);
+      p.q_fus_acc_mrad = r.quat_acc_mrad;
+    }
+    if (r.motion_flags & 2) { p.flags |= 2; for (int i = 0; i < 3; ++i) p.acc_mg[i] = r.acc_mg[i]; }
+    if (r.motion_flags & 4) { p.flags |= 4; for (int i = 0; i < 3; ++i) p.gyro_ddps[i] = r.gyro_ddps[i]; }
+    if (r.motion_flags & 8) {
       p.flags |= 8;
-      p.q_triad[0] = clamp_i16(q.w * 16384); p.q_triad[1] = clamp_i16(q.x * 16384);
-      p.q_triad[2] = clamp_i16(q.y * 16384); p.q_triad[3] = clamp_i16(q.z * 16384);
+      for (int i = 0; i < 3; ++i) p.mag_dT[i] = clamp_i16(last_mag_ut_[i] * 10.0f);
+    }
+    // Independent attitude: TRIAD from the same gravity + field measurements,
+    // valid only while the accelerometer sees ~1 g (no manoeuvre in progress).
+    if ((r.motion_flags & 2) && (r.motion_flags & 8)) {
+      const Vec3 a{r.acc_mg[0] * 0.001f, r.acc_mg[1] * 0.001f, r.acc_mg[2] * 0.001f};
+      const Vec3 m{last_mag_ut_[0], last_mag_ut_[1], last_mag_ut_[2]};
+      const float an = v_norm(a);
+      Quat q;
+      if (an > 0.9f && an < 1.1f && triad_ned(a, m, kGeomagInclDeg, kGeomagDeclDeg, q)) {
+        p.flags |= 0x10;
+        p.q_triad[0] = clamp_i16(q.w * 16384.0f); p.q_triad[1] = clamp_i16(q.x * 16384.0f);
+        p.q_triad[2] = clamp_i16(q.y * 16384.0f); p.q_triad[3] = clamp_i16(q.z * 16384.0f);
+      }
     }
   }
   uint8_t b[64];
@@ -816,64 +842,62 @@ void Flight::gen_att() {
 }
 
 void Flight::gen_spec() {
-  if (!(sensor_enable_ & (SNS_AS7265X | SNS_AS7343))) return;
+  if (!(sensor_enable_ & SNS_AS7265X) || !spec_.ok()) return;
   SpecReading r;
   spec_.read(r);
-  bus_.select(-1);
   SpecPacket p{};
-  p.flags = (r.triad_ok ? 1 : 0) | (r.as7343_ok ? 2 : 0);
-  p.as7265x_gain = spec_.triad_gain_code();
-  p.as7265x_int_cycles = spec_.triad_int_cycles();
+  p.flags = (uint8_t)((r.ok ? 1 : 0) | (spec_.lamps() << 1));
+  p.gain_code = spec_.gain_code();
+  p.int_cycles = spec_.int_cycles();
   for (int i = 0; i < 18; ++i) {
-    p.as7265x_uW_cm2[i] = r.triad_ok ? r.triad_uW_cm2[i] : NAN;
-    p.as7343_counts[i] = r.as7343_ok ? r.as7343_counts[i] : kNaU16;
+    p.cal_uW_cm2[i] = r.ok ? r.cal_uW_cm2[i] : NAN;
+    p.raw[i] = r.ok ? r.raw[i] : kNaU16;
   }
-  p.as7343_gain = spec_.as7343_gain_code();
-  p.as7265x_temp_c = r.triad_ok ? r.triad_temp_c : (int8_t)-128;
+  for (int d = 0; d < 3; ++d) p.temp_c[d] = r.ok ? r.temp_c[d] : (int8_t)-128;
+  if (!r.ok) sensor_health_ &= (uint16_t)~SNS_AS7265X;
   uint8_t b[kMaxPayload];
   emit(APID_SPEC, b, pack_spec(p, b), VC_RT_SCI);
 }
 
 void Flight::gen_env() {
   EnvPacket p{};
-  p.bme_t_cC = kNaI16; p.bme_p_Pa = 0xFFFFFFFF; p.bme_rh_cpct = kNaU16; p.bme_gas_ohm = 0xFFFFFFFF;
   p.nenv_t_cC = kNaI16; p.nenv_rh_cpct = kNaU16; p.nenv_outdoor_aqi = kNaU16;
   p.nenv_iaq = p.nenv_tvoc_mg_m3 = p.nenv_eco2_ppm = p.nenv_no2_ppb = p.nenv_o3_ppb = NAN;
-  p.nme_p_hPa = p.nme_bvoc_ppm = p.veml_lux = NAN;
-  p.nme_t_cC = kNaI16; p.nme_rh_cpct = kNaU16; p.nme_iaq = kNaU16; p.nme_co2eq_ppm = 0xFFFFFFFF;
-  Bme690Reading br;
-  if ((sensor_enable_ & SNS_BME690) && bme_.ok() && bme_.read(br)) {
-    p.flags |= 1;
-    p.bme_t_cC = clamp_i16(br.t_c * 100);
-    p.bme_p_Pa = (uint32_t)lroundf(br.p_pa);
-    p.bme_rh_cpct = (uint16_t)lroundf(br.rh_pct * 100);
-    p.bme_gas_ohm = br.gas_valid ? (uint32_t)lroundf(br.gas_ohm) : 0xFFFFFFFF;
-  }
+  p.nme_p_cPa = 0xFFFFFFFFUL; p.nme_t_cC = kNaI16; p.nme_rh_cpct = kNaU16;
+  p.nme_iaq = p.nme_iaq_s = p.nme_bvoc_cppm = kNaU16;
+  p.nme_co2eq_ppm = 0xFFFFFFFFUL; p.nme_gas_ohm = 0xFFFFFFFFUL;
   NiclaEnvReading ne;
   if ((sensor_enable_ & SNS_NICLA_ENV) && nenv_.ok() && nenv_.read(ne)) {
-    p.flags |= 2;
-    p.nenv_t_cC = clamp_i16(ne.t_c * 100);
-    p.nenv_rh_cpct = isnan(ne.rh) ? kNaU16 : (uint16_t)lroundf(ne.rh * 100);
-    p.nenv_iaq = ne.iaq; p.nenv_tvoc_mg_m3 = ne.tvoc; p.nenv_eco2_ppm = ne.eco2;
-    p.nenv_outdoor_aqi = ne.aqi < 0 ? kNaU16 : (uint16_t)ne.aqi;
-    p.nenv_no2_ppb = ne.no2; p.nenv_o3_ppb = ne.o3;
+    if (ne.flags & 1) {
+      p.flags |= 1;
+      p.nenv_t_cC = clamp_i16(ne.t_c * 100.0f);
+      p.nenv_rh_cpct = isnan(ne.rh) ? kNaU16 : (uint16_t)lroundf(ne.rh * 100.0f);
+    }
+    if (ne.flags & 2) { p.flags |= 2; p.nenv_iaq = ne.iaq; p.nenv_tvoc_mg_m3 = ne.tvoc; p.nenv_eco2_ppm = ne.eco2; }
+    if (ne.flags & 4) {
+      p.flags |= 4;
+      p.nenv_outdoor_aqi = ne.aqi < 0 ? kNaU16 : (uint16_t)ne.aqi;
+      p.nenv_no2_ppb = ne.no2; p.nenv_o3_ppb = ne.o3;
+    }
+    sensor_health_ = (uint16_t)((sensor_health_ & ~kEnvBits) | ((ne.flags & 1) ? SNS_ENV_TH : 0) |
+                                ((ne.flags & 2) ? SNS_ENV_IAQ : 0) | ((ne.flags & 4) ? SNS_ENV_OAQ : 0));
   }
-  if (aru_valid_) {
-    p.flags |= 4;
-    p.nme_p_hPa = aru_last_.p_hpa;
-    p.nme_t_cC = clamp_i16(aru_last_.t_c * 100);
-    p.nme_rh_cpct = isnan(aru_last_.rh) ? kNaU16 : (uint16_t)lroundf(aru_last_.rh * 100);
-    p.nme_iaq = aru_last_.iaq;
-    p.nme_co2eq_ppm = aru_last_.co2eq;
-    p.nme_bvoc_ppm = aru_last_.bvoc_ppm;
-    p.nme_accuracy = aru_last_.bsec_accuracy;
+  if (aru_env_valid_) {
+    const AruReading& r = aru_last_;
+    if (r.env_flags & 1) { p.flags |= 8; p.nme_p_cPa = (uint32_t)lroundf(r.p_hpa * 100.0f); }
+    if (r.env_flags & 2) {
+      p.flags |= 0x10;
+      p.nme_iaq = r.iaq; p.nme_iaq_s = r.iaq_s; p.nme_co2eq_ppm = r.co2eq;
+      p.nme_bvoc_cppm = (uint16_t)lroundf(r.bvoc_ppm * 100.0f);
+      p.nme_accuracy = r.bsec_accuracy;
+    }
+    if (r.env_flags & 0x0C) {
+      p.flags |= 0x20;
+      if (r.env_flags & 4) p.nme_t_cC = clamp_i16(r.t_c * 100.0f);
+      if (r.env_flags & 8) p.nme_rh_cpct = (uint16_t)lroundf(r.rh * 100.0f);
+    }
+    if (r.env_flags & 0x10) { p.flags |= 0x40; p.nme_gas_ohm = r.gas_ohm; }
   }
-  float lux;
-  if ((sensor_enable_ & SNS_VEML7700) && veml_.ok() && veml_.read_lux(lux)) {
-    p.flags |= 8;
-    p.veml_lux = lux;
-  }
-  bus_.select(-1);
   uint8_t b[kMaxPayload];
   emit(APID_ENV, b, pack_env(p, b), VC_RT_SCI);
 }
@@ -915,25 +939,10 @@ void Flight::fdir_1hz(uint32_t now) {
     fdir_flags_ &= ~FDIR_TX_INHIBIT;
     evr(1, 0x0603, "transmitter re-enabled");
   }
-  // --- PA thermal ---
-  if (!isnan(pa_temp_c_)) {
-    if (pa_temp_c_ >= kPaTempRedC && (fdir_mask_ & FDIR_PA_OVERTEMP) && !tx_inhibit_) {
-      // The T37S cannot lower its output power: the only thermal lever is duty
-      // cycle. Silence the PA, then resume at SAFE cadence (and x2 period while
-      // the YELLOW flag stays set, see frame_period_ms()).
-      tx_inhibit_ = true;
-      tx_inhibit_until_ms_ = now + (uint32_t)kPaCooldownS * 1000UL;
-      fdir_flags_ |= FDIR_TX_INHIBIT;
-      evr(4, 0x0604, "PA %.1f C >= RED limit: transmitter OFF for %u s, SAFE", pa_temp_c_,
-          (unsigned)kPaCooldownS);
-      set_mode(MODE_SAFE, "PA over-temperature");
-    }
-    if (pa_temp_c_ >= kPaTempYellowC) fdir_flags_ |= FDIR_PA_OVERTEMP;
-    else if (pa_temp_c_ < kPaTempYellowC - 5) fdir_flags_ &= ~FDIR_PA_OVERTEMP;
-  }
-  if (!isnan(avi_temp_c_)) {
-    if (avi_temp_c_ >= kAviTempRedC) fdir_flags_ |= FDIR_AVI_OVERTEMP;
-    else if (avi_temp_c_ < kAviTempRedC - 5) fdir_flags_ &= ~FDIR_AVI_OVERTEMP;
+  // --- spacecraft bus temperature (Nicla Sense ME) ---
+  if (!isnan(bus_temp_c_)) {
+    if (bus_temp_c_ >= kBusTempRedC) fdir_flags_ |= FDIR_AVI_OVERTEMP;
+    else if (bus_temp_c_ < kBusTempRedC - 5) fdir_flags_ &= ~FDIR_AVI_OVERTEMP;
   }
   // --- I2C bus ---
   if (bus_.consecutive_errors() > 10 && (fdir_mask_ & FDIR_I2C_BUS)) {
@@ -941,15 +950,16 @@ void Flight::fdir_1hz(uint32_t now) {
     evr(3, 0x0605, "I2C bus fault (%u consecutive errors) - recovering", bus_.consecutive_errors());
     bus_.recover();
   }
-  // --- sensor loss: the IMU read is the canary on the bus ---
-  if (sensor_fail_count_[0] > 5 && (sensor_health_ & SNS_MPU9250)) {
-    sensor_health_ &= ~SNS_MPU9250;
+  // --- instrument loss: the Nicla Sense ME (read every second) is the bus canary ---
+  if (aru_fail_count_ > 5 && (sensor_health_ & SNS_NICLA_ME)) {
+    sensor_health_ &= (uint16_t)~(SNS_NICLA_ME | kMeBits);
     fdir_flags_ |= FDIR_SENSOR_LOST;
-    evr(3, 0x0606, "MPU-9250 stopped responding");
+    evr(3, 0x0606, "Nicla Sense ME stopped responding");
+  } else if (aru_fail_count_ == 0 && (fdir_flags_ & FDIR_SENSOR_LOST) &&
+             (sensor_health_ & SNS_NICLA_ME)) {
+    fdir_flags_ &= ~FDIR_SENSOR_LOST;
+    evr(1, 0x0607, "Nicla Sense ME responding again");
   }
-  // --- radio supply ---
-  if (!isnan(vradio_) && vradio_ < 10.5f) fdir_flags_ |= FDIR_LOW_BUS_V;
-  else if (!isnan(vradio_) && vradio_ > 11.0f) fdir_flags_ &= ~FDIR_LOW_BUS_V;
   // --- downlink congestion ---
   if (vc_[VC_RT_SCI].bytes() > 800 || vc_[VC_RT_ENG].bytes() > 800) fdir_flags_ |= FDIR_VC_CONGEST;
   else if (vc_[VC_RT_SCI].bytes() < 300 && vc_[VC_RT_ENG].bytes() < 300) fdir_flags_ &= ~FDIR_VC_CONGEST;
@@ -957,7 +967,7 @@ void Flight::fdir_1hz(uint32_t now) {
   if (radio_fault_code_ && now - radio_fault_ms_ > 3000) {
     evr(1, 0x0315, "E22 abnormal status cleared (%u reports)", radio_fault_reports_);
     radio_fault_code_ = 0;
-    fdir_flags_ &= ~FDIR_RADIO_FAULT;
+    fdir_flags_ &= ~(FDIR_RADIO_FAULT | FDIR_LOW_BUS_V | FDIR_PA_OVERTEMP);
   }
   // --- COP-1 ---
   if (farm_.state() == Farm1::S3_LOCKOUT) fdir_flags_ |= FDIR_FARM_LOCKOUT;
@@ -979,25 +989,6 @@ void Flight::update_display(uint32_t now) {
   d.vc1_pm = (uint16_t)(vc_[1].bytes() * 1000UL / VcStream::kBufLen);
   d.ssr_pm = ssr_.fill_permille();
   d.sensor_health = sensor_health_;
-  d.sclk_s = sclk_.seconds();
-  d.partition = sclk_.partition;
-  d.frames_sent = frames_sent_;
-  uint32_t busy = 0;
-  for (int i = 0; i < 60; ++i) busy += busy_ms_bucket_[i];
-  d.tx_duty_pct = busy / 600.0f;
-  d.pa_temp_c = pa_temp_c_;
-  d.vradio_v = vradio_;
-  d.uplink_rssi = uplink_rssi_;
-  d.noise_dbm = noise_dbm_;
-  d.air_rate_code = rcfg_.air_rate;
-  d.power_code = rcfg_.power;
-  d.channel = rcfg_.channel;
-  d.farm_vr = farm_.vr();
-  d.mcfc = framer_.mcfc();
-  d.cmd_acc = cmd_acc_;
-  d.cmd_rej = cmd_rej_;
-  d.fdir_flags = fdir_flags_;
-  d.frame_period_ms = frame_period_ms();
   display_.update(d);
 }
 
@@ -1010,7 +1001,7 @@ void Flight::notify_egse_status() {
            "{\"mode\":\"%s\",\"sclk\":%lu,\"part\":%u,\"frames\":%lu,\"oid\":%lu,\"mcfc\":%u,"
            "\"period_ms\":%lu,\"busy_ms\":%lu,\"duty_pct\":%.1f,\"air\":%u,\"pwr\":%u,\"ch\":%u,"
            "\"ul_rssi\":%d,\"noise\":%d,\"farm\":%u,\"vr\":%u,\"acc\":%u,\"rej\":%u,\"fdir\":%u,"
-           "\"sns\":%u,\"vc0\":%u,\"vc1\":%u,\"vc2\":%u,\"ssr_pm\":%u,\"pa_c\":%.1f,\"vrad\":%.2f,"
+           "\"sns\":%u,\"vc0\":%u,\"vc1\":%u,\"vc2\":%u,\"ssr_pm\":%u,\"bus_c\":%.1f,\"rf_fault\":%u,"
            "\"tx\":%d,\"inhibit\":%d}",
            kModeName[mode_ <= 4 ? mode_ : 0], (unsigned long)sclk_.seconds(), sclk_.partition,
            (unsigned long)frames_sent_, (unsigned long)oid_sent_, framer_.mcfc(),
@@ -1018,7 +1009,7 @@ void Flight::notify_egse_status() {
            rcfg_.air_rate, rcfg_.power, rcfg_.channel, uplink_rssi_, noise_dbm_, farm_.state(),
            farm_.vr(), cmd_acc_, cmd_rej_, fdir_flags_, sensor_health_, (unsigned)vc_[0].bytes(),
            (unsigned)vc_[1].bytes(), (unsigned)vc_[2].bytes(), ssr_.fill_permille(),
-           isnan(pa_temp_c_) ? -999.0f : pa_temp_c_, isnan(vradio_) ? 0.0f : vradio_,
+           isnan(bus_temp_c_) ? -999.0f : bus_temp_c_, radio_fault_code_,
            tx_state_ != TX_IDLE, tx_inhibit_);
   Bridge.notify("sc_status", String(j));
 }

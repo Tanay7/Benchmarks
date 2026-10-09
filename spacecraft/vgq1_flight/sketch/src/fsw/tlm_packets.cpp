@@ -26,9 +26,9 @@ size_t pack_hk(const HkPacket& p, uint8_t* out) {
   w.u16(p.fdir_flags); w.u16(p.sensor_health); w.u16(p.cmd_accepted); w.u16(p.cmd_rejected);
   w.u8(p.cmd_last_opcode); w.u8(p.cmd_last_status); w.u16(p.tc_frames_ok); w.u16(p.tc_frames_bad);
   w.u8(p.farm_state); w.u8(p.farm_vr); w.u32(p.cmd_loss_timer_s);
-  w.i16(p.avionics_temp_cC); w.i16(p.pa_temp_cC); w.u16(p.bus_voltage_mV); w.i16(p.bus_current_mA);
+  w.i16(p.bus_temp_cC); w.u8(p.radio_fault); w.u16(p.radio_fault_reports);
   w.u16(p.loop_max_ms); w.u16(p.loop_overruns); w.u16(p.i2c_errors);
-  w.u16(p.ssr_fill_permille); w.u16(p.ssr_dropped);
+  w.u16(p.ssr_fill_permille); w.u16(p.ssr_dropped); w.u16(p.ssr_kib);
   w.u16(p.vc0_backlog); w.u16(p.vc1_backlog); w.u16(p.vc2_backlog);
   w.u8(p.sdls_enabled); w.u16(p.sdls_auth_fail); w.u32(p.sdls_last_sn);
   return w.n;
@@ -62,7 +62,7 @@ size_t pack_mag(const MagPacket& p, uint8_t* out) {
   W w(out);
   w.u8(p.nsamples); w.u8(p.flags);
   mag(w, p.outboard); mag(w, p.inboard); mag(w, p.body);
-  w.i16(p.body_temp_cC);
+  w.u16(p.rm3100_cycle_count);
   return w.n;
 }
 
@@ -70,35 +70,30 @@ size_t pack_att(const AttPacket& p, uint8_t* out) {
   W w(out);
   w.u8(p.flags);
   for (int i = 0; i < 3; ++i) w.i16(p.acc_mg[i]);
-  for (int i = 0; i < 3; ++i) w.i16(p.gyro_cdps[i]);
-  for (int i = 0; i < 3; ++i) w.i16(p.ak_dT[i]);
-  for (int i = 0; i < 4; ++i) w.i16(p.q_aru[i]);
-  w.u8(p.aru_accuracy);
-  for (int i = 0; i < 4; ++i) w.u16(p.css_raw[i]);
-  for (int i = 0; i < 3; ++i) w.i16(p.sun_body[i]);
+  for (int i = 0; i < 3; ++i) w.i16(p.gyro_ddps[i]);
+  for (int i = 0; i < 3; ++i) w.i16(p.mag_dT[i]);
+  for (int i = 0; i < 4; ++i) w.i16(p.q_fus[i]);
+  w.u16(p.q_fus_acc_mrad);
   for (int i = 0; i < 4; ++i) w.i16(p.q_triad[i]);
   return w.n;
 }
 
 size_t pack_spec(const SpecPacket& p, uint8_t* out) {
   W w(out);
-  w.u8(p.flags); w.u8(p.as7265x_gain); w.u8(p.as7265x_int_cycles);
-  for (int i = 0; i < 18; ++i) w.f32(p.as7265x_uW_cm2[i]);
-  w.u8(p.as7343_gain);
-  for (int i = 0; i < 18; ++i) w.u16(p.as7343_counts[i]);
-  w.i8(p.as7265x_temp_c);
+  w.u8(p.flags); w.u8(p.gain_code); w.u8(p.int_cycles);
+  for (int i = 0; i < 18; ++i) w.f32(p.cal_uW_cm2[i]);
+  for (int i = 0; i < 18; ++i) w.u16(p.raw[i]);
+  for (int i = 0; i < 3; ++i) w.i8(p.temp_c[i]);
   return w.n;
 }
 
 size_t pack_env(const EnvPacket& p, uint8_t* out) {
   W w(out);
   w.u16(p.flags);
-  w.i16(p.bme_t_cC); w.u32(p.bme_p_Pa); w.u16(p.bme_rh_cpct); w.u32(p.bme_gas_ohm);
   w.i16(p.nenv_t_cC); w.u16(p.nenv_rh_cpct); w.f32(p.nenv_iaq); w.f32(p.nenv_tvoc_mg_m3);
   w.f32(p.nenv_eco2_ppm); w.u16(p.nenv_outdoor_aqi); w.f32(p.nenv_no2_ppb); w.f32(p.nenv_o3_ppb);
-  w.f32(p.nme_p_hPa); w.i16(p.nme_t_cC); w.u16(p.nme_rh_cpct); w.u16(p.nme_iaq);
-  w.u32(p.nme_co2eq_ppm); w.f32(p.nme_bvoc_ppm); w.u8(p.nme_accuracy);
-  w.f32(p.veml_lux);
+  w.u32(p.nme_p_cPa); w.i16(p.nme_t_cC); w.u16(p.nme_rh_cpct); w.u16(p.nme_iaq); w.u16(p.nme_iaq_s);
+  w.u32(p.nme_co2eq_ppm); w.u16(p.nme_bvoc_cppm); w.u32(p.nme_gas_ohm); w.u8(p.nme_accuracy);
   return w.n;
 }
 

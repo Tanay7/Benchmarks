@@ -142,6 +142,6 @@ def test_dashboard_and_metrics_served(world):
     from dssq.display.web import clean, prometheus
     text = prometheus(clean(gs.snapshot()))
     assert "dssq_rf_rssi_dbm" in text and "dssq_tlm{" in text
-    from dssq.display.frontpanel import build_pages
-    pages = build_pages(gs.snapshot())
-    assert len(pages) == 10 and all(p.count("|") == 7 for p in pages)
+    from dssq.display.frontpanel import status_lines
+    s, q = status_lines(gs.snapshot())
+    assert s.startswith("S|1|") and q == "Q|-1"          # AOS, no command awaiting CONFIRM

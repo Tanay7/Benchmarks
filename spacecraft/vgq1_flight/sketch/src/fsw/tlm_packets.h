@@ -24,10 +24,10 @@ enum Apid : uint16_t {
   APID_EVR      = 0x012,   // event reports (variable length)
   APID_CMDVER   = 0x013,   // command verification
   APID_TIMECORR = 0x014,   // SCLK time-correlation sample
-  APID_MAG      = 0x020,   // magnetometer science (dual-boom + body)
-  APID_ATT      = 0x021,   // attitude: IMU, ARU quaternion, sun sensors, TRIAD
-  APID_SPEC     = 0x022,   // spectrometers AS7265x + AS7343
-  APID_ENV      = 0x023,   // environment: BME690, Nicla Sense Env/ME, VEML7700
+  APID_MAG      = 0x020,   // magnetometer science: RM3100 (boom) + BMM150 (Nicla Sense ME)
+  APID_ATT      = 0x021,   // attitude: Nicla Sense ME fusion + IMU + TRIAD
+  APID_SPEC     = 0x022,   // AS7265X spectrometer
+  APID_ENV      = 0x023,   // environment: Nicla Sense Env + Nicla Sense ME
   APID_RFSCAN   = 0x015,   // RF spectrum survey (ambient noise per E22 channel)
   APID_TC       = 0x0C0,   // telecommand packets (uplink)
 };
@@ -58,15 +58,26 @@ enum FdirBit : uint16_t {
   FDIR_RADIO_FAULT  = 1u << 15,   // E22 reports under/over-voltage or over-temperature
 };
 
-// Sensor index bits (HK.sensor_health / sensor enable mask)
+// Sensor health bits (HK.sensor_health). The SENSORS command enable mask uses the
+// instrument bits: NICLA_ME, NICLA_ENV, AS7265X, RM3100_OB, RM3100_IB.
 enum SensorBit : uint16_t {
-  SNS_MPU9250 = 1u << 0, SNS_AK8963 = 1u << 1, SNS_RM3100_OB = 1u << 2, SNS_RM3100_IB = 1u << 3,
-  SNS_MMC5603 = 1u << 4, SNS_VEML7700 = 1u << 5, SNS_BME690 = 1u << 6, SNS_AS7265X = 1u << 7,
-  SNS_AS7343 = 1u << 8, SNS_NICLA_ENV = 1u << 9, SNS_NICLA_ME = 1u << 10, SNS_CSS = 1u << 11,
-  SNS_TCA9548A = 1u << 12, SNS_PA_NTC = 1u << 13, SNS_BUS_MON = 1u << 14,
+  SNS_NICLA_ME  = 1u << 0,   // ARU link alive (pages read, CRC ok, sequence advancing)
+  SNS_ME_QUAT   = 1u << 1,   // BHI260 rotation vector valid
+  SNS_ME_ACC    = 1u << 2,
+  SNS_ME_GYRO   = 1u << 3,
+  SNS_ME_MAG    = 1u << 4,   // BMM150 via BHI260
+  SNS_ME_BARO   = 1u << 5,   // BMP390
+  SNS_ME_BSEC   = 1u << 6,   // BME688 + BSEC
+  SNS_NICLA_ENV = 1u << 7,
+  SNS_ENV_TH    = 1u << 8,   // HS4001 temperature / humidity
+  SNS_ENV_IAQ   = 1u << 9,   // ZMOD4410 indoor air quality
+  SNS_ENV_OAQ   = 1u << 10,  // ZMOD4510 outdoor air quality (NO2, O3)
+  SNS_AS7265X   = 1u << 11,
+  SNS_RM3100_OB = 1u << 12,  // science magnetometer, boom tip (0x20)
+  SNS_RM3100_IB = 1u << 13,  // optional second RM3100, boom mid-point (0x23)
 };
 
-struct HkPacket {                 // APID 0x010, 59 octets
+struct HkPacket {                 // APID 0x010, 58 octets
   uint8_t  fsw_mode;
   uint16_t sclk_partition;
   uint32_t uptime_s;
@@ -82,15 +93,15 @@ struct HkPacket {                 // APID 0x010, 59 octets
   uint8_t  farm_state;
   uint8_t  farm_vr;
   uint32_t cmd_loss_timer_s;
-  int16_t  avionics_temp_cC;      // 0.01 degC
-  int16_t  pa_temp_cC;            // 0.01 degC
-  uint16_t bus_voltage_mV;
-  int16_t  bus_current_mA;
+  int16_t  bus_temp_cC;           // Nicla Sense ME (BME688) temperature, 0.01 degC
+  uint8_t  radio_fault;           // last E22 abnormal-status code (0 none, 1 UV, 2 OV, 3 OT, 4 OV+OT)
+  uint16_t radio_fault_reports;   // E22 abnormal-status reports received
   uint16_t loop_max_ms;
   uint16_t loop_overruns;
   uint16_t i2c_errors;
   uint16_t ssr_fill_permille;
   uint16_t ssr_dropped;
+  uint16_t ssr_kib;               // SSR capacity actually allocated
   uint16_t vc0_backlog;
   uint16_t vc1_backlog;
   uint16_t vc2_backlog;
@@ -139,57 +150,51 @@ struct TimeCorrPacket {           // APID 0x014, 10 octets
 struct MagVector { int32_t bx_nT, by_nT, bz_nT; uint16_t rms_nT; };
 struct MagPacket {                // APID 0x020, 46 octets
   uint8_t  nsamples;
-  uint8_t  flags;                 // b0 sample taken with PA keyed, b1 OB ok, b2 IB ok, b3 body ok
-  MagVector outboard;             // RM3100 at boom tip
-  MagVector inboard;              // RM3100 at boom mid-point
-  MagVector body;                 // MMC5603 on the bus
-  int16_t  body_temp_cC;
+  uint8_t  flags;                 // b0 sample taken with PA keyed, b1 OB ok, b2 IB ok, b3 BMM150 ok
+  MagVector outboard;             // RM3100 at the boom tip (0x20)
+  MagVector inboard;              // optional RM3100 at the boom mid-point (0x23)
+  MagVector body;                 // BMM150 inside the Nicla Sense ME
+  uint16_t rm3100_cycle_count;
 };
 
-struct AttPacket {                // APID 0x021, 50 octets
-  uint8_t  flags;                 // b0 IMU, b1 ARU, b2 CSS, b3 TRIAD, b4 AK8963
+struct AttPacket {                // APID 0x021, 37 octets  (all from the Nicla Sense ME)
+  uint8_t  flags;                 // b0 quaternion, b1 accel, b2 gyro, b3 magnetometer, b4 TRIAD
   int16_t  acc_mg[3];
-  int16_t  gyro_cdps[3];          // 0.01 deg/s
-  int16_t  ak_dT[3];              // AK8963 field, 0.1 uT
-  int16_t  q_aru[4];              // w,x,y,z * 16384 (Nicla Sense ME rotation vector)
-  uint8_t  aru_accuracy;
-  uint16_t css_raw[4];            // coarse sun sensor ADC counts (12 bit)
-  int16_t  sun_body[3];           // unit vector * 32000 (never collides with 0x7FFF)
-  int16_t  q_triad[4];            // w,x,y,z * 16384
+  int16_t  gyro_ddps[3];          // 0.1 deg/s
+  int16_t  mag_dT[3];             // BMM150, 0.1 uT (latest sample)
+  int16_t  q_fus[4];              // BHI260 rotation vector w,x,y,z * 16384
+  uint16_t q_fus_acc_mrad;        // BHI260 accuracy estimate of that solution
+  int16_t  q_triad[4];            // independent TRIAD solution (gravity + field), w,x,y,z * 16384
 };
 
-struct SpecPacket {               // APID 0x022, 113 octets
-  uint8_t  flags;                 // b0 AS7265x valid, b1 AS7343 valid
-  uint8_t  as7265x_gain;
-  uint8_t  as7265x_int_cycles;
-  float    as7265x_uW_cm2[18];    // 410..940 nm, calibrated
-  uint8_t  as7343_gain;
-  uint16_t as7343_counts[18];     // SparkFun channel order (see dictionary)
-  int8_t   as7265x_temp_c;
+struct SpecPacket {               // APID 0x022, 114 octets  (AS7265X)
+  uint8_t  flags;                 // b0 valid, b1 white lamp, b2 IR lamp, b3 UV lamp
+  uint8_t  gain_code;             // 0 = 1x, 1 = 3.7x, 2 = 16x, 3 = 64x
+  uint8_t  int_cycles;            // integration = cycles x 2.8 ms
+  float    cal_uW_cm2[18];        // 410 .. 940 nm, calibrated
+  uint16_t raw[18];               // raw counts, same order
+  int8_t   temp_c[3];             // die temperature, device 0 (master), 1, 2
 };
 
-struct EnvPacket {                // APID 0x023, 63 octets
-  uint16_t flags;                 // b0 BME690, b1 Nicla Env, b2 Nicla ME, b3 VEML7700
-  int16_t  bme_t_cC;
-  uint32_t bme_p_Pa;
-  uint16_t bme_rh_cpct;           // 0.01 %RH
-  uint32_t bme_gas_ohm;
-  int16_t  nenv_t_cC;
+struct EnvPacket {                // APID 0x023, 51 octets
+  uint16_t flags;                 // b0 HS4001, b1 ZMOD4410, b2 ZMOD4510, b3 BMP390, b4 BSEC, b5 ME T/RH, b6 ME gas
+  int16_t  nenv_t_cC;             // Nicla Sense Env (HS4001)
   uint16_t nenv_rh_cpct;
-  float    nenv_iaq;
+  float    nenv_iaq;              // ZMOD4410
   float    nenv_tvoc_mg_m3;
   float    nenv_eco2_ppm;
-  uint16_t nenv_outdoor_aqi;
+  uint16_t nenv_outdoor_aqi;      // ZMOD4510
   float    nenv_no2_ppb;
   float    nenv_o3_ppb;
-  float    nme_p_hPa;
-  int16_t  nme_t_cC;
+  uint32_t nme_p_cPa;             // Nicla Sense ME BMP390, 0.01 hPa (= Pa)
+  int16_t  nme_t_cC;              // BME688
   uint16_t nme_rh_cpct;
-  uint16_t nme_iaq;
+  uint16_t nme_iaq;               // BSEC
+  uint16_t nme_iaq_s;             // BSEC static IAQ
   uint32_t nme_co2eq_ppm;
-  float    nme_bvoc_ppm;
-  uint8_t  nme_accuracy;
-  float    veml_lux;
+  uint16_t nme_bvoc_cppm;         // 0.01 ppm
+  uint32_t nme_gas_ohm;
+  uint8_t  nme_accuracy;          // BSEC accuracy 0..3
 };
 
 // Packers return the number of octets written (user data only).
@@ -208,6 +213,6 @@ size_t pack_rfscan(uint8_t first_ch, uint8_t count, uint16_t duration_ms, const 
 // EVR: severity (0 DIAG..4 FATAL), 16-bit event id, ASCII text (<= 80 chars).
 size_t pack_evr(uint8_t severity, uint16_t event_id, const char* text, uint8_t* out);
 
-static const size_t kMaxPayload = 128;   // largest user-data field (SPEC = 113)
+static const size_t kMaxPayload = 128;   // largest user-data field (SPEC = 114)
 
 }  // namespace vgq

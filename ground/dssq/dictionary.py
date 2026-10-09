@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-NA = {"h": 0x7FFF, "H": 0xFFFF, "i": 0x7FFFFFFF}
+NA = {"h": 0x7FFF, "H": 0xFFFF, "i": 0x7FFFFFFF, "I": 0xFFFFFFFF, "b": -128}
 
 MODES = {0: "BOOT", 1: "SAFE", 2: "CRUISE", 3: "ENCOUNTER", 4: "TEST"}
 RESET_CAUSES = {0: "POWER-ON", 1: "PIN", 2: "SOFTWARE", 3: "WATCHDOG", 4: "BROWNOUT",
@@ -28,15 +28,16 @@ AIR_RATES_BPS = {0: 2400, 1: 2400, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400
 FDIR_BITS = ["RADIO_CFG", "AUX_TIMEOUT", "PA_OVERTEMP", "AVI_OVERTEMP", "CMD_LOSS", "I2C_BUS",
              "SENSOR_LOST", "LOOP_OVERRUN", "VC_CONGEST", "LOW_BUS_V", "FARM_LOCKOUT",
              "TX_INHIBIT", "RATE_REVERT", "SDLS_AUTH", "HIBERNATE", "RADIO_FAULT"]
-SENSOR_BITS = ["MPU9250", "AK8963", "RM3100_OB", "RM3100_IB", "MMC5603", "VEML7700", "BME690",
-               "AS7265X", "AS7343", "NICLA_ENV", "NICLA_ME", "CSS", "TCA9548A", "PA_NTC",
-               "BUS_MON"]
+SENSOR_BITS = ["NICLA_ME", "ME_QUAT", "ME_ACC", "ME_GYRO", "ME_MAG", "ME_BARO", "ME_BSEC",
+               "NICLA_ENV", "ENV_TH", "ENV_IAQ", "ENV_OAQ", "AS7265X", "RM3100_OB", "RM3100_IB"]
+# Instruments that can be switched with the SENSORS command (enable-mask bits).
+SENSOR_ENABLE_BITS = {"NICLA_ME": 0, "NICLA_ENV": 7, "AS7265X": 11, "RM3100_OB": 12, "RM3100_IB": 13}
+RADIO_FAULTS = {0: "NONE", 1: "UNDER-VOLTAGE", 2: "OVER-VOLTAGE", 3: "OVER-TEMPERATURE",
+                4: "OVER-VOLTAGE+OVER-TEMPERATURE"}
+AS7265X_GAINS = {0: "1x", 1: "3.7x", 2: "16x", 3: "64x"}
 
 AS7265X_NM = [410, 435, 460, 485, 510, 535, 560, 585, 610, 645, 680, 705, 730, 760, 810, 860,
               900, 940]
-AS7343_CH = ["F_450_FZ", "F_555_FY", "F_600_FXL", "NIR_855", "VIS_1", "FD_1", "F_425_F2",
-             "F_475_F3", "F_515_F4", "F_640_F6", "VIS_2", "FD_2", "F_405_F1", "F_690_F7",
-             "F_745_F8", "F_550_F5", "VIS_3", "FD_3"]
 
 
 def _vec(prefix, code, scale, unit, desc, n=3, axes="xyz", limits=None):
@@ -56,7 +57,7 @@ PACKETS: dict[int, dict] = {
         ("uptime_s", "I", None, "s", "Time since MCU boot", None),
         ("reset_cause", "B", None, "", "Cause of last reset", None),
         ("fdir_flags", "H", None, "", "Fault protection flags", None),
-        ("sensor_health", "H", None, "", "Sensor health bitmask", None),
+        ("sensor_health", "H", None, "", "Instrument health bitmask", None),
         ("cmd_accepted", "H", None, "", "Commands accepted", None),
         ("cmd_rejected", "H", None, "", "Commands rejected", None),
         ("cmd_last_opcode", "B", None, "", "Last opcode executed", None),
@@ -66,15 +67,15 @@ PACKETS: dict[int, dict] = {
         ("farm_state", "B", None, "", "FARM-1 state", None),
         ("farm_vr", "B", None, "", "FARM-1 V(R)", None),
         ("cmd_loss_timer_s", "I", None, "s", "Time since last valid TC", None),
-        ("avionics_temp", "h", 0.01, "degC", "Avionics (MPU-9250 die) temperature", (-20, 0, 60, 75)),
-        ("pa_temp", "h", 0.01, "degC", "PA heatsink temperature (NTC)", (-20, 0, 65, 80)),
-        ("bus_voltage", "H", 0.001, "V", "Radio/PA supply voltage (INA226 or divider)", (10.5, 11.0, 13.5, 14.8)),
-        ("bus_current", "h", 0.001, "A", "Radio/PA supply current (INA226)", (None, None, 2.0, 2.5)),
-        ("loop_max_ms", "H", None, "ms", "Worst-case loop time this interval", (None, None, 250, 1000)),
+        ("bus_temp", "h", 0.01, "degC", "Spacecraft bus temperature (Nicla Sense ME BME688)", (-20, 0, 60, 75)),
+        ("radio_fault", "B", None, "", "Last E22 abnormal-status code (0 none)", (None, None, 0.5, 2.5)),
+        ("radio_fault_reports", "H", None, "", "E22 abnormal-status reports received", None),
+        ("loop_max_ms", "H", None, "ms", "Worst-case loop time this interval", (None, None, 600, 1000)),
         ("loop_overruns", "H", None, "", "Scheduler overruns", None),
         ("i2c_errors", "H", None, "", "I2C transaction errors", None),
         ("ssr_fill", "H", 0.1, "%", "Solid-state recorder fill", (None, None, 80, 95)),
         ("ssr_dropped", "H", None, "", "Packets dropped by SSR", None),
+        ("ssr_kib", "H", None, "KiB", "SSR capacity allocated at boot", None),
         ("vc0_backlog", "H", None, "B", "VC0 queued octets", (None, None, 600, 900)),
         ("vc1_backlog", "H", None, "B", "VC1 queued octets", (None, None, 600, 900)),
         ("vc2_backlog", "H", None, "B", "VC2 queued octets", None),
@@ -116,56 +117,50 @@ PACKETS: dict[int, dict] = {
         ("air_rate_code", "B", None, "", "Air rate code", None),
         ("ref_airtime_ms", "H", None, "ms", "Reference frame air time", None),
     ]},
-    0x020: {"name": "MAG", "desc": "Magnetometer science", "fields": [
+    0x020: {"name": "MAG", "desc": "Magnetometer science (RM3100 boom + BMM150 body)", "fields": [
         ("nsamples", "B", None, "", "Samples averaged", None),
-        ("flags", "B", None, "", "b0 sample taken with PA keyed, b1 OB ok, b2 IB ok, b3 body ok", None),
+        ("flags", "B", None, "", "b0 sample with PA keyed, b1 OB ok, b2 IB ok, b3 BMM150 ok", None),
         *_mag("ob", "Outboard RM3100"),
-        *_mag("ib", "Inboard RM3100"),
-        *_mag("body", "Body MMC5603"),
-        ("body_temp", "h", 0.01, "degC", "MMC5603 temperature", None),
+        *_mag("ib", "Inboard RM3100 (optional)"),
+        *_mag("body", "Body BMM150 (Nicla Sense ME)"),
+        ("rm3100_cc", "H", None, "", "RM3100 cycle count", None),
     ]},
-    0x021: {"name": "ATT", "desc": "Attitude determination", "fields": [
-        ("flags", "B", None, "", "b0 IMU b1 ARU b2 CSS b3 TRIAD b4 AK8963", None),
+    0x021: {"name": "ATT", "desc": "Attitude determination (Nicla Sense ME)", "fields": [
+        ("flags", "B", None, "", "b0 fusion quaternion b1 accel b2 gyro b3 mag b4 TRIAD", None),
         *_vec("acc", "h", 1e-3, "g", "Acceleration"),
-        *_vec("gyro", "h", 0.01, "deg/s", "Angular rate"),
-        *_vec("ak", "h", 0.1, "uT", "AK8963 field"),
-        *_vec("q_aru", "h", 1 / 16384, "", "ARU quaternion", n=4, axes="wxyz"),
-        ("aru_accuracy", "B", None, "", "BHI260AP accuracy (0-3)", None),
-        *_vec("css", "H", None, "cts", "Coarse sun sensor", n=4, axes="0123"),
-        *_vec("sun", "h", 1 / 32000, "", "Sun vector (body)"),
+        *_vec("gyro", "h", 0.1, "deg/s", "Angular rate"),
+        *_vec("mag", "h", 0.1, "uT", "BMM150 field (latest)"),
+        *_vec("q_fus", "h", 1 / 16384, "", "BHI260 fusion quaternion", n=4, axes="wxyz"),
+        ("q_fus_acc", "H", 1e-3, "rad", "BHI260 fusion accuracy estimate", None),
         *_vec("q_triad", "h", 1 / 16384, "", "TRIAD quaternion", n=4, axes="wxyz"),
     ]},
-    0x022: {"name": "SPEC", "desc": "Spectrometers", "fields": [
-        ("flags", "B", None, "", "b0 AS7265x b1 AS7343", None),
-        ("as7265x_gain", "B", None, "", "AS7265x gain code", None),
-        ("as7265x_int_cycles", "B", None, "", "AS7265x integration cycles (2.8 ms)", None),
-        *[(f"as7265x_{nm}nm", "f", 1.0, "uW/cm2", f"AS7265x {nm} nm", None) for nm in AS7265X_NM],
-        ("as7343_gain", "B", None, "", "AS7343 AGAIN code", None),
-        *[(f"as7343_{c}", "H", None, "cts", f"AS7343 {c}", None) for c in AS7343_CH],
-        ("as7265x_temp", "b", 1.0, "degC", "AS7265x temperature", None),
+    0x022: {"name": "SPEC", "desc": "AS7265X spectrometer", "fields": [
+        ("flags", "B", None, "", "b0 valid, b1 white lamp, b2 IR lamp, b3 UV lamp", None),
+        ("gain_code", "B", None, "", "Gain code (0 1x, 1 3.7x, 2 16x, 3 64x)", None),
+        ("int_cycles", "B", None, "", "Integration cycles (2.8 ms)", None),
+        *[(f"cal_{nm}nm", "f", 1.0, "uW/cm2", f"Calibrated {nm} nm", None) for nm in AS7265X_NM],
+        *[(f"raw_{nm}nm", "H", None, "cts", f"Raw counts {nm} nm", None) for nm in AS7265X_NM],
+        *[(f"temp_{d}", "b", 1.0, "degC", f"Die temperature device {d}", None) for d in range(3)],
     ]},
-    0x023: {"name": "ENV", "desc": "Environment", "fields": [
-        ("flags", "H", None, "", "b0 BME690 b1 NiclaEnv b2 NiclaME b3 VEML7700", None),
-        ("bme_t", "h", 0.01, "degC", "BME690 temperature", None),
-        ("bme_p", "I", 0.01, "hPa", "BME690 pressure", None),
-        ("bme_rh", "H", 0.01, "%", "BME690 humidity", None),
-        ("bme_gas", "I", 1.0, "ohm", "BME690 gas resistance", None),
+    0x023: {"name": "ENV", "desc": "Environment (Nicla Sense Env + Nicla Sense ME)", "fields": [
+        ("flags", "H", None, "", "b0 HS4001 b1 ZMOD4410 b2 ZMOD4510 b3 BMP390 b4 BSEC b5 ME T/RH b6 ME gas", None),
         ("nenv_t", "h", 0.01, "degC", "Nicla Sense Env temperature (HS4001)", None),
-        ("nenv_rh", "H", 0.01, "%", "Nicla Sense Env humidity", None),
-        ("nenv_iaq", "f", 1.0, "", "ZMOD4410 IAQ", None),
+        ("nenv_rh", "H", 0.01, "%", "Nicla Sense Env humidity (HS4001)", None),
+        ("nenv_iaq", "f", 1.0, "", "ZMOD4410 indoor air quality index", None),
         ("nenv_tvoc", "f", 1.0, "mg/m3", "ZMOD4410 TVOC", None),
         ("nenv_eco2", "f", 1.0, "ppm", "ZMOD4410 eCO2", None),
         ("nenv_aqi", "H", None, "", "ZMOD4510 outdoor AQI", None),
         ("nenv_no2", "f", 1.0, "ppb", "ZMOD4510 NO2", None),
         ("nenv_o3", "f", 1.0, "ppb", "ZMOD4510 O3", None),
-        ("nme_p", "f", 1.0, "hPa", "Nicla Sense ME pressure (BMP390)", None),
-        ("nme_t", "h", 0.01, "degC", "Nicla Sense ME temperature", None),
-        ("nme_rh", "H", 0.01, "%", "Nicla Sense ME humidity", None),
+        ("nme_p", "I", 0.01, "hPa", "Nicla Sense ME pressure (BMP390)", None),
+        ("nme_t", "h", 0.01, "degC", "Nicla Sense ME temperature (BME688)", None),
+        ("nme_rh", "H", 0.01, "%", "Nicla Sense ME humidity (BME688)", None),
         ("nme_iaq", "H", None, "", "BSEC IAQ", None),
+        ("nme_iaq_s", "H", None, "", "BSEC static IAQ", None),
         ("nme_co2eq", "I", None, "ppm", "BSEC CO2 equivalent", None),
-        ("nme_bvoc", "f", 1.0, "ppm", "BSEC breath-VOC equivalent", None),
-        ("nme_accuracy", "B", None, "", "BSEC accuracy", None),
-        ("veml_lux", "f", 1.0, "lx", "VEML7700 illuminance", None),
+        ("nme_bvoc", "H", 0.01, "ppm", "BSEC breath-VOC equivalent", None),
+        ("nme_gas", "I", None, "ohm", "BME688 gas resistance", None),
+        ("nme_accuracy", "B", None, "", "BSEC accuracy (0-3)", None),
     ]},
 }
 
@@ -206,7 +201,8 @@ COMMANDS: dict[str, CommandDef] = {c.mnemonic: c for c in [
     CommandDef("SSRCLEAR", 0x08, [], True, "Erase the solid-state recorder"),
     CommandDef("PING", 0x09, [("tag", "I", 0, 0xFFFFFFFF, None)], False,
                "Echo tag in CMDVER (round-trip time measurement)"),
-    CommandDef("SENSORS", 0x0A, [("mask", "H", 0, 0xFFFF, None)], False, "Sensor enable mask"),
+    CommandDef("SENSORS", 0x0A, [("mask", "H", 0, 0xFFFF, None)], False,
+               "Instrument enable mask (b0 Nicla ME, b7 Nicla Env, b11 AS7265X, b12/b13 RM3100)"),
     CommandDef("RSTCNT", 0x0B, [], False, "Reset HK/RF counters"),
     CommandDef("REBOOT", 0x0C, [("magic", "H", 0xB007, 0xB007, None)], True,
                "Reboot the flight computer (magic 0xB007)"),
@@ -223,6 +219,10 @@ COMMANDS: dict[str, CommandDef] = {c.mnemonic: c for c in [
                "Spacecraft RF survey: ambient noise on each E22 channel (downlink paused)"),
     CommandDef("HIBERNATE", 0x14, [("beacon_s", "H", 60, 3600, None)], True,
                "Wake-on-Radio hibernation, one HK beacon every beacon_s (wake with WAKE)"),
+    CommandDef("SPECCFG", 0x16, [("gain", "B", 0, 3, None), ("cycles", "B", 1, 255, None),
+                                 ("lamps", "B", 0, 7, None)], False,
+               "AS7265X gain (0 1x,1 3.7x,2 16x,3 64x), integration cycles x 2.8 ms, "
+               "lamps b0 white b1 IR b2 UV (lit only while measuring)"),
     CommandDef("CHANNEL", 0x15, [("ch", "B", 0, 83, None), ("revert_s", "H", 60, 3600, None)], True,
                "Change RF channel; reverts after revert_s unless a TC arrives on the new channel"),
 ]}

@@ -1,17 +1,14 @@
 # Arduino sketch project file (used by App Lab / arduino-cli profiles).
 # The router bridge, LED matrix and Wire libraries ship with the arduino:zephyr
-# platform. The third-party instrument libraries below are OPTIONAL: the flight
-# code detects them with __has_include and reports missing instruments in HK.
-# If App Lab cannot resolve a listed version, install the library from the
-# Library Manager (any recent version) and delete/adjust the version here.
+# platform. The instrument libraries below are OPTIONAL at compile time: the
+# flight code detects them with __has_include and reports a missing instrument
+# in HK. If App Lab cannot resolve a listed version, install the library from
+# the Library Manager (any recent version) and adjust the version here.
 profiles:
   default:
     platforms:
       - platform: arduino:zephyr
     libraries:
       - SparkFun Spectral Triad AS7265X (1.0.5)
-      - SparkFun AS7343 Arduino Library (1.0.0)
-      - SparkFun Toolkit (1.2.1)
       - Arduino_NiclaSenseEnv (1.0.1)
-      - U8g2 (2.37.1)
 default_profile: default

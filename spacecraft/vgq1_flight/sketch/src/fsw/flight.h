@@ -4,7 +4,7 @@
 //  Functional analogue of a deep-space command & data handling system:
 //    * CCS  (command subsystem)  : CLTU decode, FARM-1, command dispatch, timers
 //    * FDS  (flight data subsys) : sampling, packetisation, VC multiplexing, SSR
-//    * AACS (attitude)           : IMU / ARU / sun sensor / TRIAD processing
+//    * AACS (attitude)           : Nicla Sense ME fusion + independent TRIAD
 //    * Telecom                   : E22 TX/RX state machines, duty-cycle control
 //    * Fault protection (FDIR)   : command loss, thermal, bus, radio monitors
 //  The main loop never blocks for long and never calls Bridge.call() (which has
@@ -79,16 +79,10 @@ class Flight {
   E22 radio_;
   E22Config rcfg_;
   I2cBus bus_;
-  Mpu9250 imu_;
-  Rm3100 mag_ob_, mag_ib_;
-  Mmc5603 mag_body_;
-  Veml7700 veml_;
-  Ina226 ina_;
-  Bme690 bme_;
-  Spectrometers spec_;
-  NiclaEnv nenv_;
-  NiclaAru aru_;
-  Analog analog_;
+  NiclaAru aru_;                // Nicla Sense ME (attitude reference unit)
+  NiclaEnv nenv_;               // Nicla Sense Env
+  Spectrometer spec_;           // AS7265X
+  Rm3100 mag_ob_, mag_ib_;      // science magnetometer(s)
   StatusDisplay display_;
   Sclk sclk_;
   Ssr ssr_;
@@ -104,7 +98,8 @@ class Flight {
   uint16_t idle_seq_ = 0;
   uint32_t last_gen_s_[P_COUNT] = {0};
   uint16_t period_override_[P_COUNT] = {0};   // 0 = use mode table; 0xFFFF = off
-  uint16_t sensor_health_ = 0, sensor_enable_ = 0xFFFF, sensor_fail_count_[16] = {0};
+  uint16_t sensor_health_ = 0, sensor_enable_ = 0xFFFF;
+  uint8_t aru_fail_count_ = 0;
   uint16_t fdir_flags_ = 0, fdir_mask_ = 0xFFFF;
   uint8_t evr_level_ = 1;
   uint16_t evr_budget_ = 10;          // EVR throttle (refilled each minute)
@@ -172,10 +167,10 @@ class Flight {
   MagStats mstat_ob_, mstat_ib_, mstat_body_;
   bool mag_tx_keyed_ = false;          // a sample of this interval was taken with the PA keyed
   bool sample_due_ = false;            // 1 Hz sensor sample waiting for a PA-off window
-  float body_temp_c_ = NAN, avi_temp_c_ = NAN, pa_temp_c_ = NAN, vradio_ = NAN, iradio_ = NAN;
-  uint16_t css_[4] = {0};
+  float bus_temp_c_ = NAN;             // Nicla Sense ME temperature (spacecraft bus)
   AruReading aru_last_;
-  bool aru_valid_ = false;
+  bool aru_valid_ = false, aru_env_valid_ = false;
+  float last_mag_ut_[3] = {0, 0, 0};   // latest BMM150 sample (for ATT and TRIAD)
 };
 
 }  // namespace vgq
