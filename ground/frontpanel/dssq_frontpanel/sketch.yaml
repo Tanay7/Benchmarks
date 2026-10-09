@@ -1,0 +1,10 @@
+# VENTUNO Q MCU (STM32H5, Arduino core on Zephyr). FQBN: arduino:zephyr:ventunoq
+# Upload with Arduino App Lab, or on the board:  arduino-cli compile --upload -b arduino:zephyr:ventunoq .
+profiles:
+  default:
+    fqbn: arduino:zephyr:ventunoq
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - U8g2 (2.37.1)
+default_profile: default

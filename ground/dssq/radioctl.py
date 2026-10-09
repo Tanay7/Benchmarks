@@ -1,8 +1,8 @@
 """Ground radio control through the Radio Control Unit (RCU).
 
 The E22-400TBH-02 board's USB port carries only TXD/RXD. With its M0/M1 jumpers
-removed and those pins driven by the GIGA R1 (front-panel MCU, which also reads
-AUX), the GDS gains full software control of the ground E22:
+removed and those pins driven by the VENTUNO Q MCU (front-panel sketch, which also
+reads AUX), the GDS gains full software control of the ground E22:
 
   * configuration read-back / volatile writes (C1 / C2) — verifies the station
   * RF spectrum survey: step channels, read the ambient-noise register
@@ -25,7 +25,7 @@ NORMAL, WOR, CONFIG, SLEEP = 0, 1, 2, 3
 class RadioManager:
     def __init__(self, radio, rcu, clock=time.time, sleep=time.sleep):
         self.radio = radio
-        self.rcu = rcu                   # object with set_mode(int)->bool (GIGA or simulator)
+        self.rcu = rcu                   # object with set_mode(int)->bool (VENTUNO Q MCU or simulator)
         self.clock = clock
         self.sleep = sleep
         self.regs: bytes | None = None

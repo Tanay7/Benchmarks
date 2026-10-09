@@ -233,7 +233,7 @@ DIRECTIVES = {
 }
 
 # Ground-station directives (executed by the GDS / Radio Control Unit, not uplinked
-# as such). Those touching the ground radio need the RCU (GIGA R1 driving M0/M1).
+# as such). Those touching the ground radio need the RCU (VENTUNO Q MCU driving M0/M1).
 GROUND_DIRECTIVES = {
     "GSCAN": "GSCAN [first last] - ground RF survey with the station E22 (needs RCU)",
     "WAKE": "WAKE - wake a hibernating spacecraft (WOR-transmitter MODE SAFE, needs RCU)",

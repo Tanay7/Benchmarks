@@ -1,0 +1,21 @@
+# systemd unit for the DSS-Q ground data system on the VENTUNO Q (Linux side).
+#   sudo cp ground/deploy/dssq-gds.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dssq-gds
+#   journalctl -u dssq-gds -f
+# Adjust User / WorkingDirectory to where you cloned the repository.
+[Unit]
+Description=DSS-Q ground data system (VGQ-1 telemetry & telecommand)
+After=network-online.target arduino-router.service
+Wants=network-online.target
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/Benchmarks/ground
+ExecStart=/home/arduino/Benchmarks/ground/.venv/bin/python -m dssq.gds --config config/station.toml
+Restart=on-failure
+RestartSec=5
+# serial port access (E22 USB-UART)
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target

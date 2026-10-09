@@ -1,0 +1,6 @@
+# DSS-Q ground data system (runs on the VENTUNO Q Linux side, or any Linux PC)
+pyserial>=3.5                 # E22-400TBH-02 USB-UART
+arduino-router-bridge>=0.5.1  # VENTUNO Q MCU front panel + RCU (arduino-router socket)
+# development / verification
+pytest>=8
+reedsolo==1.7.0               # independent reference RS codec used by the unit tests

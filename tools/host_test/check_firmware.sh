@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Host-side compile check of all Arduino firmware in this repository.
 #
-# Arduino toolchains for the UNO Q / VENTUNO Q (Zephyr) and GIGA R1 (mbed) are
-# large; this script instead compiles every translation unit with the host g++
+# Arduino toolchains for the UNO Q / VENTUNO Q (Zephyr) are large; this
+# script instead compiles every translation unit with the host g++
 # against tools/host_test/arduino_stub (inert Arduino API declarations). It
 # catches syntax, type and API-signature errors. It does NOT replace the real
 # build in Arduino App Lab / IDE, which you must still run.
