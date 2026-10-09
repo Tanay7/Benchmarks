@@ -26,8 +26,19 @@ https://public.ccsds.org for the current status before relying on an issue numbe
   ESLOV, BHI260AP / BMP390 / BMM150 / BME688.
 * Arduino, *Nicla Sense Env datasheet* (ABX00089) - power (IN 2.3-6.5 V, ESLOV 5 V), 3.3 V
   logic with 5 V-tolerant pins, HS4001 / ZMOD4410 / ZMOD4510.
-* Arduino, *UNO Q* (ABX00162/ABX00173) and *VENTUNO Q* (ABX00181) documentation; board variants
-  in github.com/arduino/ArduinoCore-zephyr.
+* Arduino, *UNO Q* (ABX00162/ABX00173): https://docs.arduino.cc/hardware/uno-q/ - datasheet, user
+  manual (`Wire` = header SDA/SCL, `Wire1` = Qwiic I2C4 3.3 V only, `Serial1` = D0/D1) and power
+  specification (USB-C 5 V / 3 A, VIN 7-24 V on JANALOG pin 8, header I/O 3.3 V, abs. max 3.6 V;
+  D3/PB0 and A0/A1 not 5 V tolerant).
+* Arduino, *VENTUNO Q* (ABX00181): https://docs.arduino.cc/hardware/ventuno-q/ - datasheet, user
+  manual (`Wire` = PH11/PH12 header, `Wire1` = Qwiic PA8/PC9), power specification (barrel jack /
+  screw terminal 7-24 V, USB-C PD 9-20 V only, >= 60 W recommended for heavy loads, measured
+  13.3 W peak for a simple app at 12 V), NPU guide (Ubuntu 24.04, Python venv). Page sources:
+  github.com/arduino/docs-content.
+* Board support: github.com/arduino/ArduinoCore-zephyr (`variants/arduino_uno_q_stm32u585xx`,
+  `variants/arduino_ventuno_q_stm32h5f5xx`: `serials`/`i2cs` order, hence `Serial3` = USART3 on
+  PB10/PB11 and `Wire1` per board; `libraries/Wire`, `libraries/Arduino_LED_Matrix`) and the
+  board device trees in github.com/arduino/zephyr (`boards/arduino/uno_q`, `boards/arduino/ventuno_q`).
 * The user's *UNO Q LINPACK* and *VENTUNO Q LINPACK* App Lab packages (architecture facts: CPU,
   FP32-only MCU FPUs, heap behaviour, App Lab layout, Router Bridge thread rules, OS versions).
 * PNI Sensor, *RM3100 Geomagnetic Sensor* datasheet and user manual.

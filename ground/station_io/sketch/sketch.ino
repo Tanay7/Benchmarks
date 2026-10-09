@@ -11,7 +11,7 @@
 //   * CardKB #1 (Wire, header SDA/SCL) : operator command entry. Every keystroke is
 //     echoed to the GDS, which shows the line being typed on the web dashboard
 //     (COMMANDING tab); Enter sends it; an empty Enter CONFIRMs a hazardous command.
-//   * CardKB #2 (Wire1, auto-detected) : optional 2nd-operator AUTHORISE key ('Y');
+//   * CardKB #2 (Wire1 = Qwiic, auto-detected) : optional 2nd-operator AUTHORISE key ('Y');
 //     without it the second operator authorises from the web dashboard
 //   * AOS / ALARM / UPLINK LEDs and a buzzer (alarm escalation, LOS). If the GDS
 //     falls silent for 5 s, AOS goes dark and ALARM flashes fast ("GDS link down").

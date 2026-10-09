@@ -39,8 +39,8 @@ SparkFun AS7265X documentation. Anything not stated by a datasheet is marked *ve
 
 | Board | Logic | Notes |
 |---|---|---|
-| UNO Q (STM32U585) | 3.3 V | Qwiic connector = `Wire1` (I2C4: PD12 SCL / PD13 SDA) |
-| VENTUNO Q (STM32H5F5) | 3.3 V | UNO-style header SDA/SCL = `Wire`; `Wire1` = second I2C (*verify* pins on your board) |
+| UNO Q (STM32U585) | 3.3 V (header abs. max 3.6 V; D3 and A0/A1 are not 5 V tolerant) | Qwiic connector = `Wire1` (I2C4: PD12 SCL / PD13 SDA), 3.3 V only |
+| VENTUNO Q (STM32H5F5) | 3.3 V | header SDA/SCL = `Wire` (I2C4: PH11 SCL / PH12 SDA); Qwiic connector = `Wire1` (I2C3: PA8 SCL / PC9 SDA) |
 | E22-400T37S | 3.3 V TTL | EBYTE: "Using 5V level may cause burnout risk" |
 | AS7265X (SparkFun) | 3.3 V | Qwiic |
 | RM3100 | 3.3 V | I2C mode, address 0x20 + (SA1<<1 \| SA0) |
@@ -55,16 +55,23 @@ SparkFun AS7265X documentation. Anything not stated by a datasheet is marked *ve
 ### 3.1 Power
 
 ```
- 12 V battery / supply (>= 3 A; 3S Li-ion 9.0-12.6 V is inside the E22's 4.5-15 V)
+ 12 V battery / supply (>= 4 A; 3S Li-ion 9.0-12.6 V is inside the E22's 4.5-15 V and the UNO Q's 7-24 V)
    │
-   ├──[3 A fuse]──┬──────────────────────────────────► E22-400TBH-02 DC jack / green terminal
+   ├──[4 A fuse]──┬──────────────────────────────────► E22-400TBH-02 DC jack / green terminal
    │              │                                     (12 V: TX 1.1 A typ, 1.3 A max, RX 43 mA)
-   │              └──[buck 12 V -> 5 V, >= 3 A]──┬────► UNO Q USB-C (5 V)
-   │                                             ├────► Nicla Sense ME  J2 pin 9 VIN (3.5-5.5 V)
+   │              ├──────────────────────────────────► UNO Q VIN = JANALOG pin 8 (7-24 V, on-board 5 V buck)
+   │              └──[buck 12 V -> 5 V, >= 1 A]──┬────► Nicla Sense ME  J2 pin 9 VIN (3.5-5.5 V)
    │                                             └────► Nicla Sense Env ESLOV pin 1 5V (or IN pin, 2.3-6.5 V)
-   └── GND ── common ground to every board ──────────────────────────────────────────────────────
+   └── GND ── common ground to every board (UNO Q: JANALOG pin 6/7) ─────────────────────────────
  Qwiic red wire = 3.3 V from the UNO Q: powers AS7265X and RM3100(s) only.
 ```
+
+Why the UNO Q takes 12 V on VIN: Arduino specifies a **5 V / 3 A** source for its USB-C input and
+warns that a supply that current-limits during peaks can reset the board. Its VIN input (7-24 V)
+feeds the board's own 5 V buck converter instead, so the UNO Q does not share a converter with
+the Nicla boards. The USB-C cable to the PC (App Lab) can stay connected: the board diode-ORs
+USB-C and VIN. Worst-case 12 V current: E22 1.3 A + UNO Q about 1.4 A (5 V x 3 A at ~90 %
+efficiency) + Nicla boards < 0.1 A = about 2.8 A, hence the 4 A supply and fuse.
 
 Notes: EBYTE recommends >= 47 uF low-ESR at the module supply (the TBH-02 board carries its own
 input capacitors). If you use a bare module, add it.
@@ -90,8 +97,8 @@ input capacitors). If you use a bare module, add it.
 | 4 AUX | E22 -> UNO Q | D7 | PB2 | LOW = busy (self-test, buffering, transmitting) |
 | 5 TXD | E22 -> UNO Q | header **SDA** | PB11 = USART3 RX (`Serial3`) | used as UART, not I2C |
 | 6 RXD | UNO Q -> E22 | header **SCL** | PB10 = USART3 TX | |
-| 7 M1 | UNO Q -> E22 | D3 | PB0 | + 10 kOhm to 3.3 V |
-| 10 M0 | UNO Q -> E22 | D2 | PB3 | + 10 kOhm to 3.3 V |
+| 7 M1 | UNO Q -> E22 | D3 | PB0 | + 10 kOhm to 3.3 V. **D3 is not 5 V tolerant** (Arduino: PB0 is 3.6 V max) - never pull it to 5 V |
+| 10 M0 | UNO Q -> E22 | D2 | PB3 | + 10 kOhm to 3.3 V (UNO Q +3V3 OUT, JANALOG pin 4) |
 | 3 RESET, 11 3V3, 19 STATE | - | not connected | | EBYTE: 3V3 "no need to care" |
 
 Why not D0/D1: on the UNO Q, `Serial1` (D0/D1) is also the Zephyr console; a console message would
@@ -139,7 +146,8 @@ field (the classic dual-magnetometer method).
 | D2, D3 | E22 M0, M1 |
 | D7 | E22 AUX |
 | Qwiic | sensor I2C bus (`Wire1`) |
-| USB-C | 5 V power + App Lab |
+| VIN (JANALOG pin 8), GND (pin 6/7) | 12 V spacecraft supply |
+| USB-C | App Lab / PC link (optional in flight) |
 | built-in 13x8 LED matrix | status lights (see [06 Displays](06_Displays.md)) |
 
 ---
@@ -148,8 +156,12 @@ field (the classic dual-magnetometer method).
 
 ### 4.1 Power
 
-* VENTUNO Q: its own supply, >= 60 W (12 V/5 A or 24 V/3 A barrel jack) per the Arduino datasheet;
-  keep the board fan running.
+* VENTUNO Q: its own 12 V or 24 V supply on the barrel jack (7-24 V). Arduino recommends >= 60 W
+  (12 V/5 A or 24 V/3 A) for heavy workloads (AI inference, USB peripherals). This station is a
+  light workload: Arduino measured 7.5 W average / 13.3 W peak for a simple Linux app at 12 V and
+  17.9 W peak while booting, so 12 V/3 A (36 W) is enough; 60 W leaves headroom for extras. A
+  USB-C supply must be **USB PD (9-20 V)** - a plain 5 V USB charger will not power the board.
+  Keep the board fan running.
 * Ground E22 board: separate 12 V >= 1.5 A supply into its DC jack (the uplink is also 5 W).
 * Common ground through the USB cable and the RCU GND wire.
 
@@ -174,7 +186,7 @@ field (the classic dual-magnetometer method).
 | D7 | UPLINK LED (yellow) + 330 Ohm | commands outstanding |
 | A0 | 1 kOhm -> NPN base; 5 V active buzzer -> collector; emitter GND | 0.4 s beep on RED alarm / LOS |
 | SDA / SCL (`Wire`) | CardKB #1 via level shifter (LV 3.3 V, HV 5 V) | command keyboard |
-| `Wire1` (*verify* pins) | CardKB #2 via level shifter | 2nd-operator 'Y' (optional) |
+| Qwiic connector (`Wire1`) | CardKB #2 via level shifter (LV = Qwiic 3.3 V, HV = 5 V) | 2nd-operator 'Y' (optional) |
 
 ```
  CardKB (Grove/HY2.0 cable)        BSS138 level shifter            VENTUNO Q

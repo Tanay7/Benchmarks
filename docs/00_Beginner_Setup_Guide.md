@@ -76,11 +76,11 @@ as a ~2 dBi whip/dipole. For more distance use a 433 MHz Yagi on the ground (see
 
 | Qty | Part | Why |
 |---|---|---|
-| 1 | 12 V supply or battery for the spacecraft, >= 3 A (e.g. 3S Li-ion 11.1 V, 12.6 V full) | E22 needs 4.5-15 V; at 12 V it draws 1.1 A typ / 1.3 A max when transmitting (EBYTE asks for a supply of >= 1.5 A) |
-| 1 | 12 V -> 5 V buck converter, >= 3 A, with USB-C output or a USB-C lead | Powers the UNO Q and both Nicla boards |
-| 1 | 3 A fuse + holder | In the 12 V line of each station |
+| 1 | 12 V supply or battery for the spacecraft, >= 4 A (e.g. 3S Li-ion 11.1 V, 12.6 V full) | E22 needs 4.5-15 V; at 12 V it draws 1.1 A typ / 1.3 A max when transmitting (EBYTE asks for a supply of >= 1.5 A) |
+| 1 | 12 V -> 5 V buck converter, >= 1 A | Powers both Nicla boards (the UNO Q takes 12 V on its VIN pin) |
+| 2 | Fuse + holder: 4 A (spacecraft 12 V line), 2 A (ground E22 12 V line) | Protects wiring and battery |
 | 1 | 12 V, >= 1.5 A supply for the ground E22 | Separate from the VENTUNO Q supply |
-| 1 | VENTUNO Q power supply: 60 W or more (12 V/5 A or 24 V/3 A barrel jack) | Arduino datasheet recommendation |
+| 1 | VENTUNO Q power supply: 12 V/3 A or more on the barrel jack (60 W, 12 V/5 A, for full headroom) | Arduino recommends >= 60 W for heavy AI/USB loads; this station is light (13.3 W measured peak for a simple app) |
 | 4 | 10 kOhm resistors | M0/M1 pull-ups on each E22 board |
 | 3 + 1 | 3 mm LEDs (green, red, yellow) + 330 Ohm resistors | AOS / ALARM / UPLINK lamps |
 | 1 | 5 V active buzzer, NPN transistor (2N2222/BC547), 1 kOhm resistor | Alarm sound |
@@ -218,11 +218,14 @@ lit column = SAFE mode).
 
 Wire the power before signals (diagram in 03 section 3.1):
 
-* 12 V battery/supply -> 3 A fuse -> E22 board DC jack (or green terminal).
-* 12 V -> buck converter -> 5 V -> UNO Q USB-C, Nicla Sense ME VIN, Nicla Sense Env 5 V.
+* 12 V battery/supply -> 4 A fuse -> E22 board DC jack (or green terminal).
+* Same fused 12 V -> UNO Q **VIN** (JANALOG header pin 8, accepts 7-24 V); GND to a UNO Q GND pin.
+  (Arduino asks for a dedicated 5 V / 3 A source if you power the UNO Q through USB-C instead.)
+* 12 V -> buck converter -> 5 V -> Nicla Sense ME VIN, Nicla Sense Env 5 V.
 * **One common ground** for everything.
 
-Check with the meter: 12 V at the E22 terminal, 5.0-5.2 V at the buck output, correct polarity.
+Check with the meter: 12 V at the E22 terminal and at the UNO Q VIN pin, 5.0-5.2 V at the buck
+output, correct polarity.
 
 ### E.4 Step 3 - the spacecraft radio
 
@@ -307,7 +310,8 @@ Wiring: [03 Hardware Integration](03_Hardware_Integration.md) section 4.
 
 ### F.1 The VENTUNO Q itself
 
-1. Power it from its recommended supply (>= 60 W, 12 V/5 A or 24 V/3 A); keep its fan running.
+1. Power it from 12 V or 24 V on the barrel jack (12 V/3 A is enough here; 60 W gives full
+   headroom). A USB-C supply must be USB PD (9-20 V). Keep its fan running.
 2. Do App Lab's first-start set-up (Wi-Fi, password). Open a terminal on the board
    (`ssh arduino@<board-name>.local` or `adb shell`).
 3. Get the code and the Python environment (the board runs Ubuntu 24.04, which does not allow
@@ -351,10 +355,10 @@ configure the radio, scan the band, and wake a hibernating spacecraft).
 | UPLINK lamp (yellow) | D7 |
 | Buzzer | A0 -> 1 kOhm -> NPN base; buzzer from 5 V to collector; emitter to GND |
 | CardKB #1 (commands) | through a 3.3 V <-> 5 V I2C level shifter to the header SDA/SCL (`Wire`); CardKB 5 V and GND |
-| CardKB #2 (2nd operator, optional) | through a level shifter to the second I2C bus (`Wire1`) |
+| CardKB #2 (2nd operator, optional) | through a level shifter to the VENTUNO Q's **Qwiic connector** (`Wire1`) |
 
-`Wire1` on the UNO Q family is the Qwiic connector - check your VENTUNO Q pinout. The sketch
-auto-detects CardKB #2; if it is not found, the second operator approves from the web page.
+On the VENTUNO Q, `Wire1` is the Qwiic connector (I2C3) and `Wire` is the header SDA/SCL (I2C4),
+per Arduino's board files. The sketch auto-detects CardKB #2; if it is not found, the second operator approves from the web page.
 
 Install the App: copy `~/Benchmarks/ground/station_io` to `~/ArduinoApps/dssq-station-io`, open
 **DSS-Q Station IO** in App Lab and press **Run** (it flashes the STM32H5;
@@ -470,4 +474,4 @@ The key files are in `.gitignore` - never commit or share them.
 | `FARM LOCKOUT` event | sequence lost | type `UNLOCK` |
 | `SDLS rejected TC frame: bad MAC` | different keys on the two ends | redo Part I with the same key files |
 | `E22 reports UNDER-VOLTAGE` | supply sags under the 1.1 A transmit load | thicker wires, bigger supply/battery |
-| CardKB #2 "not detected" | `Wire1` pins differ on your board | use the web AUTH button |
+| CardKB #2 "not detected" | not on the Qwiic connector, no 5 V, or level shifter wired LV/HV the wrong way round | check the wiring, or use the web AUTH button |

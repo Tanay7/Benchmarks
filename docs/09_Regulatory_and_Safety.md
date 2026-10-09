@@ -30,7 +30,7 @@ licence class before transmitting.
 
 ## 3 Electrical safety
 
-* Lithium batteries: fuse the battery lead (3 A), use a charger and BMS made for the chemistry,
+* Lithium batteries: fuse the battery lead (4 A on the spacecraft, which also powers the UNO Q), use a charger and BMS made for the chemistry,
   never leave charging unattended.
 * The E22 test board accepts 4.5-15 V; above 15 V it may be permanently damaged (EBYTE). Neither
   the Nicla Sense Env IN/OUT pins nor several other inputs have reverse-polarity protection.
