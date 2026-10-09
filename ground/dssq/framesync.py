@@ -43,6 +43,17 @@ class NoiseReply:
     ert: float
 
 
+@dataclass
+class RadioFault:
+    """Ground E22 abnormal-status report FF FF FF <code> (REG1 bit 2, T37S manual 5.7)."""
+    code: int               # 1 under-voltage, 2 over-voltage, 3 over-temperature, 4 = 2 + 3
+    ert: float
+
+
+RADIO_FAULTS = {1: "UNDER-VOLTAGE (<4.5 V)", 2: "OVER-VOLTAGE (>15 V)", 3: "OVER-TEMPERATURE (>120 C)",
+                4: "OVER-VOLTAGE + OVER-TEMPERATURE"}
+
+
 class FrameSynchronizer:
     SEARCH, LOCK, FLYWHEEL = "SEARCH", "LOCK", "FLYWHEEL"
 
@@ -59,14 +70,15 @@ class FrameSynchronizer:
         self.misses = 0
         self.expect_noise_reply = False
         self.stats = {"asm_found": 0, "asm_bit_errors": 0, "slips": 0, "discarded_octets": 0,
-                      "cadus": 0, "noise_replies": 0, "flywheel_frames": 0, "lock_losses": 0}
+                      "cadus": 0, "noise_replies": 0, "flywheel_frames": 0, "lock_losses": 0,
+                      "radio_fault_reports": 0}
 
     @property
     def unit_len(self) -> int:
         return CADU_LEN + (1 if self.rssi_byte else 0)
 
     def feed(self, data: bytes, now: float | None = None) -> list:
-        """Feed raw octets; returns a list of RawCadu / NoiseReply objects."""
+        """Feed raw octets; returns a list of RawCadu / NoiseReply / RadioFault objects."""
         now = time.time() if now is None else now
         out = []
         if data:
@@ -100,6 +112,15 @@ class FrameSynchronizer:
             return nr
         return None
 
+    def _try_fault(self, now):
+        b = self.buf
+        if len(b) >= 4 and b[0] == 0xFF and b[1] == 0xFF and b[2] == 0xFF and 1 <= b[3] <= 4:
+            f = RadioFault(b[3], now)
+            del b[:4]
+            self.stats["radio_fault_reports"] += 1
+            return f
+        return None
+
     def _emit(self, now, errors):
         b = self.buf
         cadu = bytes(b[:CADU_LEN])
@@ -112,7 +133,7 @@ class FrameSynchronizer:
 
     def _step(self, now):
         b = self.buf
-        nr = self._try_noise_reply(now)
+        nr = self._try_noise_reply(now) or self._try_fault(now)
         if nr:
             return nr
         if len(b) < 4:
@@ -148,6 +169,10 @@ class FrameSynchronizer:
                     self.stats["discarded_octets"] += i
                     del b[:i]
                     return self._try_noise_reply(now)
+            if b[i] == 0xFF and b[i + 1] == 0xFF and b[i + 2] == 0xFF and 1 <= b[i + 3] <= 4:
+                self.stats["discarded_octets"] += i
+                del b[:i]
+                return self._try_fault(now)
             errs = _hamming32(int.from_bytes(b[i:i + 4], "big"), ASM_INT)
             if errs <= self.search_tol:
                 if i:

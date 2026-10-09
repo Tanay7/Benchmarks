@@ -23,11 +23,11 @@ EVR_SEVERITY = {0: "DIAG", 1: "INFO", 2: "WARN", 3: "ERROR", 4: "FATAL"}
 CMD_STAGES = {1: "ACCEPTED", 2: "EXECUTED", 3: "FAILED"}
 CMD_ERRORS = {0: "OK", 1: "UNKNOWN_OPCODE", 2: "BAD_LENGTH", 3: "BAD_ARGUMENT",
               4: "NOT_ALLOWED_IN_MODE", 5: "HARDWARE_FAULT", 6: "BAD_MAGIC"}
-AIR_RATES_BPS = {0: 300, 1: 1200, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}
+AIR_RATES_BPS = {0: 2400, 1: 2400, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}  # E22-400T37S
 
 FDIR_BITS = ["RADIO_CFG", "AUX_TIMEOUT", "PA_OVERTEMP", "AVI_OVERTEMP", "CMD_LOSS", "I2C_BUS",
              "SENSOR_LOST", "LOOP_OVERRUN", "VC_CONGEST", "LOW_BUS_V", "FARM_LOCKOUT",
-             "TX_INHIBIT", "RATE_REVERT", "SDLS_AUTH", "HIBERNATE"]
+             "TX_INHIBIT", "RATE_REVERT", "SDLS_AUTH", "HIBERNATE", "RADIO_FAULT"]
 SENSOR_BITS = ["MPU9250", "AK8963", "RM3100_OB", "RM3100_IB", "MMC5603", "VEML7700", "BME690",
                "AS7265X", "AS7343", "NICLA_ENV", "NICLA_ME", "CSS", "TCA9548A", "PA_NTC",
                "BUS_MON"]
@@ -84,7 +84,7 @@ PACKETS: dict[int, dict] = {
     ]},
     0x011: {"name": "RF", "desc": "Telecom subsystem (E22-400T37S)", "fields": [
         ("air_rate_code", "B", None, "", "E22 air data rate code", None),
-        ("tx_power_code", "B", None, "", "E22 TX power code (0 = max)", None),
+        ("tx_power_code", "B", None, "", "E22 TX power code (T37S: all codes = 37 dBm)", None),
         ("channel", "B", None, "", "E22 channel (f = 410.125 + CH MHz)", None),
         ("e22_cfg_ok", "B", None, "", "Radio configuration verified", None),
         ("frames_sent", "I", None, "", "CADUs transmitted", None),
@@ -118,7 +118,7 @@ PACKETS: dict[int, dict] = {
     ]},
     0x020: {"name": "MAG", "desc": "Magnetometer science", "fields": [
         ("nsamples", "B", None, "", "Samples averaged", None),
-        ("flags", "B", None, "", "b0 TX keyed, b1 OB ok, b2 IB ok, b3 body ok", None),
+        ("flags", "B", None, "", "b0 sample taken with PA keyed, b1 OB ok, b2 IB ok, b3 body ok", None),
         *_mag("ob", "Outboard RM3100"),
         *_mag("ib", "Inboard RM3100"),
         *_mag("body", "Body MMC5603"),
@@ -193,9 +193,10 @@ COMMANDS: dict[str, CommandDef] = {c.mnemonic: c for c in [
     CommandDef("MODE", 0x02, [("mode", "B", 1, 4, _MODE_ENUM)], False,
                "Set flight-software mode: SAFE | CRUISE | ENCOUNTER | TEST"),
     CommandDef("TXPWR", 0x03, [("code", "B", 0, 3, None)], False,
-               "Set E22 TX power code (0 = 37 dBm max ... 3 = minimum)"),
+               "Set E22 TX power code (NO effect on the E22-400T37S: every code is 37 dBm)"),
     CommandDef("AIRRATE", 0x04, [("code", "B", 0, 7, None), ("revert_s", "H", 60, 3600, None)], True,
-               "Change air data rate; spacecraft reverts after revert_s unless a TC is received"),
+               "Change air data rate (T37S: 0-2 = 2.4k, 3 = 4.8k, 4 = 9.6k ... 7 = 62.5k); "
+               "spacecraft reverts after revert_s unless a TC is received"),
     CommandDef("FPERIOD", 0x05, [("ms", "H", 500, 60000, None)], False,
                "Requested frame period (flight enforces the duty-cycle limit)"),
     CommandDef("PKTRATE", 0x06, [("apid", "H", 0x010, 0x023, None), ("period_s", "H", 0, 3600, None)],

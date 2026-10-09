@@ -323,8 +323,12 @@ function overview(){const rx=S.rx,rf=rx.rf,fr=rx.frames,hk=S.tlm.HK?S.tlm.HK.val
   rows("ov-cmds",S.cop.recent.slice(-8).reverse().map(r=>["#"+r.id,r.text,{v:r.state,c:r.state==="EXECUTED"?"ok":["FAILED","TIMEOUT","SUSPENDED"].includes(r.state)?"bad":"warn"},f(r.rtlt_s,1,"s")]));}
 function render(){header();({"OVERVIEW":overview,"RECEIVER":receiver,"FRAMES & PACKETS":framesPackets,"SPACECRAFT":spacecraft,"SCIENCE":science,"COMMANDING":commanding,"EVENTS":events})[tab]();}
 async function poll(){try{const r=await fetch("/api/state");S=await r.json();render();}catch(e){$("h-alarm").textContent="GDS LINK DOWN";$("h-alarm").className="pill bg-bad";}setTimeout(poll,1000);}
-async function post(url,body){const h={"Content-Type":"application/json"};const tok=localStorage.getItem("dssq-token");if(tok)h["X-DSSQ-Token"]=tok;
-  const r=await fetch(url,{method:"POST",headers:h,body:JSON.stringify(body)});const j=await r.json();$("cmd-msg").textContent=(j.status||"")+" "+(j.message||j.text||(j.lines||[]).join(" | ")||j.error||"");return j;}
+function getTok(){try{return localStorage.getItem("dssq-token");}catch(e){return null;}}
+function setTok(t){try{localStorage.setItem("dssq-token",t);}catch(e){}}
+async function post(url,body,retry=true){const h={"Content-Type":"application/json"};const tok=getTok();if(tok)h["X-DSSQ-Token"]=tok;
+  const r=await fetch(url,{method:"POST",headers:h,body:JSON.stringify(body)});
+  if(r.status===403&&retry){const t=prompt("This station requires the commanding token ([gds] http_token in station.toml):");if(t){setTok(t.trim());return post(url,body,false);}}
+  const j=await r.json();$("cmd-msg").textContent=(j.status||"")+" "+(j.message||j.text||(j.lines||[]).join(" | ")||j.error||"");return j;}
 $("cmd-in").addEventListener("keydown",async e=>{if(e.key==="Enter"){const t=e.target.value.trim();if(!t)return;await post("/api/cmd",{text:t});e.target.value="";}});
 fetch("/api/dictionary").then(r=>r.json()).then(d=>DICT=d);
 window.addEventListener("resize",()=>S&&render());

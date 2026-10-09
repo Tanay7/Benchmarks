@@ -5,6 +5,7 @@
 //  value here and in that document together.
 // =============================================================================
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 // ---- Radio UART selection ------------------------------------------------------
@@ -24,9 +25,14 @@
 #define RADIO_SERIAL Serial3          // "SCL"(PB10) = TX -> E22 RXD, "SDA"(PB11) = RX <- E22 TXD
 #endif
 
-// ---- E22-400T37S control pins ------------------------------------------------------
-// Fit 10 kOhm pull-ups (to 3.3 V) on M0 and M1: while the MCU boots and its pins
-// float, the module then sits in deep-sleep (M1=M0=1) and cannot key the 5 W PA.
+// ---- E22-400T37S control pins (E22-400TBH-02 board, 10-pin header) -----------------
+// Remove the board's M0/M1 jumper caps (they short M1-GND and GND-M0) and its
+// RXD/TXD caps (they connect the on-board CH340X USB-UART to the module), then
+// wire: header 10 M0 <- D2, 7 M1 <- D3, 4 AUX -> D7, 5 TXD -> "SDA", 6 RXD <- "SCL".
+// With the caps removed the module's own pull-ups take M0/M1 HIGH (mode 3, deep
+// sleep), but EBYTE specifies them as "very weak" (T37S manual v1.5, pins 9/10):
+// fit 10 kOhm pull-ups to 3.3 V on M0 and M1 so the module reliably sleeps - and
+// cannot key the 5 W PA - while the MCU boots and its pins float.
 static const int PIN_E22_M0  = 2;     // D2 (PB3)
 static const int PIN_E22_M1  = 3;     // D3 (PB0)
 static const int PIN_E22_AUX = 7;     // D7 (PB2)  input, module busy = LOW
@@ -64,10 +70,15 @@ static const int PIN_OLED_CS = 10, PIN_OLED_DC = 9, PIN_OLED_RES = 6;   // SCK D
 
 // ---- Radio defaults (MUST match ground/config/station.toml [radio]) ----------------------
 static const uint8_t  kE22Channel      = 23;     // 410.125 + 23 = 433.125 MHz  (check band plan!)
-static const uint8_t  kE22AirRate      = 2;      // 0=0.3k 1=1.2k 2=2.4k 3=4.8k 4=9.6k ...
-static const uint8_t  kE22PowerCode    = 0;      // 0 = 37 dBm (max) ... 3 = min. TEST mode forces 3
+static const uint8_t  kE22AirRate      = 2;      // E22-400T37S: 0,1,2 = 2.4k (slowest = most sensitive), 3=4.8k 4=9.6k ...
+static const uint8_t  kE22PowerCode    = 0;      // T37S: every code = 37 dBm (no power levels)
 static const uint16_t kE22Address      = 0x0000; // same on both ends (transparent mode)
 static const uint8_t  kE22NetId        = 0x00;
+
+// ---- Solid-state recorder (heap) ------------------------------------------------------------
+static const size_t kSsrMaxBytes     = 262144;   // 256 KiB (power of two)
+static const size_t kSsrMinBytes     = 16384;
+static const size_t kHeapReserveBytes = 32768;   // must remain allocatable afterwards
 
 // ---- Timing ----------------------------------------------------------------------------------
 static const uint32_t kMinFramePeriodMs  = 1500;
@@ -79,6 +90,9 @@ static const uint32_t kDefaultCmdLossS   = 86400; // command-loss timer (24 h), 
 // ---- Thermal limits (fault protection) --------------------------------------------------------
 static const float kPaTempYellowC = 65.0f, kPaTempRedC = 80.0f;
 static const float kAviTempRedC = 75.0f;
+// The T37S has no output power levels, so the PA thermal response is to silence the
+// transmitter (TX inhibit) for this long, then resume at SAFE cadence.
+static const uint16_t kPaCooldownS = 300;
 
 // ---- Local geomagnetic field for TRIAD (look up yours: NOAA / BGS WMM calculator) -------------
 static const float kGeomagInclDeg = 60.0f;       // + = field points down (northern hemisphere)

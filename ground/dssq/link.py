@@ -22,12 +22,16 @@ import math
 import time
 from collections import deque
 
-# LoRa-physics sensitivity ESTIMATES per E22 air-rate code (BW 125 kHz assumed,
-# S = -174 + 10log10(BW) + NF(6 dB) + SNR_req(SF)). EBYTE does not publish the
-# SF/BW behind each air-rate code; measure your own (docs/08 test T-RF-03).
-SENSITIVITY_EST_DBM = {0: -137.0, 1: -132.0, 2: -129.0, 3: -126.0, 4: -123.0,
-                       5: -120.0, 6: -117.0, 7: -114.0}
-AIR_RATE_BPS = {0: 300, 1: 1200, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}
+# E22-400T37S (EBYTE "E22-xxxT37S User Manual" v1.5):
+#   * REG0 air-rate codes 0, 1 and 2 are ALL 2.4 kbit/s (7.2) - there is no 0.3k/1.2k.
+#   * Receiving sensitivity -126 dBm typical (-125 min / -127 max) at 2.4 kbit/s (2.2).
+# Faster rates are NOT specified by EBYTE: their values below are ESTIMATES scaled
+# from the 2.4k figure at -10log10(rate ratio) dB. Measure yours (docs/08, T-RF-03).
+AIR_RATE_BPS = {0: 2400, 1: 2400, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}
+SENSITIVITY_EST_DBM = {c: round(-126.0 + 10 * math.log10(AIR_RATE_BPS[c] / 2400.0), 1) for c in AIR_RATE_BPS}
+# T37S output power is 37 dBm for every power code ("This module has no power levels").
+TX_POWER_DBM = {0: 37.0, 1: 37.0, 2: 37.0, 3: 37.0}
+MIN_EFFECTIVE_RATE_CODE = 2          # 0 and 1 are aliases of 2 on the T37S
 
 
 def dbm_to_mw(d):
@@ -132,7 +136,7 @@ class LinkMetrics:
 
     @property
     def sensitivity_est(self) -> float:
-        return SENSITIVITY_EST_DBM.get(self.air_rate_code, -129.0)
+        return SENSITIVITY_EST_DBM.get(self.air_rate_code, -126.0)
 
     def snapshot(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now

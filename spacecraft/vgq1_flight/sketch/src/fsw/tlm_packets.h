@@ -55,6 +55,7 @@ enum FdirBit : uint16_t {
   FDIR_RATE_REVERT  = 1u << 12,
   FDIR_SDLS_AUTH    = 1u << 13,   // authentication failures seen on the uplink
   FDIR_HIBERNATE    = 1u << 14,   // informational: spacecraft is hibernating (WOR)
+  FDIR_RADIO_FAULT  = 1u << 15,   // E22 reports under/over-voltage or over-temperature
 };
 
 // Sensor index bits (HK.sensor_health / sensor enable mask)
@@ -138,7 +139,7 @@ struct TimeCorrPacket {           // APID 0x014, 10 octets
 struct MagVector { int32_t bx_nT, by_nT, bz_nT; uint16_t rms_nT; };
 struct MagPacket {                // APID 0x020, 46 octets
   uint8_t  nsamples;
-  uint8_t  flags;                 // b0 TX keyed in interval, b1 OB ok, b2 IB ok, b3 body ok
+  uint8_t  flags;                 // b0 sample taken with PA keyed, b1 OB ok, b2 IB ok, b3 body ok
   MagVector outboard;             // RM3100 at boom tip
   MagVector inboard;              // RM3100 at boom mid-point
   MagVector body;                 // MMC5603 on the bus

@@ -287,7 +287,7 @@ class SimSpacecraft:
 
     # ----------------------------------------------------------- RF channel
     def _rssi(self) -> float:
-        p_adj = {0: 0, 1: -3, 2: -6, 3: -9}[self.sc_pwr]
+        p_adj = 0.0                      # E22-400T37S: every power code is 37 dBm
         return self.rssi_mean + p_adj + self.rng.gauss(0, self.fading_db)
 
     def _downlink(self, cadu: bytes, t_arrive: float):

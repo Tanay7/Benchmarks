@@ -328,7 +328,7 @@ int main(int argc, char** argv) {
   // ---- Solid-state recorder ------------------------------------------------------------------
   {
     static vgq::Ssr ssr;
-    ssr.clear();
+    CHECK(ssr.begin(16384, 16384, 1024) == 16384, "SSR heap allocation (16 KiB requested)");
     uint8_t p[100], o[128];
     for (int i = 0; i < 400; ++i) { std::memset(p, i & 0xFF, sizeof(p)); p[0] = (uint8_t)i; ssr.record(p, 100); }
     CHECK(ssr.dropped() > 0 && ssr.fill_permille() > 950, "SSR overwrites oldest when full");
@@ -424,6 +424,33 @@ int main(int argc, char** argv) {
     tc_parse(bad, len, t3);
     CHECK(sdls.process(bad, t3) == Sdls::SDLS_BAD_MAC && sdls.last_sn() == 7,
           "SDLS: forged frame rejected without advancing anti-replay state");
+  }
+
+  // ---- Magnetometer statistics in single precision (the M33 FPU is FP32-only) ----
+  // Earth-like 50 uT field with a 10 nT (0.01 uT) fluctuation: the FP32 Welford
+  // result must match an FP64 two-pass reference to better than 1 nT.
+  {
+    vgq::MagStats ms;
+    std::vector<double> mags;
+    uint32_t lcg = 12345;
+    double sx = 0;
+    for (int i = 0; i < 255; ++i) {
+      lcg = lcg * 1664525u + 1013904223u;
+      const double u = ((lcg >> 8) / 16777216.0 - 0.5) * 0.0346;   // uniform, sigma ~0.01 uT
+      const double bx = 20.0 + u, by = -5.0 + 0.5 * u, bz = 45.5 - 0.3 * u;
+      ms.add((float)bx, (float)by, (float)bz);
+      mags.push_back(std::sqrt(bx * bx + by * by + bz * bz));
+      sx += bx;
+    }
+    double mu = 0, var = 0;
+    for (double m : mags) mu += m;
+    mu /= mags.size();
+    for (double m : mags) var += (m - mu) * (m - mu);
+    const double ref = std::sqrt(var / mags.size());
+    float mx, my, mz;
+    ms.mean(mx, my, mz);
+    CHECK(std::fabs(ms.rms_fluct() - ref) < 0.001 && std::fabs(mx - sx / 255.0) < 1e-4,
+          "MagStats FP32 Welford: 10 nT fluctuation on a 50 uT field within 1 nT of FP64 reference");
   }
 
   std::printf("\n%s (%d failure%s)\n", g_fail ? "HOST TEST FAILED" : "HOST TEST PASSED", g_fail,

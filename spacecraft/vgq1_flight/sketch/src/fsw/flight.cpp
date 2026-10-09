@@ -29,7 +29,10 @@ static const uint16_t kCadence[5][7] = {
 // Frame period as a multiple of the measured radio busy time (x10), per mode.
 static const uint8_t kPeriodX10[5] = {40, 40, 25, 20, 20};
 static const char* const kModeName[5] = {"BOOT", "SAFE", "CRUISE", "ENCOUNTER", "TEST"};
-static const uint32_t kAirRateBps[8] = {300, 1200, 2400, 4800, 9600, 19200, 38400, 62500};
+// E22-400T37S air rates per code (EBYTE manual v1.5 7.2): codes 0-2 are all 2.4k.
+static const uint32_t kAirRateBps[8] = {2400, 2400, 2400, 4800, 9600, 19200, 38400, 62500};
+static const char* const kRadioFault[5] = {"none", "UNDER-VOLTAGE (<4.5 V)", "OVER-VOLTAGE (>15 V)",
+                                           "OVER-TEMPERATURE (>120 C)", "OVER-VOLTAGE + OVER-TEMPERATURE"};
 
 static uint8_t seq_index(uint16_t apid) {
   switch (apid) {
@@ -91,7 +94,8 @@ void Flight::setup() {
   ReedSolomon::init();
   framer_.init(kSpacecraftId);
   for (auto& v : vc_) v.reset();
-  ssr_.clear();
+  const size_t ssr_bytes = ssr_.begin(kSsrMaxBytes, kSsrMinBytes, kHeapReserveBytes);
+  LOGF("INFO", "SSR %lu KiB allocated from the heap", (unsigned long)(ssr_bytes / 1024));
 
 #ifdef VGQ_HAVE_SDLS_KEY
   sdls_.init(kVgqSdlsKey, sizeof kVgqSdlsKey, VGQ_SDLS_SPI);
@@ -107,6 +111,7 @@ void Flight::setup() {
   set_mode(MODE_SAFE, "boot");          // like a real spacecraft: come up safe, wait for ground
   evr(1, 0x0001, "BOOT VGQ-1 FSW 1.0 reset=%u sensors=0x%04X radio=%s", reset_cause_,
       sensor_health_, radio_cfg_ok_ ? "OK" : "CFG-FAIL");
+  evr(1, 0x0003, "SSR capacity %lu KiB", (unsigned long)(ssr_.capacity() / 1024));
   evr(1, 0x0002, "DE %s", VGQ_CALLSIGN);  // station identification
   Bridge.notify("sc_boot", (int)reset_cause_);   // EGSE answers with set_partition
 }
@@ -148,7 +153,7 @@ void Flight::init_radio() {
   radio_cfg_ok_ = radio_.configure(rcfg_, false);
   if (!radio_cfg_ok_) fdir_flags_ |= FDIR_RADIO_CFG;
   LOGF(radio_cfg_ok_ ? "INFO" : "ERROR", "E22 config %s: ch=%u (%.3f MHz) air=%u pwr=%u",
-       radio_cfg_ok_ ? "verified" : "FAILED", rcfg_.channel, 410.125 + rcfg_.channel,
+       radio_cfg_ok_ ? "verified" : "FAILED", rcfg_.channel, 410.125f + rcfg_.channel,
        rcfg_.air_rate, rcfg_.power);
   radio_.set_mode(E22::NORMAL);
 }
@@ -189,6 +194,14 @@ void Flight::loop() {
   sclk_.now_us();
 
   service_rx(now);
+  // Sensor sampling happens in PA-off windows: the 5 W PA perturbs the
+  // magnetometers, and blocking I2C work during a transmission would delay the
+  // AUX-edge detection that measures the radio busy time. Sampling runs before
+  // service_tx(), so a due sample is always taken before the next frame starts.
+  if (sample_due_ && tx_state_ == TX_IDLE) {
+    sample_due_ = false;
+    sample_fast();
+  }
   service_tx(now);
 
   if (now - last_1hz_ms_ >= 1000) {
@@ -230,6 +243,20 @@ void Flight::process_rx_packet(uint32_t now) {
   if (awaiting_rssi_ && rx_len_ >= 5 && rx_buf_[0] == 0xC1 && rx_buf_[1] == 0x00 && rx_buf_[2] == 0x02) {
     noise_dbm_ = (int16_t)(-(256 - rx_buf_[3]));
     awaiting_rssi_ = false;
+    return;
+  }
+  // E22 abnormal-status report (REG1 bit 2): FF FF FF <1..4>, repeated every 500 ms
+  // while the module has shut its transmitter down. A CLTU always starts EB 90.
+  if (rx_len_ >= 4 && rx_len_ <= 5 && rx_buf_[0] == 0xFF && rx_buf_[1] == 0xFF && rx_buf_[2] == 0xFF &&
+      rx_buf_[3] >= 1 && rx_buf_[3] <= 4) {
+    ++radio_fault_reports_;
+    radio_fault_ms_ = now;
+    if (rx_buf_[3] != radio_fault_code_) {
+      radio_fault_code_ = rx_buf_[3];
+      fdir_flags_ |= FDIR_RADIO_FAULT;
+      evr(3, 0x0310 + radio_fault_code_, "E22 reports %s - module RF output disabled",
+          kRadioFault[radio_fault_code_]);
+    }
     return;
   }
   last_rx_flash_ms_ = now;
@@ -408,7 +435,6 @@ void Flight::send_next_frame(uint32_t now) {
   tx_start_ms_ = last_tx_start_ms_ = now;
   tx_state_ = TX_WAIT_BUSY;
   ++frames_sent_;
-  mag_tx_keyed_ = true;
   // EGSE copy of exactly what went to the radio (hex; the EGSE archives it).
   Bridge.notify("tm_cadu", to_hex(cadu, kCaduLen));
 }
@@ -444,8 +470,8 @@ void Flight::set_mode(uint8_t m, const char* why) {
   if (hibernating_) exit_hibernate("mode change");
   const uint8_t old = mode_;
   mode_ = m;
-  const uint8_t want_pwr = (m == MODE_TEST) ? 3 : kE22PowerCode;   // bench: minimum power
-  if (want_pwr != rcfg_.power) { rcfg_.power = want_pwr; radio_reconfig_pending_ = true; }
+  // NOTE: no power change here. The E22-400T37S has no output power levels, so
+  // bench testing in TEST mode REQUIRES attenuators or a dummy load.
   for (int i = 0; i < P_COUNT; ++i) last_gen_s_[i] = 0;
   evr(1, 0x0010 + m, "MODE %s -> %s (%s)", kModeName[old <= 4 ? old : 0], kModeName[m], why);
 }
@@ -466,8 +492,7 @@ void Flight::execute(const uint8_t* pkt, size_t len, uint8_t tc_seq) {
   switch (c.opcode) {
     case OP_NOOP: break;
     case OP_MODE: set_mode(c.a8, "ground command"); break;
-    case OP_TXPWR:
-      if (mode_ == MODE_TEST) { result = CE_NOT_ALLOWED; break; }
+    case OP_TXPWR:      // kept for E22 variants with power levels; no effect on the T37S
       rcfg_.power = c.a8; radio_reconfig_pending_ = true; break;
     case OP_AIRRATE:
       // Switch only after two more frames at the old rate, so the ground sees
@@ -486,7 +511,7 @@ void Flight::execute(const uint8_t* pkt, size_t len, uint8_t tc_seq) {
       revert_window_ms_ = (uint32_t)c.a16 * 1000UL;
       cfg_change_after_frames_ = 2;
       evr(2, 0x0212, "CHANNEL -> %u (%.3f MHz) in 2 frames; revert in %u s without uplink", c.a8,
-          410.125 + c.a8, c.a16);
+          410.125f + c.a8, c.a16);
       break;
     case OP_RFSCAN:
       scan_first_ = c.a8;
@@ -580,14 +605,18 @@ void Flight::tick_1hz(uint32_t now) {
   busy_ms_bucket_[((now / 1000) + 1) % 60] = 0;     // clear the slot about to be reused
   if (t % 60 == 0) evr_budget_ = 10;
 
-  sample_fast();
+  sample_due_ = true;                       // taken in the next PA-off window (loop())
 
   const uint8_t m = mode_ <= MODE_TEST ? mode_ : (uint8_t)MODE_SAFE;
   typedef void (Flight::*Gen)();
   static const Gen gens[P_COUNT] = {&Flight::gen_hk, &Flight::gen_rf, &Flight::gen_timecorr,
                                     &Flight::gen_mag, &Flight::gen_att, &Flight::gen_spec,
                                     &Flight::gen_env};
+  const bool pa_keyed = tx_state_ != TX_IDLE;
   for (int i = 0; i < P_COUNT; ++i) {
+    // SPEC (~0.5 s integration) and ENV (BME690 heater ~0.2 s) block the loop:
+    // run them only while the PA is off; they stay due and run on a later tick.
+    if (pa_keyed && (i == P_SPEC || i == P_ENV)) continue;
     uint16_t period = kCadence[m][i];
     if (period_override_[i] == 0xFFFF) period = 0;
     else if (period_override_[i]) period = period_override_[i];
@@ -614,6 +643,7 @@ void Flight::tick_1hz(uint32_t now) {
 }
 
 void Flight::sample_fast() {
+  if (tx_state_ != TX_IDLE) mag_tx_keyed_ = true;   // only if called outside a PA-off window
   const uint16_t en = sensor_enable_;
   float x, y, z;
   if ((en & SNS_RM3100_OB) && mag_ob_.ok() && mag_ob_.measure(x, y, z)) mstat_ob_.add(x, y, z);
@@ -736,7 +766,7 @@ void Flight::gen_mag() {
   if (mag_body_.ok() && mag_body_.temperature(t)) body_temp_c_ = t;
   p.body_temp_cC = clamp_i16(body_temp_c_ * 100.0f);
   mstat_ob_.reset(); mstat_ib_.reset(); mstat_body_.reset();
-  mag_tx_keyed_ = (tx_state_ != TX_IDLE);
+  mag_tx_keyed_ = false;
   uint8_t b[64];
   emit(APID_MAG, b, pack_mag(p, b), VC_RT_SCI);
 }
@@ -887,10 +917,15 @@ void Flight::fdir_1hz(uint32_t now) {
   }
   // --- PA thermal ---
   if (!isnan(pa_temp_c_)) {
-    if (pa_temp_c_ >= kPaTempRedC && (fdir_mask_ & FDIR_PA_OVERTEMP) && rcfg_.power != 3) {
-      rcfg_.power = 3;
-      radio_reconfig_pending_ = true;
-      evr(4, 0x0604, "PA %.1f C >= RED limit: TX power to minimum, SAFE", pa_temp_c_);
+    if (pa_temp_c_ >= kPaTempRedC && (fdir_mask_ & FDIR_PA_OVERTEMP) && !tx_inhibit_) {
+      // The T37S cannot lower its output power: the only thermal lever is duty
+      // cycle. Silence the PA, then resume at SAFE cadence (and x2 period while
+      // the YELLOW flag stays set, see frame_period_ms()).
+      tx_inhibit_ = true;
+      tx_inhibit_until_ms_ = now + (uint32_t)kPaCooldownS * 1000UL;
+      fdir_flags_ |= FDIR_TX_INHIBIT;
+      evr(4, 0x0604, "PA %.1f C >= RED limit: transmitter OFF for %u s, SAFE", pa_temp_c_,
+          (unsigned)kPaCooldownS);
       set_mode(MODE_SAFE, "PA over-temperature");
     }
     if (pa_temp_c_ >= kPaTempYellowC) fdir_flags_ |= FDIR_PA_OVERTEMP;
@@ -918,6 +953,12 @@ void Flight::fdir_1hz(uint32_t now) {
   // --- downlink congestion ---
   if (vc_[VC_RT_SCI].bytes() > 800 || vc_[VC_RT_ENG].bytes() > 800) fdir_flags_ |= FDIR_VC_CONGEST;
   else if (vc_[VC_RT_SCI].bytes() < 300 && vc_[VC_RT_ENG].bytes() < 300) fdir_flags_ &= ~FDIR_VC_CONGEST;
+  // --- E22 abnormal-status reports stop 500 ms after the condition clears ---
+  if (radio_fault_code_ && now - radio_fault_ms_ > 3000) {
+    evr(1, 0x0315, "E22 abnormal status cleared (%u reports)", radio_fault_reports_);
+    radio_fault_code_ = 0;
+    fdir_flags_ &= ~FDIR_RADIO_FAULT;
+  }
   // --- COP-1 ---
   if (farm_.state() == Farm1::S3_LOCKOUT) fdir_flags_ |= FDIR_FARM_LOCKOUT;
   else fdir_flags_ &= ~FDIR_FARM_LOCKOUT;

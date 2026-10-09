@@ -5,18 +5,21 @@ Physics used (all standard):
   FSPL(dB)            = 32.44 + 20 log10(f_MHz) + 20 log10(d_km)
   Radio horizon (km)  = 4.12 (sqrt(h1_m) + sqrt(h2_m))           (4/3-earth refraction)
   1st Fresnel radius  = 17.32 sqrt(d1 d2 / (f_GHz d))  m           (d in km)
-  LoRa sensitivity    = -174 + 10 log10(BW) + NF + SNR_req(SF)     (estimate)
+  Sensitivity         = EBYTE datasheet at 2.4k (-126 dBm typ); faster rates scaled (estimate)
   Shannon limit       = -174 + 10 log10(Rb) - 1.59 dB + NF         (no receiver can beat it)
 
 Example:
-  python3 tools/link_budget.py --distance-km 25 --gt 2.15 --gr 12 --air-rate 0
+  python3 tools/link_budget.py --distance-km 25 --gt 2.15 --gr 12 --air-rate 2
 """
 import argparse
 import math
 
-SENS_EST = {0: -137.0, 1: -132.0, 2: -129.0, 3: -126.0, 4: -123.0, 5: -120.0, 6: -117.0, 7: -114.0}
-RATE_BPS = {0: 300, 1: 1200, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}
-PWR = {0: 37.0, 1: 34.0, 2: 31.0, 3: 28.0}
+# E22-400T37S, EBYTE "E22-xxxT37S User Manual" v1.5:
+#   air-rate codes 0, 1, 2 are all 2.4 kbit/s; sensitivity -126 dBm typ at 2.4k (datasheet);
+#   faster rates: ESTIMATE scaled -10log10(rate/2400) dB; output 37 dBm for every power code.
+RATE_BPS = {0: 2400, 1: 2400, 2: 2400, 3: 4800, 4: 9600, 5: 19200, 6: 38400, 7: 62500}
+SENS_EST = {c: round(-126.0 + 10 * math.log10(r / 2400.0), 1) for c, r in RATE_BPS.items()}
+PWR = {0: 37.0, 1: 37.0, 2: 37.0, 3: 37.0}
 
 
 def fspl(f_mhz, d_km):
@@ -26,12 +29,12 @@ def fspl(f_mhz, d_km):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--channel", type=int, default=23)
-    ap.add_argument("--power-code", type=int, default=0, help="E22 power code (0 = 37 dBm nominal)")
+    ap.add_argument("--power-code", type=int, default=0, help="E22 power code (T37S: all codes 37 dBm)")
     ap.add_argument("--gt", type=float, default=2.15, help="TX antenna gain dBi")
     ap.add_argument("--gr", type=float, default=2.15, help="RX antenna gain dBi")
     ap.add_argument("--lt", type=float, default=0.5, help="TX feeder loss dB")
     ap.add_argument("--lr", type=float, default=1.0, help="RX feeder loss dB")
-    ap.add_argument("--air-rate", type=int, default=2, help="E22 air-rate code (0 = 0.3 kbit/s)")
+    ap.add_argument("--air-rate", type=int, default=2, help="E22 air-rate code (T37S: 0-2 = 2.4k, 3 = 4.8k, 4 = 9.6k ...)")
     ap.add_argument("--distance-km", type=float, default=10.0)
     ap.add_argument("--h1", type=float, default=2.0, help="TX antenna height above ground, m")
     ap.add_argument("--h2", type=float, default=10.0, help="RX antenna height above ground, m")

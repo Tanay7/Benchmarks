@@ -11,7 +11,8 @@
 #    * Log transmitter-side status (sc_status) and EVRs as JSON lines
 #    * "Umbilical" (hardline) commanding: any CLTU hex line dropped into
 #      egse_data/hardline_queue.txt is injected straight into the flight
-#      command path, bypassing RF (generate with: dssq-cmd --cltu-hex ...)
+#      command path, bypassing RF (generate a line with, in ground/:
+#      python -m dssq.cltu "MODE CRUISE")
 #    * Print a transmitter-end status board to the App Lab console
 #
 #  Bridge rules honoured: handlers never call Bridge.call (forbidden by the
@@ -109,7 +110,7 @@ def print_board():
     if not s:
         log("waiting for flight software status ...")
         return
-    rates = {0: "0.3k", 1: "1.2k", 2: "2.4k", 3: "4.8k", 4: "9.6k", 5: "19.2k", 6: "38.4k", 7: "62.5k"}
+    rates = {0: "2.4k", 1: "2.4k", 2: "2.4k", 3: "4.8k", 4: "9.6k", 5: "19.2k", 6: "38.4k", 7: "62.5k"}  # T37S
     print("+------------------------- VGQ-1 TRANSMITTER (EGSE) -------------------------+")
     print(f"| MODE {s.get('mode','?'):<9} SCLK {s.get('part')}/{s.get('sclk')}  "
           f"FRAMES {s.get('frames')} (OID {s.get('oid')})  MCFC {s.get('mcfc')}")

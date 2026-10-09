@@ -43,7 +43,7 @@ from .decom import Decommutator
 from .dictionary import (AIR_RATES_BPS, APID_EVR, CMD_STAGES, FDIR_BITS, MODES, PACKETS,
                          SENSOR_BITS)
 from .fop import Fop1
-from .framesync import FrameSynchronizer, NoiseReply, RawCadu
+from .framesync import RADIO_FAULTS, FrameSynchronizer, NoiseReply, RadioFault, RawCadu
 from .linkmgr import LinkManager
 from .rxstats import ReceiverStats, Window
 
@@ -113,9 +113,10 @@ class GroundStation:
         self.radio_mgr = None                 # RadioManager, attached by main() when an RCU exists
         self.radio_jobs: deque = deque()      # procedures run by the radio thread
         self.ground_radio: dict | None = None
+        self.ground_radio_fault: dict | None = None   # last E22 abnormal-status report
         lm = cfg.get("linkmgr", {})
         self.link_mgr = LinkManager(float(lm.get("target_margin_db", 6.0)), float(lm.get("period_s", 60)),
-                                    float(lm.get("holdoff_s", 600)), int(lm.get("min_rate", 0)),
+                                    float(lm.get("holdoff_s", 600)), int(lm.get("min_rate", 2)),
                                     int(lm.get("max_rate", 4)))
         self.link_mgr.mode = str(lm.get("mode", "ADVISE")).upper()
         self.link_change: dict | None = None
@@ -153,9 +154,22 @@ class GroundStation:
             for item in self.sync.feed(data, now):
                 if isinstance(item, NoiseReply):
                     self.rx.on_noise(item.noise_dbm, item.ert)
+                elif isinstance(item, RadioFault):
+                    self._on_radio_fault(item)
                 elif isinstance(item, RawCadu):
                     self._on_cadu(item)
             self._housekeeping(now)
+
+    def _on_radio_fault(self, f: RadioFault):
+        # The station E22 repeats the report every 500 ms while the fault lasts:
+        # log the first one and then at most once a minute.
+        last = self.ground_radio_fault
+        if not last or last["code"] != f.code or f.ert - last["logged"] > 60:
+            self.event("ERROR", "RADIO", f"ground E22 reports {RADIO_FAULTS[f.code]} - its transmitter "
+                       "is disabled until the condition clears (check the station supply / cooling)", f.ert)
+            self.ground_radio_fault = {"code": f.code, "text": RADIO_FAULTS[f.code], "logged": f.ert, "t": f.ert}
+        else:
+            last["t"] = f.ert
 
     def _on_cadu(self, rc: RawCadu):
         now = rc.ert
@@ -510,9 +524,7 @@ class GroundStation:
                                      self.rx.sc_rf.get("tx_power_code"))
         if rec:
             self.event("INFO", "LINK", f"link manager AUTO: {rec['action']} {rec.get('value')} - {rec['why']}")
-            if rec["action"] == "TXPWR":
-                self._queue(parse(f"TXPWR {rec['value']}"), "linkmgr")
-            elif rec["action"] == "LINKRATE" and self.radio_mgr and self.radio_mgr.available:
+            if rec["action"] == "LINKRATE" and self.radio_mgr and self.radio_mgr.available:
                 self.start_link_change("rate", rec["value"], "linkmgr")
         # alarm level
         red = any(s == "RED" for p in self.tlm.values() for s in p["limits"].values())
@@ -555,6 +567,9 @@ class GroundStation:
                 "cop": {**self.fop.state(), "sdls": self.sdls.enabled, "sdls_sn": self.sdls.sn},
                 "radio": {"rcu": bool(self.radio_mgr and self.radio_mgr.available),
                           "ground_config": self.ground_radio,
+                          "ground_fault": (self.ground_radio_fault
+                                           if self.ground_radio_fault and now - self.ground_radio_fault["t"] < 5
+                                           else None),
                           "last_scan": self.radio_mgr.last_scan if self.radio_mgr else None,
                           "allowed_channels": self.allowed_channels,
                           "configured": {k: self.cfg["radio"][k] for k in ("channel", "air_rate", "power", "lbt")},

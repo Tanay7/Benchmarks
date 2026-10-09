@@ -140,6 +140,10 @@ class Flight {
   uint16_t beacon_s_ = 600;
   uint8_t mode_before_hib_ = MODE_SAFE;
   ccsds::Sdls sdls_;
+  // E22 abnormal-status reports (FF FF FF 0x, REG1 bit 2)
+  uint8_t radio_fault_code_ = 0;
+  uint32_t radio_fault_ms_ = 0;
+  uint16_t radio_fault_reports_ = 0;
   bool timecorr_request_ = false;
   bool reboot_pending_ = false;
   uint8_t reboot_after_frames_ = 0;
@@ -166,7 +170,8 @@ class Flight {
 
   // instrument data
   MagStats mstat_ob_, mstat_ib_, mstat_body_;
-  bool mag_tx_keyed_ = false;
+  bool mag_tx_keyed_ = false;          // a sample of this interval was taken with the PA keyed
+  bool sample_due_ = false;            // 1 Hz sensor sample waiting for a PA-off window
   float body_temp_c_ = NAN, avi_temp_c_ = NAN, pa_temp_c_ = NAN, vradio_ = NAN, iradio_ = NAN;
   uint16_t css_[4] = {0};
   AruReading aru_last_;

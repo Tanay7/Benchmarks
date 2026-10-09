@@ -36,9 +36,11 @@ static const char* kFw = "DSSQ-FP 1.1";
 // OLED SPI: SCK = D13, MOSI = D11 (hardware SPI), CS = D10, DC = D9, RES = D8
 static const int PIN_OLED_CS = 10, PIN_OLED_DC = 9, PIN_OLED_RES = 8;
 U8G2_SSD1309_128X64_NONAME2_F_4W_HW_SPI oled(U8G2_R0, PIN_OLED_CS, PIN_OLED_DC, PIN_OLED_RES);
-// Radio Control Unit -> ground E22 test-board header. Remove the M0/M1 jumper
-// caps and fit 10 kOhm pull-DOWNs on M0/M1, so the station radio stays in NORMAL
-// (listening) mode whenever this MCU is not driving the pins.
+// Radio Control Unit -> ground E22-400TBH-02 10-pin header: 10 M0 <- D2,
+// 7 M1 <- D3, 4 AUX -> D4, GND (pin 8 or 9) -> GND. Remove ONLY the M0/M1 jumper
+// caps; keep the RXD/TXD caps fitted (the GDS uses the board's USB port). With
+// the caps removed the board holds M0/M1 HIGH (deep sleep) until setup() below
+// drives both LOW (NORMAL). Do not add pull-downs: they would fight the board.
 static const int PIN_RCU_M0 = 2, PIN_RCU_M1 = 3, PIN_RCU_AUX = 4;
 // Annunciators (via 330 Ohm resistors / an NPN transistor for the buzzer)
 static const int PIN_LED_AOS = 5, PIN_LED_ALARM = 6, PIN_LED_UPLINK = 7, PIN_BUZZER = A0;

@@ -15,13 +15,9 @@ import statistics
 import time
 from collections import deque
 
-from .link import AIR_RATE_BPS, SENSITIVITY_EST_DBM, dbm_to_mw
+from .link import AIR_RATE_BPS, SENSITIVITY_EST_DBM, TX_POWER_DBM, dbm_to_mw
 
 C_KM_S = 299_792.458
-# Nominal E22-400T37S output power per power code (EBYTE 3-dB-step convention,
-# code 0 = rated 37 dBm). Verify against your module's manual; used for path-loss
-# estimates only.
-TX_POWER_DBM = {0: 37.0, 1: 34.0, 2: 31.0, 3: 28.0}
 
 
 class Window:
@@ -213,7 +209,7 @@ class ReceiverStats:
     # ------------------------------------------------------------- estimators
     @property
     def sensitivity_est(self) -> float:
-        return SENSITIVITY_EST_DBM.get(self.air_rate_code, -129.0)
+        return SENSITIVITY_EST_DBM.get(self.air_rate_code, -126.0)
 
     def _pr(self, rssi):
         if rssi is None or self.noise_dbm is None:

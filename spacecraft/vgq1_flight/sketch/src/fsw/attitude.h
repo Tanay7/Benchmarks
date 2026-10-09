@@ -10,7 +10,11 @@
 //    gravity (accelerometer, more accurate -> primary) and the geomagnetic field.
 //    The NED field reference comes from inclination/declination for your site
 //    (NOAA/BGS World Magnetic Model calculator), set in config.h.
-//  * Running magnetometer statistics (mean vector, RMS of |B| fluctuation).
+//  * Running magnetometer statistics (mean vector, RMS of |B| fluctuation),
+//    Welford's single-pass algorithm in SINGLE precision: the STM32U585 FPU is
+//    FP32-only (FP64 is software-emulated, ~17x slower), and the textbook
+//    E[x^2]-E[x]^2 form would cancel catastrophically in float (|B|^2 ~ 2500 uT^2
+//    vs. a 10 nT fluctuation variance of 1e-4 uT^2).
 // =============================================================================
 #pragma once
 #include <stdint.h>
@@ -36,14 +40,15 @@ bool triad_ned(const Vec3& accel_b, const Vec3& mag_b, float incl_deg, float dec
 
 class MagStats {
  public:
-  void reset() { n_ = 0; sx_ = sy_ = sz_ = sm_ = sm2_ = 0; }
+  void reset() { n_ = 0; mx_ = my_ = mz_ = mm_ = m2_ = 0.0f; }
   void add(float bx, float by, float bz);
   uint8_t count() const { return (uint8_t)(n_ > 255 ? 255 : n_); }
   void mean(float& bx, float& by, float& bz) const;
   float rms_fluct() const;   // sqrt(E[|B|^2] - E[|B|]^2)
  private:
   uint32_t n_ = 0;
-  double sx_ = 0, sy_ = 0, sz_ = 0, sm_ = 0, sm2_ = 0;
+  float mx_ = 0, my_ = 0, mz_ = 0;    // running mean vector
+  float mm_ = 0, m2_ = 0;             // running mean of |B| and sum of squared deviations
 };
 
 }  // namespace vgq

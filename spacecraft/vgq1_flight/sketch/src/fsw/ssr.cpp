@@ -1,6 +1,26 @@
 #include "ssr.h"
+#include <stdlib.h>
 
 namespace vgq {
+
+size_t Ssr::begin(size_t max_bytes, size_t min_bytes, size_t reserve) {
+  size_t sz = kFallbackSize;
+  while (sz * 2 <= max_bytes) sz *= 2;              // largest power of two <= max_bytes
+  for (; sz >= min_bytes && sz > kFallbackSize; sz >>= 1) {
+    uint8_t* p = static_cast<uint8_t*>(malloc(sz));
+    if (!p) continue;
+    void* probe = reserve ? malloc(reserve) : nullptr;  // keep headroom for everyone else
+    if (reserve && !probe) { free(p); continue; }
+    free(probe);
+    if (buf_ != fallback_) free(buf_);
+    buf_ = p;
+    size_ = sz;
+    mask_ = (uint32_t)(sz - 1);
+    break;
+  }
+  clear();
+  return size_;
+}
 
 // Record format: [len_hi][len_lo][packet ...]
 void Ssr::clear() {
@@ -20,11 +40,11 @@ void Ssr::drop_oldest() {
 
 void Ssr::record(const uint8_t* pkt, uint16_t len) {
   const uint32_t need = 2u + len;
-  if (need > kSize) return;
-  while (kSize - used_ < need) drop_oldest();
-  buf_[tail_ & (kSize - 1)] = (uint8_t)(len >> 8);
-  buf_[(tail_ + 1) & (kSize - 1)] = (uint8_t)len;
-  for (uint16_t i = 0; i < len; ++i) buf_[(tail_ + 2 + i) & (kSize - 1)] = pkt[i];
+  if (need > size_) return;
+  while (size_ - used_ < need) drop_oldest();
+  buf_[tail_ & mask_] = (uint8_t)(len >> 8);
+  buf_[(tail_ + 1) & mask_] = (uint8_t)len;
+  for (uint16_t i = 0; i < len; ++i) buf_[(tail_ + 2 + i) & mask_] = pkt[i];
   tail_ += need;
   used_ += need;
   ++count_;

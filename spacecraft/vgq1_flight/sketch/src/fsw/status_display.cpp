@@ -47,7 +47,7 @@ void StatusDisplay::update(const ScDisplayData& d) {
 
 #if VGQ_SC_OLED
   static const char* kModes[] = {"BOOT", "SAFE", "CRUISE", "ENCNTR", "TEST"};
-  static const uint16_t kRates[] = {3, 12, 24, 48, 96, 192, 384, 625};   // x100 bps
+  static const uint16_t kRates[] = {24, 24, 24, 48, 96, 192, 384, 625};  // x100 bps (T37S: 0-2 = 2.4k)
   char l[32];
   const bool page2 = (tick_ / 20) & 1;   // alternate every ~5 s
   g_oled.clearBuffer();
@@ -70,7 +70,7 @@ void StatusDisplay::update(const ScDisplayData& d) {
     g_oled.drawStr(0, 63, l);
   } else {
     snprintf(l, sizeof l, "%s CH%u %.3fMHz", d.tx_on ? "TX ON " : "TX off", d.channel,
-             410.125 + d.channel);
+             410.125f + d.channel);
     g_oled.drawStr(0, 18, l);
     snprintf(l, sizeof l, "RATE %u.%02uk PWR code %u", kRates[d.air_rate_code & 7] / 100,
              kRates[d.air_rate_code & 7] % 100, d.power_code);

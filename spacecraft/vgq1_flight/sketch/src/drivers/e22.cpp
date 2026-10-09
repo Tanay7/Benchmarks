@@ -7,7 +7,8 @@ void E22Config::to_regs(uint8_t r[9]) const {
   r[1] = (uint8_t)address;
   r[2] = netid;
   r[3] = (uint8_t)(((uart_code & 7) << 5) | ((parity & 3) << 3) | (air_rate & 7));
-  r[4] = (uint8_t)(((subpacket & 3) << 6) | ((rssi_noise ? 1 : 0) << 5) | (power & 3));
+  r[4] = (uint8_t)(((subpacket & 3) << 6) | ((rssi_noise ? 1 : 0) << 5) | ((fault_log ? 1 : 0) << 2) |
+                   (power & 3));
   r[5] = channel;
   r[6] = (uint8_t)(((rssi_byte ? 1 : 0) << 7) | ((fixed ? 1 : 0) << 6) | ((relay ? 1 : 0) << 5) |
                    ((lbt ? 1 : 0) << 4) | ((wor_role ? 1 : 0) << 3) | (wor_cycle & 7));
@@ -19,7 +20,8 @@ void E22Config::from_regs(const uint8_t r[9]) {
   address = (uint16_t)((r[0] << 8) | r[1]);
   netid = r[2];
   uart_code = (r[3] >> 5) & 7; parity = (r[3] >> 3) & 3; air_rate = r[3] & 7;
-  subpacket = (r[4] >> 6) & 3; rssi_noise = (r[4] >> 5) & 1; power = r[4] & 3;
+  subpacket = (r[4] >> 6) & 3; rssi_noise = (r[4] >> 5) & 1; fault_log = (r[4] >> 2) & 1;
+  power = r[4] & 3;
   channel = r[5];
   rssi_byte = (r[6] >> 7) & 1; fixed = (r[6] >> 6) & 1; relay = (r[6] >> 5) & 1;
   lbt = (r[6] >> 4) & 1; wor_role = (r[6] >> 3) & 1; wor_cycle = r[6] & 7;

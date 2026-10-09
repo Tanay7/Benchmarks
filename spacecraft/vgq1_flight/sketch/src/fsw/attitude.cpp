@@ -89,21 +89,26 @@ bool triad_ned(const Vec3& accel_b, const Vec3& mag_b, float incl_deg, float dec
 }
 
 void MagStats::add(float bx, float by, float bz) {
-  const double m = sqrt((double)bx * bx + (double)by * by + (double)bz * bz);
-  sx_ += bx; sy_ += by; sz_ += bz; sm_ += m; sm2_ += m * m;
   ++n_;
+  const float inv = 1.0f / (float)n_;
+  mx_ += (bx - mx_) * inv;
+  my_ += (by - my_) * inv;
+  mz_ += (bz - mz_) * inv;
+  const float m = sqrtf(bx * bx + by * by + bz * bz);
+  const float d = m - mm_;
+  mm_ += d * inv;
+  m2_ += d * (m - mm_);               // Welford update: deviations only, no cancellation
 }
 
 void MagStats::mean(float& bx, float& by, float& bz) const {
   if (!n_) { bx = by = bz = 0; return; }
-  bx = (float)(sx_ / n_); by = (float)(sy_ / n_); bz = (float)(sz_ / n_);
+  bx = mx_; by = my_; bz = mz_;
 }
 
-float MagStats::rms_fluct() const {
-  if (n_ < 2) return 0;
-  const double mu = sm_ / n_;
-  const double v = sm2_ / n_ - mu * mu;
-  return v > 0 ? (float)sqrt(v) : 0.0f;
+float MagStats::rms_fluct() const {   // population standard deviation of |B|
+  if (n_ < 2) return 0.0f;
+  const float v = m2_ / (float)n_;
+  return v > 0.0f ? sqrtf(v) : 0.0f;
 }
 
 }  // namespace vgq
