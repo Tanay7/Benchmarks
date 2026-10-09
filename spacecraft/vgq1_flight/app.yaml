@@ -1,0 +1,3 @@
+name: VGQ-1 Flight Software
+icon: 🛰️
+description: CCSDS deep-space-class telemetry spacecraft (E22-400T37S downlink, SDLS-authenticated COP-1 uplink) with Linux EGSE recorder.

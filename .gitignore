@@ -1,0 +1,8 @@
+spacecraft/vgq1_flight/sketch/src/vendor/
+tools/host_test/host_test
+tools/host_test/vectors/
+__pycache__/
+*.pyc
+.pytest_cache/
+ground/archive/
+spacecraft/vgq1_flight/python/egse_data/

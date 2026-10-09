@@ -1,0 +1,939 @@
+#include "flight.h"
+#include "../ccsds/reed_solomon.h"
+#include <Arduino_RouterBridge.h>
+#include <math.h>
+#include <stdarg.h>
+#if __has_include(<cmsis_core.h>)
+#include <cmsis_core.h>
+#endif
+
+namespace vgq {
+
+using namespace ccsds;
+
+// ---------------------------------------------------------------------------
+// Mode table: packet generation periods in seconds (0 = off)
+//                         HK   RF  TCORR  MAG  ATT  SPEC  ENV
+// ---------------------------------------------------------------------------
+static const uint16_t kCadence[5][7] = {
+  /* BOOT      */ {  10,  10,   0,    0,   0,    0,    0},
+  /* SAFE      */ {  30,  60, 300,    0,   0,    0,    0},
+  /* CRUISE    */ {  60,  60, 300,   30,  60,  300,  120},
+  /* ENCOUNTER */ {  20,  30, 120,    4,   8,   30,   30},
+  /* TEST      */ {  10,  10,  60,    4,   8,   30,   30},
+};
+// Frame period as a multiple of the measured radio busy time (x10), per mode.
+static const uint8_t kPeriodX10[5] = {40, 40, 25, 20, 20};
+static const char* const kModeName[5] = {"BOOT", "SAFE", "CRUISE", "ENCOUNTER", "TEST"};
+static const uint32_t kAirRateBps[8] = {300, 1200, 2400, 4800, 9600, 19200, 38400, 62500};
+
+static uint8_t seq_index(uint16_t apid) {
+  switch (apid) {
+    case APID_HK: return 0;   case APID_RF: return 1;   case APID_EVR: return 2;
+    case APID_CMDVER: return 3; case APID_TIMECORR: return 4; case APID_MAG: return 5;
+    case APID_ATT: return 6;  case APID_SPEC: return 7; default: return 8;   // ENV
+  }
+}
+
+static inline uint32_t umin32(uint32_t a, uint32_t b) { return a < b ? a : b; }
+
+static String to_hex(const uint8_t* d, size_t n) {
+  static const char* h = "0123456789ABCDEF";
+  String s;
+  s.reserve(n * 2);
+  for (size_t i = 0; i < n; ++i) { s += h[d[i] >> 4]; s += h[d[i] & 15]; }
+  return s;
+}
+
+static int hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static inline int16_t clamp_i16(float v) {
+  if (isnan(v)) return kNaI16;
+  if (v > 32766.0f) return 32766;
+  if (v < -32767.0f) return -32767;
+  return (int16_t)lroundf(v);
+}
+static inline int32_t clamp_i32(float v) {
+  if (isnan(v)) return kNaI32;
+  if (v > 2.0e9f) return 2000000000;
+  if (v < -2.0e9f) return -2000000000;
+  return (int32_t)lroundf(v);
+}
+
+// Log to the App Lab console (Monitor) with an SCLK time tag.
+#define LOGF(level, ...)                                                        \
+  do {                                                                          \
+    char _b[160];                                                               \
+    int _n = snprintf(_b, sizeof _b, "[%10lu.%03lu] %s ",                       \
+                      (unsigned long)(millis() / 1000), (unsigned long)(millis() % 1000), level); \
+    snprintf(_b + _n, sizeof _b - _n, __VA_ARGS__);                             \
+    Monitor.println(_b);                                                        \
+  } while (0)
+
+// =============================================================================
+// Setup
+// =============================================================================
+void Flight::setup() {
+  display_.begin();
+  reset_cause_ = read_reset_cause();
+  LOGF("INFO", "VGQ-1 flight software boot. SCID=0x%03X reset_cause=%u", kSpacecraftId, reset_cause_);
+
+  ReedSolomon::init();
+  framer_.init(kSpacecraftId);
+  for (auto& v : vc_) v.reset();
+  ssr_.clear();
+
+  init_radio();
+  init_sensors();
+  analog_.begin();
+
+  last_valid_tc_ms_ = millis();
+  set_mode(MODE_SAFE, "boot");          // like a real spacecraft: come up safe, wait for ground
+  evr(1, 0x0001, "BOOT VGQ-1 FSW 1.0 reset=%u sensors=0x%04X radio=%s", reset_cause_,
+      sensor_health_, radio_cfg_ok_ ? "OK" : "CFG-FAIL");
+  evr(1, 0x0002, "DE %s", VGQ_CALLSIGN);  // station identification
+  Bridge.notify("sc_boot", (int)reset_cause_);   // EGSE answers with set_partition
+}
+
+uint8_t Flight::read_reset_cause() {
+#if defined(RCC) && defined(RCC_CSR_SFTRSTF) && defined(RCC_CSR_RMVF)
+  const uint32_t csr = RCC->CSR;
+  uint8_t cause = 255;
+  if (csr & RCC_CSR_IWDGRSTF) cause = 3;
+#ifdef RCC_CSR_WWDGRSTF
+  else if (csr & RCC_CSR_WWDGRSTF) cause = 3;
+#endif
+  else if (csr & RCC_CSR_SFTRSTF) cause = 2;
+  else if (csr & RCC_CSR_BORRSTF) cause = 4;
+  else if (csr & RCC_CSR_PINRSTF) cause = 1;
+  RCC->CSR |= RCC_CSR_RMVF;            // clear flags for the next boot
+  return cause;
+#else
+  return 255;                          // not accessible from this build: UNKNOWN
+#endif
+}
+
+void Flight::init_radio() {
+  radio_.begin(RADIO_SERIAL, PIN_E22_M0, PIN_E22_M1, PIN_E22_AUX);
+  uint8_t pid[7];
+  if (radio_.read_product_info(pid))
+    LOGF("INFO", "E22 product info %02X %02X %02X %02X %02X %02X %02X", pid[0], pid[1], pid[2],
+         pid[3], pid[4], pid[5], pid[6]);
+  rcfg_ = E22Config();
+  rcfg_.address = kE22Address;
+  rcfg_.netid = kE22NetId;
+  rcfg_.air_rate = kE22AirRate;
+  rcfg_.power = kE22PowerCode;
+  rcfg_.channel = kE22Channel;
+  rcfg_.rssi_noise = true;
+  rcfg_.rssi_byte = true;
+  // Volatile write (C2): configuration is re-asserted from flight constants at
+  // every boot instead of wearing the module's flash.
+  radio_cfg_ok_ = radio_.configure(rcfg_, false);
+  if (!radio_cfg_ok_) fdir_flags_ |= FDIR_RADIO_CFG;
+  LOGF(radio_cfg_ok_ ? "INFO" : "ERROR", "E22 config %s: ch=%u (%.3f MHz) air=%u pwr=%u",
+       radio_cfg_ok_ ? "verified" : "FAILED", rcfg_.channel, 410.125 + rcfg_.channel,
+       rcfg_.air_rate, rcfg_.power);
+  radio_.set_mode(E22::NORMAL);
+}
+
+void Flight::init_sensors() {
+  bus_.begin(SENSOR_WIRE, kTcaAddr, PIN_TCA_RESET, kI2cClockHz);
+  uint16_t h = 0;
+  if (bus_.mux_present()) h |= SNS_TCA9548A;
+  if (imu_.begin(bus_, CH_IMU)) h |= SNS_MPU9250;
+  if (imu_.mag_ok()) h |= SNS_AK8963;
+  if (imu_.ok() && !imu_.mag_ok())
+    LOGF("WARN", "IMU WHO_AM_I=0x%02X without AK8963: MPU-6500 based clone?", imu_.who_am_i());
+  if (mag_ob_.begin(bus_, CH_MAG_OB)) h |= SNS_RM3100_OB;
+  if (mag_ib_.begin(bus_, CH_MAG_IB)) h |= SNS_RM3100_IB;
+  if (mag_body_.begin(bus_, CH_BODY)) h |= SNS_MMC5603;
+  if (veml_.begin(bus_, CH_SPEC2)) h |= SNS_VEML7700;
+  if (bme_.begin(bus_, CH_BODY)) h |= SNS_BME690;
+  spec_.begin(bus_, CH_SPEC1, CH_SPEC2);
+  if (spec_.triad_ok()) h |= SNS_AS7265X;
+  if (spec_.as7343_ok()) h |= SNS_AS7343;
+  if (nenv_.begin(bus_, CH_NENV)) h |= SNS_NICLA_ENV;
+  if (aru_.begin(bus_, CH_ARU)) h |= SNS_NICLA_ME;
+  if (ina_.begin(bus_, CH_BODY, 0.01f)) h |= SNS_BUS_MON;
+  bus_.select(-1);
+  h |= SNS_CSS;                                         // analog, always "present"
+  if (!isnan(analog_.pa_temp_c())) h |= SNS_PA_NTC;
+  sensor_health_ = h;
+  LOGF("INFO", "sensor health 0x%04X (BME690 driver %s)", h,
+       Bme690::compiled_in() ? "compiled" : "NOT compiled - run tools/fetch_vendor_libs.sh");
+}
+
+// =============================================================================
+// Main loop
+// =============================================================================
+void Flight::loop() {
+  const uint32_t now = millis();
+  loop_start_ms_ = now;
+  sclk_.now_us();
+
+  service_rx(now);
+  service_tx(now);
+
+  if (now - last_1hz_ms_ >= 1000) {
+    last_1hz_ms_ = (now - last_1hz_ms_ > 3000) ? now : last_1hz_ms_ + 1000;   // no burst catch-up
+    tick_1hz(now);
+  }
+  if (now - last_disp_ms_ >= 250) {
+    last_disp_ms_ = now;
+    update_display(now);
+  }
+  const uint32_t dt = millis() - loop_start_ms_;
+  if (dt > loop_max_ms_) loop_max_ms_ = (uint16_t)umin32(dt, 65535);
+  if (dt > 250) ++loop_overruns_;
+}
+
+// =============================================================================
+// Receive path (uplink)
+// =============================================================================
+void Flight::service_rx(uint32_t now) {
+  HardwareSerial& s = radio_.serial();
+  while (s.available()) {
+    const int c = s.read();
+    if (c < 0) break;
+    if (rx_len_ < sizeof(rx_buf_)) rx_buf_[rx_len_++] = (uint8_t)c;
+    last_rx_byte_ms_ = now;
+    ++rx_bytes_;
+  }
+  // The E22 outputs a received packet as one burst (~1 ms/octet at 9600 bit/s):
+  // 40 ms of silence marks its end.
+  if (rx_len_ && now - last_rx_byte_ms_ > 40) {
+    process_rx_packet(now);
+    rx_len_ = 0;
+  }
+  if (awaiting_rssi_ && now - rssi_req_ms_ > 300) awaiting_rssi_ = false;
+}
+
+void Flight::process_rx_packet(uint32_t now) {
+  // Ambient-noise reply: C1 00 02 <noise> <last-packet RSSI>
+  if (awaiting_rssi_ && rx_len_ >= 5 && rx_buf_[0] == 0xC1 && rx_buf_[1] == 0x00 && rx_buf_[2] == 0x02) {
+    noise_dbm_ = (int16_t)(-(256 - rx_buf_[3]));
+    awaiting_rssi_ = false;
+    return;
+  }
+  last_rx_flash_ms_ = now;
+  // A real uplink packet: with REG3.bit7 set the module appends one RSSI octet.
+  uplink_rssi_ = (int16_t)(-(256 - rx_buf_[rx_len_ - 1]));
+  process_tc(rx_buf_, rx_len_ - 1, false);
+}
+
+void Flight::process_tc(const uint8_t* in, size_t n, bool hardline) {
+  uint8_t info[96];
+  const size_t m = cltu_decode(in, n, info, sizeof(info), bch_);
+  if (m == 0) {
+    ++cltu_bad_;
+    LOGF("WARN", "%s packet (%u octets) without a decodable CLTU", hardline ? "hardline" : "RF",
+         (unsigned)n);
+    return;
+  }
+  ++cltu_ok_;
+  last_cltu_ms_ = millis();
+  TcFrame f;
+  const TcParseResult pr = tc_parse(info, m, f);
+  if (pr != TC_OK) {
+    ++tc_bad_;
+    evr(2, 0x0100 + pr, "TC frame rejected (code %u)", pr);
+    return;
+  }
+  ++tc_ok_;
+  const Farm1::Verdict v = farm_.on_frame(f);
+  switch (v) {
+    case Farm1::ACCEPT:
+    case Farm1::ACCEPT_BYPASS:
+      last_valid_tc_ms_ = millis();
+      if (revert_air_rate_ != 0xFF) {             // ground followed the rate change
+        revert_air_rate_ = 0xFF;
+        evr(1, 0x0210, "air-rate change confirmed by ground");
+      }
+      execute(f.data, f.data_len, v == Farm1::ACCEPT ? f.seq : 0xFF);
+      break;
+    case Farm1::CONTROL_UNLOCK:
+      last_valid_tc_ms_ = millis();
+      evr(1, 0x0201, "COP-1 UNLOCK");
+      break;
+    case Farm1::CONTROL_SET_VR:
+      last_valid_tc_ms_ = millis();
+      evr(1, 0x0202, "COP-1 SET V(R)=%u", farm_.vr());
+      break;
+    case Farm1::DISCARD_RETRANSMIT:
+      evr(0, 0x0203, "FARM gap: N(S)=%u V(R)=%u, retransmit requested", f.seq, farm_.vr());
+      break;
+    case Farm1::DISCARD_NEG_WINDOW:
+      evr(0, 0x0204, "FARM duplicate N(S)=%u discarded", f.seq);
+      break;
+    case Farm1::DISCARD_LOCKOUT:
+      evr(3, 0x0205, "FARM LOCKOUT (N(S)=%u V(R)=%u) - ground must UNLOCK", f.seq, farm_.vr());
+      break;
+    default:
+      evr(2, 0x0206, "invalid COP-1 control command");
+      break;
+  }
+}
+
+// =============================================================================
+// Transmit path (downlink)
+// =============================================================================
+uint32_t Flight::frame_period_ms() const {
+  uint32_t busy = last_airtime_ms_;
+  if (busy == 0) {   // not measured yet: UART transfer + LoRa air time estimate (+30 %)
+    const uint32_t bps = kAirRateBps[rcfg_.air_rate & 7];
+    busy = (uint32_t)(kCaduLen * 10UL * 1000UL / 9600UL) + (uint32_t)(kCaduLen * 8UL * 1300UL / bps);
+  }
+  const uint8_t m = mode_ <= MODE_TEST ? mode_ : (uint8_t)MODE_SAFE;
+  uint32_t p = busy * kPeriodX10[m] / 10;
+  const uint32_t duty_floor = busy * 1000UL / kMaxTxDutyPermille;
+  if (fdir_flags_ & FDIR_PA_OVERTEMP) p *= 2;                 // thermal back-off
+  if (p < duty_floor) p = duty_floor;
+  if (p < kMinFramePeriodMs) p = kMinFramePeriodMs;
+  if (cmd_frame_period_ms_ > p) p = cmd_frame_period_ms_;
+  return p;
+}
+
+void Flight::service_tx(uint32_t now) {
+  switch (tx_state_) {
+    case TX_IDLE: {
+      if (tx_inhibit_) return;
+      if (radio_reconfig_pending_) { apply_radio_config(now); return; }
+      if (now - last_tx_start_ms_ < frame_period_ms()) return;
+      if (!radio_.aux_ready() || rx_len_ || now - last_rx_byte_ms_ < 100 || awaiting_rssi_) return;
+      send_next_frame(now);
+      return;
+    }
+    case TX_WAIT_BUSY:
+      // AUX drops as soon as the module has data to send. If it never does
+      // within 200 ms, assume we missed the edge and wait for completion.
+      if (!radio_.aux_ready() || now - tx_start_ms_ > 200) tx_state_ = TX_WAIT_DONE;
+      return;
+    case TX_WAIT_DONE: {
+      const bool timeout = now - tx_start_ms_ > kAuxTimeoutMs;
+      if (!radio_.aux_ready() && !timeout) return;
+      if (timeout) {
+        ++aux_timeouts_;
+        fdir_flags_ |= FDIR_AUX_TIMEOUT;
+        evr(3, 0x0301, "radio AUX timeout - TX path suspect");
+      }
+      last_airtime_ms_ = now - tx_start_ms_;
+      airtime_total_ms_ += last_airtime_ms_;
+      busy_ms_bucket_[(now / 1000) % 60] += (uint16_t)umin32(last_airtime_ms_, 60000);
+      tx_state_ = TX_IDLE;
+      if (timecorr_request_) { timecorr_request_ = false; gen_timecorr(); }
+      if (rate_change_after_frames_ && --rate_change_after_frames_ == 0) radio_reconfig_pending_ = true;
+      if (reboot_pending_ && reboot_after_frames_ && --reboot_after_frames_ == 0) {
+        LOGF("WARN", "commanded reboot");
+        delay(50);
+#if defined(__ARM_ARCH)
+        NVIC_SystemReset();
+#endif
+      }
+      return;
+    }
+  }
+}
+
+void Flight::send_next_frame(uint32_t now) {
+  // Refill the playback VC from the recorder while playback is active.
+  if (ssr_.playing() && vc_[VC_PLAYBACK].bytes() < 400) {
+    uint8_t p[256];
+    for (int k = 0; k < 4; ++k) {
+      const uint16_t n = ssr_.next_playback(p, sizeof p);
+      if (!n) { evr(1, 0x0402, "SSR playback complete"); break; }
+      if (!vc_[VC_PLAYBACK].push(p, n)) break;
+    }
+  }
+  // VC selection: engineering first, but never starve science when it backs up.
+  int vc = -1;
+  const bool sci_backlog = vc_[VC_RT_SCI].bytes() > 500;
+  if (vc_[VC_RT_ENG].has_real_data() && !(sci_backlog && last_vc_ == VC_RT_ENG)) vc = VC_RT_ENG;
+  else if (vc_[VC_RT_SCI].has_real_data()) vc = VC_RT_SCI;
+  else if (vc_[VC_RT_ENG].has_real_data()) vc = VC_RT_ENG;
+  else if (vc_[VC_PLAYBACK].has_real_data()) vc = VC_PLAYBACK;
+
+  Clcw clcw;
+  clcw.vcid = 0;
+  clcw.no_rf_available = false;
+  clcw.no_bit_lock = (now - last_cltu_ms_) > 300000UL;     // no CLTU decoded for 5 min
+  farm_.fill_clcw(clcw);
+
+  uint8_t frame[kTmFrameLen], cadu[kCaduLen];
+  if (vc >= 0) {
+    framer_.build_frame((uint8_t)vc, vc_[vc], clcw, idle_seq_, frame);
+    last_vc_ = (uint8_t)vc;
+  } else {
+    framer_.build_oid_frame(clcw, frame);
+    ++oid_sent_;
+  }
+  build_cadu(frame, cadu);
+
+  tx_mcfc_ = frame[2];
+  tx_start_sclk_us_ = sclk_.now_us();
+  radio_.transmit(cadu, kCaduLen);
+  tx_start_ms_ = last_tx_start_ms_ = now;
+  tx_state_ = TX_WAIT_BUSY;
+  ++frames_sent_;
+  mag_tx_keyed_ = true;
+  // EGSE copy of exactly what went to the radio (hex; the EGSE archives it).
+  Bridge.notify("tm_cadu", to_hex(cadu, kCaduLen));
+}
+
+void Flight::apply_radio_config(uint32_t now) {
+  radio_reconfig_pending_ = false;
+  if (pending_air_rate_ != 0xFF) {
+    revert_air_rate_ = rcfg_.air_rate;
+    revert_deadline_ms_ = now + revert_window_ms_;
+    rcfg_.air_rate = pending_air_rate_;
+    pending_air_rate_ = 0xFF;
+  }
+  radio_cfg_ok_ = radio_.configure(rcfg_, false);
+  if (radio_cfg_ok_) fdir_flags_ &= ~FDIR_RADIO_CFG; else fdir_flags_ |= FDIR_RADIO_CFG;
+  last_airtime_ms_ = 0;                  // re-measure at the new settings
+  LOGF("INFO", "radio reconfigured: air=%u pwr=%u -> %s", rcfg_.air_rate, rcfg_.power,
+       radio_cfg_ok_ ? "OK" : "FAIL");
+}
+
+// =============================================================================
+// Commanding
+// =============================================================================
+void Flight::cmd_verify(uint8_t seq, uint8_t opcode, uint8_t stage, uint8_t err, uint32_t tag) {
+  CmdVerPacket p{seq, opcode, stage, err, tag};
+  uint8_t b[16];
+  emit(APID_CMDVER, b, pack_cmdver(p, b), VC_RT_ENG);
+}
+
+void Flight::set_mode(uint8_t m, const char* why) {
+  if (m > MODE_TEST) return;
+  const uint8_t old = mode_;
+  mode_ = m;
+  const uint8_t want_pwr = (m == MODE_TEST) ? 3 : kE22PowerCode;   // bench: minimum power
+  if (want_pwr != rcfg_.power) { rcfg_.power = want_pwr; radio_reconfig_pending_ = true; }
+  for (int i = 0; i < P_COUNT; ++i) last_gen_s_[i] = 0;
+  evr(1, 0x0010 + m, "MODE %s -> %s (%s)", kModeName[old <= 4 ? old : 0], kModeName[m], why);
+}
+
+void Flight::execute(const uint8_t* pkt, size_t len, uint8_t tc_seq) {
+  Command c;
+  const CmdError e = parse_tc_packet(pkt, len, c);
+  last_opcode_ = c.opcode;
+  last_status_ = e;
+  if (e != CE_OK) {
+    ++cmd_rej_;
+    cmd_verify(tc_seq, c.opcode, STAGE_FAILED, e);
+    evr(2, 0x0500 + e, "command 0x%02X rejected, error %u", c.opcode, e);
+    return;
+  }
+  uint8_t result = CE_OK;
+  uint32_t tag = 0;
+  switch (c.opcode) {
+    case OP_NOOP: break;
+    case OP_MODE: set_mode(c.a8, "ground command"); break;
+    case OP_TXPWR:
+      if (mode_ == MODE_TEST) { result = CE_NOT_ALLOWED; break; }
+      rcfg_.power = c.a8; radio_reconfig_pending_ = true; break;
+    case OP_AIRRATE:
+      // Switch only after two more frames at the old rate, so the ground sees
+      // this verification first. Revert automatically unless a TC arrives.
+      pending_air_rate_ = c.a8;
+      revert_window_ms_ = (uint32_t)c.a16 * 1000UL;
+      rate_change_after_frames_ = 2;
+      evr(2, 0x0211, "AIR RATE -> code %u in 2 frames; revert in %u s without uplink", c.a8, c.a16);
+      break;
+    case OP_FPERIOD: cmd_frame_period_ms_ = c.a16; break;
+    case OP_PKTRATE: {
+      const uint16_t apids[P_COUNT] = {APID_HK, APID_RF, APID_TIMECORR, APID_MAG, APID_ATT,
+                                       APID_SPEC, APID_ENV};
+      result = CE_BAD_ARGUMENT;
+      for (int i = 0; i < P_COUNT; ++i)
+        if (apids[i] == c.a16) { period_override_[i] = c.b16 ? c.b16 : 0xFFFF; result = CE_OK; }
+      break;
+    }
+    case OP_PLAYBACK:
+      if (c.a8) ssr_.start_playback(); else ssr_.stop_playback();
+      evr(1, 0x0401, "SSR playback %s (%lu packets)", c.a8 ? "START" : "STOP",
+          (unsigned long)ssr_.packets());
+      break;
+    case OP_SSRCLEAR: ssr_.clear(); vc_[VC_PLAYBACK].reset(); break;
+    case OP_PING: tag = c.a32; break;
+    case OP_SENSORS: sensor_enable_ = c.a16; break;
+    case OP_RSTCNT:
+      cmd_acc_ = cmd_rej_ = tc_ok_ = tc_bad_ = cltu_ok_ = cltu_bad_ = 0;
+      aux_timeouts_ = loop_overruns_ = 0; loop_max_ms_ = 0;
+      break;
+    case OP_REBOOT: reboot_pending_ = true; reboot_after_frames_ = 2; break;
+    case OP_MAGCC:
+      if (!mag_ob_.set_cycle_count(c.a16) && !mag_ib_.set_cycle_count(c.a16)) result = CE_HARDWARE;
+      break;
+    case OP_CMDLOSS: cmd_loss_s_ = c.a32; last_valid_tc_ms_ = millis(); break;
+    case OP_FDIRMASK: fdir_mask_ = c.a16; break;
+    case OP_TXINHIBIT:
+      tx_inhibit_ = true;
+      tx_inhibit_until_ms_ = millis() + (uint32_t)c.a16 * 1000UL;
+      fdir_flags_ |= FDIR_TX_INHIBIT;
+      break;
+    case OP_EVRLEVEL: evr_level_ = c.a8; break;
+    case OP_TIMECORR: timecorr_request_ = true; break;
+    default: result = CE_UNKNOWN_OPCODE; break;
+  }
+  if (result == CE_OK) ++cmd_acc_; else ++cmd_rej_;
+  last_status_ = result;
+  cmd_verify(tc_seq, c.opcode, result == CE_OK ? STAGE_EXECUTED : STAGE_FAILED, result, tag);
+  LOGF("INFO", "CMD 0x%02X seq=%u -> %s", c.opcode, tc_seq, result == CE_OK ? "EXECUTED" : "FAILED");
+}
+
+// =============================================================================
+// Packet generation
+// =============================================================================
+bool Flight::emit(uint16_t apid, const uint8_t* payload, size_t n, uint8_t vc) {
+  uint8_t pkt[kSpPriHdrLen + kSpSecHdrLen + kMaxPayload];
+  const uint8_t si = seq_index(apid);
+  const size_t len = build_tm_packet(pkt, sizeof pkt, apid, seq_[si], sclk_.cuc(), payload, n);
+  if (!len) return false;
+  seq_[si] = (uint16_t)((seq_[si] + 1) & 0x3FFF);
+  ssr_.record(pkt, (uint16_t)len);                     // everything is recorded
+  // Under congestion, science is recorded only (play it back later).
+  if (vc == VC_RT_SCI && (fdir_flags_ & FDIR_VC_CONGEST) && (fdir_mask_ & FDIR_VC_CONGEST)) return true;
+  return vc_[vc].push(pkt, len);
+}
+
+void Flight::evr(uint8_t sev, uint16_t id, const char* fmt, ...) {
+  char text[96];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(text, sizeof text, fmt, ap);
+  va_end(ap);
+  static const char* sv[] = {"DIAG", "INFO", "WARN", "ERROR", "FATAL"};
+  LOGF(sv[sev <= 4 ? sev : 4], "EVR 0x%04X %s", id, text);
+  if (sev < evr_level_) return;
+  if (sev < 3) {                         // throttle routine EVRs; never errors
+    if (!evr_budget_) return;
+    --evr_budget_;
+  }
+  uint8_t b[kMaxPayload];
+  emit(APID_EVR, b, pack_evr(sev, id, text, b), VC_RT_ENG);
+  Bridge.notify("sc_evr", String(text));
+}
+
+void Flight::tick_1hz(uint32_t now) {
+  const uint32_t t = sclk_.seconds();
+  busy_ms_bucket_[((now / 1000) + 1) % 60] = 0;     // clear the slot about to be reused
+  if (t % 60 == 0) evr_budget_ = 10;
+
+  sample_fast();
+
+  const uint8_t m = mode_ <= MODE_TEST ? mode_ : (uint8_t)MODE_SAFE;
+  typedef void (Flight::*Gen)();
+  static const Gen gens[P_COUNT] = {&Flight::gen_hk, &Flight::gen_rf, &Flight::gen_timecorr,
+                                    &Flight::gen_mag, &Flight::gen_att, &Flight::gen_spec,
+                                    &Flight::gen_env};
+  for (int i = 0; i < P_COUNT; ++i) {
+    uint16_t period = kCadence[m][i];
+    if (period_override_[i] == 0xFFFF) period = 0;
+    else if (period_override_[i]) period = period_override_[i];
+    if (!period) continue;
+    if (last_gen_s_[i] == 0 || t - last_gen_s_[i] >= period) {
+      last_gen_s_[i] = t ? t : 1;
+      (this->*gens[i])();
+    }
+  }
+  if (t - last_callsign_s_ >= kCallsignPeriodS) {
+    last_callsign_s_ = t;
+    evr(1, 0x0002, "DE %s", VGQ_CALLSIGN);
+  }
+  // Noise-floor sampling when the channel is quiet.
+  if (radio_cfg_ok_ && tx_state_ == TX_IDLE && !rx_len_ && now - last_noise_ms_ > kNoiseSampleMs &&
+      now - last_tx_start_ms_ > 300) {
+    last_noise_ms_ = now;
+    awaiting_rssi_ = true;
+    rssi_req_ms_ = now;
+    radio_.request_rssi();
+  }
+  fdir_1hz(now);
+  notify_egse_status();
+}
+
+void Flight::sample_fast() {
+  const uint16_t en = sensor_enable_;
+  float x, y, z;
+  if ((en & SNS_RM3100_OB) && mag_ob_.ok() && mag_ob_.measure(x, y, z)) mstat_ob_.add(x, y, z);
+  if ((en & SNS_RM3100_IB) && mag_ib_.ok() && mag_ib_.measure(x, y, z)) mstat_ib_.add(x, y, z);
+  if ((en & SNS_MMC5603) && mag_body_.ok() && mag_body_.measure(x, y, z)) mstat_body_.add(x, y, z);
+  if ((en & SNS_MPU9250) && imu_.ok()) {
+    if (imu_.read()) { avi_temp_c_ = imu_.temp_c; sensor_fail_count_[0] = 0; }
+    else ++sensor_fail_count_[0];
+  }
+  if ((en & SNS_NICLA_ME) && aru_.ok()) aru_valid_ = aru_.read(aru_last_);
+  if (ina_.ok()) {
+    float v, i;
+    if (ina_.read(v, i)) { vradio_ = v; iradio_ = i; }
+  } else {
+    vradio_ = analog_.vradio_v();
+  }
+  analog_.read_css(css_);
+  pa_temp_c_ = analog_.pa_temp_c();
+  bus_.select(-1);
+}
+
+void Flight::gen_hk() {
+  HkPacket p{};
+  p.fsw_mode = mode_;
+  p.sclk_partition = sclk_.partition;
+  p.uptime_s = sclk_.seconds();
+  p.reset_cause = reset_cause_;
+  p.fdir_flags = fdir_flags_;
+  p.sensor_health = sensor_health_;
+  p.cmd_accepted = cmd_acc_;
+  p.cmd_rejected = cmd_rej_;
+  p.cmd_last_opcode = last_opcode_;
+  p.cmd_last_status = last_status_;
+  p.tc_frames_ok = tc_ok_;
+  p.tc_frames_bad = tc_bad_;
+  p.farm_state = farm_.state();
+  p.farm_vr = farm_.vr();
+  p.cmd_loss_timer_s = (millis() - last_valid_tc_ms_) / 1000UL;
+  p.avionics_temp_cC = clamp_i16(avi_temp_c_ * 100.0f);
+  p.pa_temp_cC = clamp_i16(pa_temp_c_ * 100.0f);
+  p.bus_voltage_mV = isnan(vradio_) ? kNaU16 : (uint16_t)lroundf(vradio_ * 1000.0f);
+  p.bus_current_mA = clamp_i16(iradio_ * 1000.0f);
+  p.loop_max_ms = loop_max_ms_;
+  p.loop_overruns = loop_overruns_;
+  p.i2c_errors = (uint16_t)umin32(bus_.errors(), 65535);
+  p.ssr_fill_permille = ssr_.fill_permille();
+  p.ssr_dropped = (uint16_t)umin32(ssr_.dropped(), 65535);
+  p.vc0_backlog = (uint16_t)vc_[0].bytes();
+  p.vc1_backlog = (uint16_t)vc_[1].bytes();
+  p.vc2_backlog = (uint16_t)vc_[2].bytes();
+  loop_max_ms_ = 0;
+  uint8_t b[64];
+  emit(APID_HK, b, pack_hk(p, b), VC_RT_ENG);
+}
+
+void Flight::gen_rf() {
+  RfPacket p{};
+  p.air_rate_code = rcfg_.air_rate;
+  p.tx_power_code = rcfg_.power;
+  p.channel = rcfg_.channel;
+  p.e22_cfg_ok = radio_cfg_ok_;
+  p.frames_sent = frames_sent_;
+  p.oid_frames_sent = oid_sent_;
+  p.tx_airtime_ms_total = airtime_total_ms_;
+  uint32_t busy = 0;
+  for (int i = 0; i < 60; ++i) busy += busy_ms_bucket_[i];
+  p.tx_duty_permille = (uint16_t)umin32(busy / 60, 1000);
+  p.frame_period_ms = (uint16_t)umin32(frame_period_ms(), 65535);
+  p.aux_timeouts = aux_timeouts_;
+  p.uplink_rssi_dbm = uplink_rssi_ == -32768 ? kNaI16 : uplink_rssi_;
+  p.noise_floor_dbm = noise_dbm_ == -32768 ? kNaI16 : noise_dbm_;
+  p.cltu_ok = cltu_ok_;
+  p.cltu_bad = cltu_bad_;
+  p.bch_corrected = (uint16_t)umin32(bch_.codeblocks_corrected, 65535);
+  p.rx_bytes = rx_bytes_;
+  p.mcfc = framer_.mcfc();
+  p.last_airtime_ds = (uint8_t)umin32(last_airtime_ms_ / 100, 255);
+  uint8_t b[48];
+  emit(APID_RF, b, pack_rf(p, b), VC_RT_ENG);
+}
+
+void Flight::gen_timecorr() {
+  if (!frames_sent_) return;
+  TimeCorrPacket p{};
+  p.ref_mcfc = tx_mcfc_;
+  p.sclk_coarse = (uint32_t)(tx_start_sclk_us_ / 1000000ULL);
+  p.sclk_fine = (uint16_t)(((tx_start_sclk_us_ % 1000000ULL) << 16) / 1000000ULL);
+  p.air_rate_code = rcfg_.air_rate;
+  p.ref_airtime_ms = (uint16_t)umin32(last_airtime_ms_, 65535);
+  uint8_t b[16];
+  emit(APID_TIMECORR, b, pack_timecorr(p, b), VC_RT_ENG);
+}
+
+static MagVector mag_vec(const MagStats& s, bool ok) {
+  MagVector v{kNaI32, kNaI32, kNaI32, kNaU16};
+  if (!ok || !s.count()) return v;
+  float x, y, z;
+  s.mean(x, y, z);
+  v.bx_nT = clamp_i32(x * 1000.0f);
+  v.by_nT = clamp_i32(y * 1000.0f);
+  v.bz_nT = clamp_i32(z * 1000.0f);
+  const float r = s.rms_fluct() * 1000.0f;
+  v.rms_nT = r > 65534.0f ? 65534 : (uint16_t)lroundf(r);
+  return v;
+}
+
+void Flight::gen_mag() {
+  MagPacket p{};
+  const uint8_t n = mstat_ob_.count() > mstat_body_.count() ? mstat_ob_.count() : mstat_body_.count();
+  p.nsamples = n;
+  p.flags = (mag_tx_keyed_ ? 1 : 0) | (mstat_ob_.count() ? 2 : 0) | (mstat_ib_.count() ? 4 : 0) |
+            (mstat_body_.count() ? 8 : 0);
+  p.outboard = mag_vec(mstat_ob_, mag_ob_.ok());
+  p.inboard = mag_vec(mstat_ib_, mag_ib_.ok());
+  p.body = mag_vec(mstat_body_, mag_body_.ok());
+  float t;
+  if (mag_body_.ok() && mag_body_.temperature(t)) body_temp_c_ = t;
+  p.body_temp_cC = clamp_i16(body_temp_c_ * 100.0f);
+  mstat_ob_.reset(); mstat_ib_.reset(); mstat_body_.reset();
+  mag_tx_keyed_ = (tx_state_ != TX_IDLE);
+  uint8_t b[64];
+  emit(APID_MAG, b, pack_mag(p, b), VC_RT_SCI);
+}
+
+void Flight::gen_att() {
+  AttPacket p{};
+  for (int i = 0; i < 3; ++i) { p.acc_mg[i] = p.gyro_cdps[i] = p.ak_dT[i] = kNaI16; p.sun_body[i] = kNaI16; }
+  for (int i = 0; i < 4; ++i) { p.q_aru[i] = kNaI16; p.q_triad[i] = kNaI16; }
+  if (imu_.ok()) {
+    p.flags |= 1;
+    p.acc_mg[0] = clamp_i16(imu_.ax_g * 1000); p.acc_mg[1] = clamp_i16(imu_.ay_g * 1000);
+    p.acc_mg[2] = clamp_i16(imu_.az_g * 1000);
+    p.gyro_cdps[0] = clamp_i16(imu_.gx_dps * 100); p.gyro_cdps[1] = clamp_i16(imu_.gy_dps * 100);
+    p.gyro_cdps[2] = clamp_i16(imu_.gz_dps * 100);
+  }
+  if (imu_.mag_ok()) {
+    p.flags |= 0x10;
+    p.ak_dT[0] = clamp_i16(imu_.mx_uT * 10); p.ak_dT[1] = clamp_i16(imu_.my_uT * 10);
+    p.ak_dT[2] = clamp_i16(imu_.mz_uT * 10);
+  }
+  if (aru_valid_) {
+    p.flags |= 2;
+    p.q_aru[0] = clamp_i16(aru_last_.qw * 16384); p.q_aru[1] = clamp_i16(aru_last_.qx * 16384);
+    p.q_aru[2] = clamp_i16(aru_last_.qy * 16384); p.q_aru[3] = clamp_i16(aru_last_.qz * 16384);
+    p.aru_accuracy = aru_last_.quat_accuracy;
+  }
+  float cnt[4];
+  for (int i = 0; i < 4; ++i) { p.css_raw[i] = css_[i]; cnt[i] = css_[i]; }
+  Vec3 sun;
+  if (css_sun_vector(cnt, kCssDark, kCssMinSignal, sun)) {
+    p.flags |= 4;
+    p.sun_body[0] = clamp_i16(sun.x * 32000); p.sun_body[1] = clamp_i16(sun.y * 32000);
+    p.sun_body[2] = clamp_i16(sun.z * 32000);
+  }
+  if (imu_.ok() && imu_.mag_ok()) {
+    const Vec3 a{imu_.ax_g, imu_.ay_g, imu_.az_g}, m{imu_.mx_uT, imu_.my_uT, imu_.mz_uT};
+    const float an = v_norm(a);
+    Quat q;
+    if (an > 0.9f && an < 1.1f && triad_ned(a, m, kGeomagInclDeg, kGeomagDeclDeg, q)) {
+      p.flags |= 8;
+      p.q_triad[0] = clamp_i16(q.w * 16384); p.q_triad[1] = clamp_i16(q.x * 16384);
+      p.q_triad[2] = clamp_i16(q.y * 16384); p.q_triad[3] = clamp_i16(q.z * 16384);
+    }
+  }
+  uint8_t b[64];
+  emit(APID_ATT, b, pack_att(p, b), VC_RT_SCI);
+}
+
+void Flight::gen_spec() {
+  if (!(sensor_enable_ & (SNS_AS7265X | SNS_AS7343))) return;
+  SpecReading r;
+  spec_.read(r);
+  bus_.select(-1);
+  SpecPacket p{};
+  p.flags = (r.triad_ok ? 1 : 0) | (r.as7343_ok ? 2 : 0);
+  p.as7265x_gain = spec_.triad_gain_code();
+  p.as7265x_int_cycles = spec_.triad_int_cycles();
+  for (int i = 0; i < 18; ++i) {
+    p.as7265x_uW_cm2[i] = r.triad_ok ? r.triad_uW_cm2[i] : NAN;
+    p.as7343_counts[i] = r.as7343_ok ? r.as7343_counts[i] : kNaU16;
+  }
+  p.as7343_gain = spec_.as7343_gain_code();
+  p.as7265x_temp_c = r.triad_ok ? r.triad_temp_c : (int8_t)-128;
+  uint8_t b[kMaxPayload];
+  emit(APID_SPEC, b, pack_spec(p, b), VC_RT_SCI);
+}
+
+void Flight::gen_env() {
+  EnvPacket p{};
+  p.bme_t_cC = kNaI16; p.bme_p_Pa = 0xFFFFFFFF; p.bme_rh_cpct = kNaU16; p.bme_gas_ohm = 0xFFFFFFFF;
+  p.nenv_t_cC = kNaI16; p.nenv_rh_cpct = kNaU16; p.nenv_outdoor_aqi = kNaU16;
+  p.nenv_iaq = p.nenv_tvoc_mg_m3 = p.nenv_eco2_ppm = p.nenv_no2_ppb = p.nenv_o3_ppb = NAN;
+  p.nme_p_hPa = p.nme_bvoc_ppm = p.veml_lux = NAN;
+  p.nme_t_cC = kNaI16; p.nme_rh_cpct = kNaU16; p.nme_iaq = kNaU16; p.nme_co2eq_ppm = 0xFFFFFFFF;
+  Bme690Reading br;
+  if ((sensor_enable_ & SNS_BME690) && bme_.ok() && bme_.read(br)) {
+    p.flags |= 1;
+    p.bme_t_cC = clamp_i16(br.t_c * 100);
+    p.bme_p_Pa = (uint32_t)lroundf(br.p_pa);
+    p.bme_rh_cpct = (uint16_t)lroundf(br.rh_pct * 100);
+    p.bme_gas_ohm = br.gas_valid ? (uint32_t)lroundf(br.gas_ohm) : 0xFFFFFFFF;
+  }
+  NiclaEnvReading ne;
+  if ((sensor_enable_ & SNS_NICLA_ENV) && nenv_.ok() && nenv_.read(ne)) {
+    p.flags |= 2;
+    p.nenv_t_cC = clamp_i16(ne.t_c * 100);
+    p.nenv_rh_cpct = isnan(ne.rh) ? kNaU16 : (uint16_t)lroundf(ne.rh * 100);
+    p.nenv_iaq = ne.iaq; p.nenv_tvoc_mg_m3 = ne.tvoc; p.nenv_eco2_ppm = ne.eco2;
+    p.nenv_outdoor_aqi = ne.aqi < 0 ? kNaU16 : (uint16_t)ne.aqi;
+    p.nenv_no2_ppb = ne.no2; p.nenv_o3_ppb = ne.o3;
+  }
+  if (aru_valid_) {
+    p.flags |= 4;
+    p.nme_p_hPa = aru_last_.p_hpa;
+    p.nme_t_cC = clamp_i16(aru_last_.t_c * 100);
+    p.nme_rh_cpct = isnan(aru_last_.rh) ? kNaU16 : (uint16_t)lroundf(aru_last_.rh * 100);
+    p.nme_iaq = aru_last_.iaq;
+    p.nme_co2eq_ppm = aru_last_.co2eq;
+    p.nme_bvoc_ppm = aru_last_.bvoc_ppm;
+    p.nme_accuracy = aru_last_.bsec_accuracy;
+  }
+  float lux;
+  if ((sensor_enable_ & SNS_VEML7700) && veml_.ok() && veml_.read_lux(lux)) {
+    p.flags |= 8;
+    p.veml_lux = lux;
+  }
+  bus_.select(-1);
+  uint8_t b[kMaxPayload];
+  emit(APID_ENV, b, pack_env(p, b), VC_RT_SCI);
+}
+
+// =============================================================================
+// Fault protection (1 Hz)
+// =============================================================================
+void Flight::fdir_1hz(uint32_t now) {
+  // --- command-loss timer (standard deep-space fault protection) ---
+  if (cmd_loss_s_ && now - last_valid_tc_ms_ > cmd_loss_s_ * 1000UL) {
+    last_valid_tc_ms_ = now;                    // re-arm: one response per period
+    fdir_flags_ |= FDIR_CMD_LOSS;
+    if (fdir_mask_ & FDIR_CMD_LOSS) {
+      evr(3, 0x0601, "COMMAND LOSS: no valid uplink for %lu s -> SAFE, default radio",
+          (unsigned long)cmd_loss_s_);
+      if (rcfg_.air_rate != kE22AirRate) { rcfg_.air_rate = kE22AirRate; radio_reconfig_pending_ = true; }
+      set_mode(MODE_SAFE, "command loss");
+    }
+  }
+  // --- air-rate revert ---
+  if (revert_air_rate_ != 0xFF && (int32_t)(now - revert_deadline_ms_) > 0) {
+    rcfg_.air_rate = revert_air_rate_;
+    revert_air_rate_ = 0xFF;
+    radio_reconfig_pending_ = true;
+    fdir_flags_ |= FDIR_RATE_REVERT;
+    evr(3, 0x0602, "air-rate change NOT confirmed by uplink - reverting");
+  }
+  // --- TX inhibit timer ---
+  if (tx_inhibit_ && (int32_t)(now - tx_inhibit_until_ms_) > 0) {
+    tx_inhibit_ = false;
+    fdir_flags_ &= ~FDIR_TX_INHIBIT;
+    evr(1, 0x0603, "transmitter re-enabled");
+  }
+  // --- PA thermal ---
+  if (!isnan(pa_temp_c_)) {
+    if (pa_temp_c_ >= kPaTempRedC && (fdir_mask_ & FDIR_PA_OVERTEMP) && rcfg_.power != 3) {
+      rcfg_.power = 3;
+      radio_reconfig_pending_ = true;
+      evr(4, 0x0604, "PA %.1f C >= RED limit: TX power to minimum, SAFE", pa_temp_c_);
+      set_mode(MODE_SAFE, "PA over-temperature");
+    }
+    if (pa_temp_c_ >= kPaTempYellowC) fdir_flags_ |= FDIR_PA_OVERTEMP;
+    else if (pa_temp_c_ < kPaTempYellowC - 5) fdir_flags_ &= ~FDIR_PA_OVERTEMP;
+  }
+  if (!isnan(avi_temp_c_)) {
+    if (avi_temp_c_ >= kAviTempRedC) fdir_flags_ |= FDIR_AVI_OVERTEMP;
+    else if (avi_temp_c_ < kAviTempRedC - 5) fdir_flags_ &= ~FDIR_AVI_OVERTEMP;
+  }
+  // --- I2C bus ---
+  if (bus_.consecutive_errors() > 10 && (fdir_mask_ & FDIR_I2C_BUS)) {
+    fdir_flags_ |= FDIR_I2C_BUS;
+    evr(3, 0x0605, "I2C bus fault (%u consecutive errors) - recovering", bus_.consecutive_errors());
+    bus_.recover();
+  }
+  // --- sensor loss: the IMU read is the canary on the bus ---
+  if (sensor_fail_count_[0] > 5 && (sensor_health_ & SNS_MPU9250)) {
+    sensor_health_ &= ~SNS_MPU9250;
+    fdir_flags_ |= FDIR_SENSOR_LOST;
+    evr(3, 0x0606, "MPU-9250 stopped responding");
+  }
+  // --- radio supply ---
+  if (!isnan(vradio_) && vradio_ < 10.5f) fdir_flags_ |= FDIR_LOW_BUS_V;
+  else if (!isnan(vradio_) && vradio_ > 11.0f) fdir_flags_ &= ~FDIR_LOW_BUS_V;
+  // --- downlink congestion ---
+  if (vc_[VC_RT_SCI].bytes() > 800 || vc_[VC_RT_ENG].bytes() > 800) fdir_flags_ |= FDIR_VC_CONGEST;
+  else if (vc_[VC_RT_SCI].bytes() < 300 && vc_[VC_RT_ENG].bytes() < 300) fdir_flags_ &= ~FDIR_VC_CONGEST;
+  // --- COP-1 ---
+  if (farm_.state() == Farm1::S3_LOCKOUT) fdir_flags_ |= FDIR_FARM_LOCKOUT;
+  else fdir_flags_ &= ~FDIR_FARM_LOCKOUT;
+  if (loop_overruns_) fdir_flags_ |= FDIR_LOOP_OVERRUN;
+}
+
+// =============================================================================
+// Displays and EGSE
+// =============================================================================
+void Flight::update_display(uint32_t now) {
+  ScDisplayData d{};
+  d.mode = mode_;
+  d.tx_on = tx_state_ != TX_IDLE;
+  d.rx_flash = now - last_rx_flash_ms_ < 500;
+  d.farm_lockout = farm_.state() == Farm1::S3_LOCKOUT;
+  d.fdir_active = (fdir_flags_ & ~(FDIR_TX_INHIBIT)) != 0;
+  d.vc0_pm = (uint16_t)(vc_[0].bytes() * 1000UL / VcStream::kBufLen);
+  d.vc1_pm = (uint16_t)(vc_[1].bytes() * 1000UL / VcStream::kBufLen);
+  d.ssr_pm = ssr_.fill_permille();
+  d.sensor_health = sensor_health_;
+  d.sclk_s = sclk_.seconds();
+  d.partition = sclk_.partition;
+  d.frames_sent = frames_sent_;
+  uint32_t busy = 0;
+  for (int i = 0; i < 60; ++i) busy += busy_ms_bucket_[i];
+  d.tx_duty_pct = busy / 600.0f;
+  d.pa_temp_c = pa_temp_c_;
+  d.vradio_v = vradio_;
+  d.uplink_rssi = uplink_rssi_;
+  d.noise_dbm = noise_dbm_;
+  d.air_rate_code = rcfg_.air_rate;
+  d.power_code = rcfg_.power;
+  d.channel = rcfg_.channel;
+  d.farm_vr = farm_.vr();
+  d.mcfc = framer_.mcfc();
+  d.cmd_acc = cmd_acc_;
+  d.cmd_rej = cmd_rej_;
+  d.fdir_flags = fdir_flags_;
+  d.frame_period_ms = frame_period_ms();
+  display_.update(d);
+}
+
+void Flight::notify_egse_status() {
+  // Compact JSON for the Linux-side EGSE console (transmitter-end metrics).
+  char j[300];
+  uint32_t busy = 0;
+  for (int i = 0; i < 60; ++i) busy += busy_ms_bucket_[i];
+  snprintf(j, sizeof j,
+           "{\"mode\":\"%s\",\"sclk\":%lu,\"part\":%u,\"frames\":%lu,\"oid\":%lu,\"mcfc\":%u,"
+           "\"period_ms\":%lu,\"busy_ms\":%lu,\"duty_pct\":%.1f,\"air\":%u,\"pwr\":%u,\"ch\":%u,"
+           "\"ul_rssi\":%d,\"noise\":%d,\"farm\":%u,\"vr\":%u,\"acc\":%u,\"rej\":%u,\"fdir\":%u,"
+           "\"sns\":%u,\"vc0\":%u,\"vc1\":%u,\"vc2\":%u,\"ssr_pm\":%u,\"pa_c\":%.1f,\"vrad\":%.2f,"
+           "\"tx\":%d,\"inhibit\":%d}",
+           kModeName[mode_ <= 4 ? mode_ : 0], (unsigned long)sclk_.seconds(), sclk_.partition,
+           (unsigned long)frames_sent_, (unsigned long)oid_sent_, framer_.mcfc(),
+           (unsigned long)frame_period_ms(), (unsigned long)last_airtime_ms_, busy / 600.0f,
+           rcfg_.air_rate, rcfg_.power, rcfg_.channel, uplink_rssi_, noise_dbm_, farm_.state(),
+           farm_.vr(), cmd_acc_, cmd_rej_, fdir_flags_, sensor_health_, (unsigned)vc_[0].bytes(),
+           (unsigned)vc_[1].bytes(), (unsigned)vc_[2].bytes(), ssr_.fill_permille(),
+           isnan(pa_temp_c_) ? -999.0f : pa_temp_c_, isnan(vradio_) ? 0.0f : vradio_,
+           tx_state_ != TX_IDLE, tx_inhibit_);
+  Bridge.notify("sc_status", String(j));
+}
+
+void Flight::egse_set_partition(int p) {
+  sclk_.partition = (uint16_t)p;
+  LOGF("INFO", "SCLK partition set to %d by EGSE", p);
+}
+
+bool Flight::egse_hardline_cltu(const String& hex) {
+  uint8_t b[110];
+  const size_t n = hex.length() / 2;
+  if (n == 0 || n > sizeof b) return false;
+  for (size_t i = 0; i < n; ++i) {
+    const int hi = hexval(hex[2 * i]), lo = hexval(hex[2 * i + 1]);
+    if (hi < 0 || lo < 0) return false;
+    b[i] = (uint8_t)((hi << 4) | lo);
+  }
+  LOGF("INFO", "hardline (umbilical) CLTU, %u octets", (unsigned)n);
+  process_tc(b, n, true);
+  return true;
+}
+
+}  // namespace vgq

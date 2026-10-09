@@ -1,0 +1,55 @@
+# =============================================================================
+#  DSS-Q1 ground station configuration (VENTUNO Q or any Linux PC)
+#  The [radio] values MUST match spacecraft/vgq1_flight/sketch/src/config.h.
+# =============================================================================
+
+[station]
+name = "DSS-Q1"
+latitude_deg = 0.0          # your station — used for OWLT / range when known
+longitude_deg = 0.0
+altitude_m = 0.0
+antenna = "433 MHz Yagi"
+antenna_gain_dbi = 12.0     # use the MEASURED / datasheet gain, not marketing figures
+rx_line_loss_db = 1.0       # coax + connectors between antenna and E22
+
+[spacecraft]
+name = "VGQ-1"
+scid = 0x0A7
+distance_km = 0.0           # enter the measured path length for OWLT / link budget
+
+[radio]
+port = "/dev/ttyUSB0"       # E22-400TBH-02 USB-UART (check with: ls /dev/serial/by-id/)
+address = 0
+netid = 0
+uart_code = 3               # 9600 bit/s (config mode is always 9600)
+parity = 0
+# ---- Profile selection ------------------------------------------------------
+#  BALANCED  : air_rate = 2  (2.4 kbit/s, frame every ~2 s)  <- default, bring-up
+#  MAX RANGE : air_rate = 0  (0.3 kbit/s, ~8 dB more sensitivity, frame every ~20 s)
+#  Change it here AND in config.h (kE22AirRate), then re-run the E22 config tool.
+air_rate = 2
+subpacket = 0               # 240-octet sub-packets (one CADU = one LoRa packet)
+rssi_noise = true           # enables C0 C1 C2 C3 ambient-noise queries
+power = 0                   # ground TX (uplink) power code; 0 = maximum
+channel = 23                # 410.125 + 23 = 433.125 MHz — check your band plan / licence
+rssi_byte = true            # E22 appends packet RSSI to every received packet
+lbt = false
+noise_bw_hz = 125000.0      # ASSUMED LoRa bandwidth for C/N0 estimates
+noise_poll_s = 20.0
+radio_latency_s = 0.0       # calibrated radio pipeline delay for time correlation
+
+[gds]
+archive_dir = "archive"
+http_host = "127.0.0.1"     # 0.0.0.0 exposes the dashboard (and COMMANDING) to your LAN
+http_port = 8080
+los_timeout_s = 90.0
+frontpanel_port = ""        # e.g. "/dev/ttyACM0" for the GIGA R1 front panel
+frontpanel_bridge = false   # true: drive the OLED from the VENTUNO Q MCU via App Lab Bridge
+console_interval_s = 10.0
+
+[commanding]
+t1_s = 45.0                 # FOP-1 retransmission timer
+tx_limit = 3                # transmissions per AD frame before suspending
+window = 5                  # max outstanding AD frames
+verify_timeout_s = 300.0
+require_two_person_for_hazardous = false   # true: second CardKB must authorise
