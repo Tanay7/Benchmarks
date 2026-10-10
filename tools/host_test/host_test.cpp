@@ -32,25 +32,50 @@
 #include "../../spacecraft/vgq1_flight/sketch/src/fsw/tlm_packets.h"
 #include <cmath>
 
+#include "host_test.h"
+
 using namespace ccsds;
 
-static int g_fail = 0;
-#define CHECK(cond, msg)                                              \
-  do {                                                                \
-    if (!(cond)) { std::printf("FAIL: %s\n", msg); ++g_fail; }        \
-    else         { std::printf("ok:   %s\n", msg); }                  \
-  } while (0)
-
-static std::string hex(const uint8_t* p, size_t n) {
+namespace host_test {
+int& failures() { static int n = 0; return n; }
+std::string hex(const uint8_t* p, size_t n) {
   static const char* d = "0123456789abcdef";
   std::string s;
   for (size_t i = 0; i < n; ++i) { s += d[p[i] >> 4]; s += d[p[i] & 15]; }
   return s;
 }
+size_t unhex(const char* s, uint8_t* out, size_t cap) {
+  size_t n = 0;
+  int hi = -1;
+  for (; *s && n < cap; ++s) {
+    const char c = *s;
+    int v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+          : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+    if (v < 0) continue;
+    if (hi < 0) hi = v; else { out[n++] = (uint8_t)(hi << 4 | v); hi = -1; }
+  }
+  return n;
+}
+uint32_t rnd() {
+  static uint32_t g = 0x12345678;
+  g ^= g << 13; g ^= g >> 17; g ^= g << 5;
+  return g;
+}
+namespace {
+struct Entry { const char* name; TestFn fn; };
+std::vector<Entry>& registry() { static std::vector<Entry> r; return r; }
+}  // namespace
+Registrar::Registrar(const char* name, TestFn fn) { registry().push_back({name, fn}); }
+void run_all(const std::string& out) {
+  for (const Entry& e : registry()) {
+    std::printf("---- %s\n", e.name);
+    e.fn(out);
+  }
+}
+}  // namespace host_test
 
-// Deterministic PRNG (xorshift32) so vectors are reproducible.
-static uint32_t g_rng = 0x12345678;
-static uint32_t rnd() { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5; return g_rng; }
+using host_test::hex;
+using host_test::rnd;
 
 int main(int argc, char** argv) {
   const std::string out = argc > 1 ? argv[1] : ".";
@@ -446,7 +471,11 @@ int main(int argc, char** argv) {
           "MagStats FP32 Welford: 10 nT fluctuation on a 50 uT field within 1 nT of FP64 reference");
   }
 
-  std::printf("\n%s (%d failure%s)\n", g_fail ? "HOST TEST FAILED" : "HOST TEST PASSED", g_fail,
-              g_fail == 1 ? "" : "s");
-  return g_fail ? 1 : 0;
+  // ---- Checks registered by test_*.cpp files ------------------------------------------
+  host_test::run_all(out);
+
+  const int fails = host_test::failures();
+  std::printf("\n%s (%d failure%s)\n", fails ? "HOST TEST FAILED" : "HOST TEST PASSED", fails,
+              fails == 1 ? "" : "s");
+  return fails ? 1 : 0;
 }
