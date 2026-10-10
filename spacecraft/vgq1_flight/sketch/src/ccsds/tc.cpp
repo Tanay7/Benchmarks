@@ -86,11 +86,48 @@ size_t cltu_decode(const uint8_t* in, size_t len, uint8_t* out, size_t cap, BchS
 // ---------------------------------------------------------------------------
 // TC Transfer Frame
 // ---------------------------------------------------------------------------
-TcParseResult tc_parse(const uint8_t* b, size_t len, TcFrame& f) {
+// USLP TC frame (732.1-B-2). Mission rules: destination flag set (the SCID is
+// the receiving spacecraft), full TFPH, Type-AD frames carry exactly one VCF
+// count octet (= N(S), FARM-1 counts modulo 256) and no PCC; an OCF, if a
+// foreign ground system sends one, is skipped.
+static TcParseResult uslp_tc_parse(const uint8_t* b, size_t len, TcFrame& f, bool open_tfdf) {
+  UslpHeader h;
+  const size_t hl = uslp_get_header(b, len, h);
+  if (!hl) return h.truncated ? TC_BAD_HEADER : TC_TOO_SHORT;
+  f.format    = TC_FMT_USLP;
+  f.hdr_len   = (uint8_t)hl;
+  f.bypass    = h.bypass;
+  f.control   = h.pcc;
+  f.scid      = h.scid;
+  f.vcid      = h.vcid;
+  f.map_id    = h.map_id;
+  f.length    = h.frame_len;
+  f.seq       = h.vcf_len ? (uint8_t)h.vcf_count : 0;
+  f.upid      = 0;
+  f.tfdf_open = false;
+  if (f.scid != kSpacecraftId) return TC_BAD_SCID;
+  const size_t ocf = h.ocf ? kTmOcfLen : 0;
+  if (f.length > len || f.length < hl + kUslpTcTfdfHdrLen + ocf + 2 || f.length > kTcMaxFrameLen)
+    return TC_BAD_LENGTH;
+  const uint16_t crc = crc16_ccitt(b, f.length - 2);
+  if (crc != get_u16(b + f.length - 2)) return TC_BAD_FECF;
+  if (!h.dest || (!h.bypass && (h.vcf_len != 1 || h.pcc))) return TC_BAD_HEADER;
+  f.data = b + hl;
+  f.data_len = (uint16_t)(f.length - hl - ocf - 2);
+  return open_tfdf ? tc_open_tfdf(f) : TC_OK;
+}
+
+TcParseResult tc_parse(const uint8_t* b, size_t len, TcFrame& f, bool open_tfdf) {
   if (len < kTcPriHdrLen + 2) return TC_TOO_SHORT;
+  if (uslp_is_uslp(b)) return uslp_tc_parse(b, len, f, open_tfdf);
   const uint16_t w0 = get_u16(b);
   const uint16_t w1 = get_u16(b + 2);
   if ((w0 >> 14) != 0) return TC_BAD_VERSION;
+  f.format  = TC_FMT_TC;
+  f.hdr_len = kTcPriHdrLen;
+  f.map_id  = 0;
+  f.upid    = 0;
+  f.tfdf_open = true;
   f.bypass  = (w0 >> 13) & 1;
   f.control = (w0 >> 12) & 1;
   f.scid    = w0 & 0x3FF;
@@ -103,6 +140,20 @@ TcParseResult tc_parse(const uint8_t* b, size_t len, TcFrame& f) {
   if (crc != get_u16(b + f.length - 2)) return TC_BAD_FECF;
   f.data = b + kTcPriHdrLen;
   f.data_len = (uint16_t)(f.length - kTcPriHdrLen - 2);
+  return TC_OK;
+}
+
+TcParseResult tc_open_tfdf(TcFrame& f) {
+  if (f.tfdf_open) return TC_OK;
+  if (f.data_len < kUslpTcTfdfHdrLen) return TC_BAD_TFDF;
+  const uint8_t rule = f.data[0] >> 5, upid = f.data[0] & 0x1F;
+  // No segmentation; UPID 1 (COP-1 directive) exactly when the PCC flag is set.
+  if (rule != kUslpRuleNoSeg || upid != (f.control ? kUslpUpidCop1 : kUslpUpidPackets))
+    return TC_BAD_TFDF;
+  f.upid = upid;
+  f.data += kUslpTcTfdfHdrLen;
+  f.data_len = (uint16_t)(f.data_len - kUslpTcTfdfHdrLen);
+  f.tfdf_open = true;
   return TC_OK;
 }
 

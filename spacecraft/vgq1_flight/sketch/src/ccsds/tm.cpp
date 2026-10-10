@@ -2,6 +2,7 @@
 #include "crc16.h"
 #include "randomizer.h"
 #include "reed_solomon.h"
+#include "uslp.h"
 #include <string.h>
 
 namespace ccsds {
@@ -104,20 +105,47 @@ uint16_t VcStream::pop_field(uint8_t* dst, size_t n) {
 // ---------------------------------------------------------------------------
 // TmFramer
 // ---------------------------------------------------------------------------
-void TmFramer::init(uint16_t scid) {
-  scid_ = scid & 0x3FF;
+void TmFramer::init(uint16_t scid, Framing framing) {
+  scid_ = scid;                    // TM uses the low 10 bits, USLP all 16
+  framing_ = framing;
   mcfc_ = 0;
   memset(vcfc_, 0, sizeof(vcfc_));
+  last_count_ = last_vcid_ = 0;
+}
+
+size_t TmFramer::data_len(const FrameSecurity* sec) const {
+  const size_t base = framing_ == FRAMING_USLP ? kUslpTfdzLen : kTmDataLen;
+  const size_t overhead = sec ? sec->header_len() + sec->trailer_len() : 0;
+  return overhead < base ? base - overhead : 0;
 }
 
 void TmFramer::header(uint8_t* f, uint8_t vc, uint16_t fhp) {
   // TFVN=00 | SCID(10) | VCID(3) | OCF flag = 1
-  const uint16_t id = (uint16_t)((0u << 14) | ((uint16_t)scid_ << 4) | ((vc & 0x7u) << 1) | 1u);
+  const uint16_t id = (uint16_t)((0u << 14) | ((scid_ & 0x3FFu) << 4) | ((vc & 0x7u) << 1) | 1u);
   put_u16(f + 0, id);
-  f[2] = mcfc_++;
-  f[3] = vcfc_[vc & 7]++;
+  f[2] = mcfc_;                    // counters advance in commit(), once the frame is final
+  f[3] = vcfc_[vc & 7];
   // Data Field Status: SecHdr=0 | Sync=0 | PacketOrder=0 | SegLenId=11 | FHP(11)
   put_u16(f + 4, (uint16_t)((0x3u << 11) | (fhp & 0x7FF)));
+}
+
+size_t TmFramer::uslp_header(uint8_t* f, uint8_t vcid, uint8_t upid, uint16_t fhp,
+                             size_t sec_hdr_len) {
+  UslpHeader h;
+  h.scid = scid_;
+  h.dest = false;                  // the SCID names the source of a downlink frame
+  h.vcid = vcid;
+  h.frame_len = kTmFrameLen;
+  h.ocf = true;                    // CLCW in every frame, as in TM mode
+  h.vcf_len = 1;
+  h.vcf_count = vcfc_[vcid & 0x3F];
+  const size_t n = uslp_put_header(f, h);        // == kUslpTmHdrLen
+  // The TFDF header follows the SDLS security header (it is part of the
+  // protected TFDF, 355.0-B-2 / 732.1-B-2 §6).
+  uint8_t* t = f + n + sec_hdr_len;
+  t[0] = uslp_tfdf_byte(kUslpRulePackets, upid);
+  put_u16(t + 1, fhp == kFhpNoPacketStart ? kUslpFhpNone : fhp);
+  return n;
 }
 
 void TmFramer::trailer(uint8_t* f, const Clcw& clcw) {
@@ -126,32 +154,67 @@ void TmFramer::trailer(uint8_t* f, const Clcw& clcw) {
   put_u16(f + kTmFrameLen - kTmFecfLen, crc);
 }
 
-void TmFramer::build_frame(uint8_t vc, VcStream& s, const Clcw& clcw, uint16_t& idle_seq,
-                           uint8_t frame[kTmFrameLen]) {
-  if (s.bytes() < kTmDataLen) {
+void TmFramer::commit(uint8_t vcid) {
+  last_vcid_ = vcid;
+  last_count_ = framing_ == FRAMING_USLP ? vcfc_[vcid] : mcfc_;
+  ++mcfc_;
+  ++vcfc_[vcid];
+}
+
+bool TmFramer::build_frame(uint8_t vc, VcStream& s, const Clcw& clcw, uint16_t& idle_seq,
+                           uint8_t frame[kTmFrameLen], FrameSecurity* sec) {
+  const bool uslp = framing_ == FRAMING_USLP;
+  const size_t n = data_len(sec);
+  if (n == 0) return false;        // security overhead larger than the frame
+  if (s.bytes() < n) {
     // Pad with an idle packet. Minimum idle packet = 7 octets; any surplus
     // spills into the next frame of this VC, which is legal (packets span).
-    const size_t gap = kTmDataLen - s.bytes();
+    const size_t gap = n - s.bytes();
     const size_t idle_len = gap < 7 ? 7 : gap;
     uint8_t idle[kTmDataLen];
     build_idle_packet(idle, idle_len, idle_seq);
     idle_seq = (uint16_t)((idle_seq + 1) & 0x3FFF);
     s.push(idle, idle_len, true);
-    if (s.bytes() < kTmDataLen) {   // cannot happen (see VcStream sizing); be safe
+    if (s.bytes() < n) {           // cannot happen (see VcStream sizing); be safe
       build_oid_frame(clcw, frame);
-      return;
+      return true;
     }
   }
-  uint8_t* data = frame + kTmPriHdrLen;
-  const uint16_t fhp = s.pop_field(data, kTmDataLen);
-  header(frame, vc, fhp);
+  const size_t sh = sec ? sec->header_len() : 0;
+  const size_t hdr = uslp ? kUslpTmHdrLen : kTmPriHdrLen;
+  const size_t zone = hdr + sh + (uslp ? kUslpTfdfHdrLen : 0);   // first packet octet
+  const VcStream::Mark m = s.mark();
+  const uint16_t fhp = s.pop_field(frame + zone, n);
+  const uint8_t vcid = uslp ? (uint8_t)(vc & 0x3F) : (uint8_t)(vc & 7);
+  if (uslp) uslp_header(frame, vcid, kUslpUpidPackets, fhp, sh);
+  else      header(frame, vcid, fhp);
+  // Protected region: TM data field / USLP TFDF (TFDF header + TFDZ).
+  if (sec && !sec->protect(frame, hdr, uslp ? kUslpTfdfHdrLen + n : n)) {
+    s.rewind(m);
+    return false;
+  }
+  commit(vcid);
+  trailer(frame, clcw);
+  return true;
+}
+
+void TmFramer::build_oid_frame(const Clcw& clcw, uint8_t frame[kTmFrameLen],
+                               const uint8_t* idle, size_t idle_len) {
+  if (framing_ == FRAMING_USLP) {
+    const size_t n = uslp_header(frame, kUslpVcidOid, kUslpUpidIdle, kUslpFhpNone, 0);
+    idle_fill(frame + n + kUslpTfdfHdrLen, kUslpTfdzLen, idle, idle_len);
+    commit(kUslpVcidOid);
+  } else {
+    header(frame, VC_IDLE, kFhpOnlyIdleData);
+    idle_fill(frame + kTmPriHdrLen, kTmDataLen, idle, idle_len);
+    commit(VC_IDLE);
+  }
   trailer(frame, clcw);
 }
 
-void TmFramer::build_oid_frame(const Clcw& clcw, uint8_t frame[kTmFrameLen]) {
-  header(frame, VC_IDLE, kFhpOnlyIdleData);
-  memset(frame + kTmPriHdrLen, 0x55, kTmDataLen);
-  trailer(frame, clcw);
+void idle_fill(uint8_t* dst, size_t n, const uint8_t* pattern, size_t pattern_len) {
+  if (!pattern || !pattern_len) { memset(dst, 0x55, n); return; }
+  for (size_t i = 0; i < n; ++i) dst[i] = pattern[i % pattern_len];
 }
 
 // ---------------------------------------------------------------------------
