@@ -1,19 +1,19 @@
-"""Station configuration loader (TOML)."""
+"""Station configuration loader (TOML, config/station.toml).
+
+Parsed with the standard library's tomllib (Python >= 3.11; the station runs 3.12, the
+App Lab container 3.13), so no package is needed (contract section 23 rule 2). The user
+file is merged over DEFAULTS one table at a time: a table in the file updates the
+defaults' keys and keeps the others.
+"""
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
-
-try:
-    import tomllib                      # Python >= 3.11
-except ModuleNotFoundError:             # pragma: no cover
-    try:
-        import tomli as tomllib         # pip install tomli on older Pythons
-    except ModuleNotFoundError:
-        tomllib = None
+from typing import Any
 
 DEFAULT_PATH = Path(__file__).resolve().parents[1] / "config" / "station.toml"
 
-DEFAULTS = {
+DEFAULTS: dict[str, dict[str, Any]] = {
     "station": {"name": "DSS-Q1", "latitude_deg": 0.0, "longitude_deg": 0.0, "altitude_m": 0.0,
                 "antenna": "Yagi", "antenna_gain_dbi": 12.0, "rx_line_loss_db": 1.0},
     "spacecraft": {"name": "VGQ-1", "scid": 0x0A7, "distance_km": 0.0, "antenna_gain_dbi": 2.15,
@@ -37,14 +37,20 @@ DEFAULTS = {
 }
 
 
-def load_config(path: str | None = None) -> dict:
-    cfg = {k: dict(v) for k, v in DEFAULTS.items()}
+def load_config(path: str | Path | None = None) -> dict[str, Any]:
+    """DEFAULTS overlaid with the TOML file at `path` (default config/station.toml; a
+    missing file yields the defaults). Raises tomllib.TOMLDecodeError on bad TOML and
+    ValueError when an entry the defaults define as a table is not a table."""
+    cfg: dict[str, Any] = {k: dict(v) for k, v in DEFAULTS.items()}
     p = Path(path) if path else DEFAULT_PATH
     if p.exists():
-        if tomllib is None:
-            raise RuntimeError("TOML support needs Python 3.11+ or 'pip install tomli'")
         with open(p, "rb") as f:
             user = tomllib.load(f)
         for section, values in user.items():
-            cfg.setdefault(section, {}).update(values)
+            if isinstance(values, dict):
+                cfg.setdefault(section, {}).update(values)
+            elif section in DEFAULTS:
+                raise ValueError(f"{p}: '{section}' must be a [{section}] table, not {type(values).__name__}")
+            else:
+                cfg[section] = values
     return cfg

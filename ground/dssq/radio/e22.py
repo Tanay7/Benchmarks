@@ -21,20 +21,36 @@ MCU on M0/M1/AUX) the GDS switches modes itself (radioctl.py). Without it, set t
 mode pins by hand (M1 = 1, M0 = 0) and run, in ground/:
     python -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config config/station.toml
 Register layout mirror: spacecraft/vgq1_flight/sketch/src/drivers/e22.h.
+
+Serial transport (SerialPort): standard library only (termios / fcntl / select; no
+pyserial, contract section 23 rule 2), POSIX ttys such as /dev/ttyUSB0 or /dev/ttyACM0.
+The App Lab container bind-mounts /dev, runs in group dialout and allows ttyUSB / ttyACM
+(contract section 23), so the same code serves the App and the systemd service.
 """
 from __future__ import annotations
 
 import argparse
+import errno
+import logging
+import os
+import select
+import struct
 import sys
 import time
 from collections.abc import Mapping
+from typing import Self
 
 from ..link import E22_RATE_LABELS, E22_T33D, RadioBackend, RadioModel, channel_freq_mhz, get_model, power_dbm
 
+# POSIX only. Importing this module must still work elsewhere: the simulator and the
+# tests use its register helpers without a serial port.
 try:
-    import serial  # pyserial
-except ImportError:  # the simulator and tests do not need pyserial
-    serial = None
+    import fcntl
+    import termios
+except ImportError:  # pragma: no cover - non-POSIX development hosts
+    fcntl = termios = None  # type: ignore[assignment]
+
+log = logging.getLogger("dssq.radio")
 
 AIR_RATES = dict(E22_RATE_LABELS)
 UART_RATES = {0: 1200, 1: 2400, 2: 4800, 3: 9600, 4: 19200, 5: 38400, 6: 57600, 7: 115200}
@@ -43,6 +59,8 @@ NOISE_QUERY = bytes([0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02])
 REG1_FAULT_LOG = 0x04                  # T37S only
 REG1_RESERVED_T33D = 0x1C              # b4..b2 reserved on the T33D
 CONFIG_BAUD = 9600                     # configuration mode is always 9600 8N1
+READ_TIMEOUT_S = 0.05                  # E22Serial.read(): longest wait for the first octet
+REOPEN_HOLDOFF_S = 2.0                 # E22Serial: one reopen attempt per holdoff after a fault
 
 
 def _e22_model(model: str | RadioModel | None) -> RadioModel:
@@ -103,35 +121,279 @@ def describe(regs: bytes, model: str | RadioModel | None = None) -> dict:
     }
 
 
-class E22Serial(RadioBackend):
-    """pyserial byte-stream backend used by the GDS in NORMAL mode."""
-    packet_mode = False
+# ------------------------------------------------------------------ serial transport
+_ERRNO_HINTS = {
+    errno.ENOENT: " (no such device: check the USB-UART, ls /dev/serial/by-id/)",
+    errno.EACCES: " (permission denied: the user needs group 'dialout')",
+    errno.EAGAIN: " (port locked by another process)",
+    errno.EBUSY: " (port busy)",
+    errno.EIO: " (I/O error: device unplugged?)",
+    errno.ENOTTY: " (not a serial device)",
+}
 
-    def __init__(self, port: str, baud: int = 9600):
-        if serial is None:
-            raise RuntimeError("pyserial is required: pip install pyserial")
-        self.ser = serial.Serial(port, baud, timeout=0.05)
 
-    def read(self) -> bytes:
-        n = self.ser.in_waiting
-        return self.ser.read(n or 1)
+def _baud_constant(baud: int) -> int:
+    """termios speed constant for one of the E22 UART rates (manual REG0 b7..b5)."""
+    if termios is None:
+        raise OSError(errno.ENOSYS, "serial ports need a POSIX system (termios)")
+    if isinstance(baud, bool) or not isinstance(baud, int) or baud not in UART_RATES.values():
+        raise ValueError(f"baud {baud!r} is not an E22 UART rate {sorted(UART_RATES.values())}")
+    speed = getattr(termios, f"B{baud}", None)
+    if speed is None:                  # pragma: no cover - every E22 rate exists on Linux
+        raise ValueError(f"this system's termios has no B{baud}")
+    return int(speed)
 
-    def write(self, data: bytes) -> None:
-        self.ser.write(data)
-        self.ser.flush()
+
+class SerialPort:
+    """Raw 8N1 serial line on a POSIX tty, standard library only.
+
+    Opened O_RDWR | O_NOCTTY (never becomes the controlling terminal) | O_NONBLOCK (every
+    wait is a poll() with an explicit timeout, so no call can hang), locked with an
+    exclusive flock() so a second GDS or a terminal program cannot interleave octets, then
+    switched to raw mode: 8 data bits, no parity, 1 stop bit, receiver on, modem lines
+    ignored, no hardware or software flow control (the E22 has neither), no input or
+    output processing, VMIN = VTIME = 0. The settings are read back and verified.
+    Every failure is an OSError whose message names the port and the operation."""
+
+    def __init__(self, path: str, baud: int, timeout_s: float = READ_TIMEOUT_S) -> None:
+        speed = _baud_constant(baud)
+        if not 0.0 <= timeout_s <= 60.0:
+            raise ValueError(f"timeout_s {timeout_s!r} outside 0..60 s")
+        self.path, self.baud, self.timeout_s = str(path), baud, float(timeout_s)
+        try:
+            self._fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError as e:
+            raise self._error(e, "open") from e
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not os.isatty(self._fd):
+                raise OSError(errno.ENOTTY, os.strerror(errno.ENOTTY))
+            self._configure(speed)
+        except (OSError, termios.error) as e:
+            os.close(self._fd)
+            self._fd = -1
+            raise self._error(e, "configure") from e
+        self._poll_in = select.poll()
+        self._poll_in.register(self._fd, select.POLLIN)
+        self._poll_out = select.poll()
+        self._poll_out.register(self._fd, select.POLLOUT)
+
+    def _configure(self, speed: int) -> None:
+        iflag, oflag, cflag, lflag, _, _, cc = termios.tcgetattr(self._fd)
+        iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP | termios.INLCR
+                   | termios.IGNCR | termios.ICRNL | termios.IXON | termios.IXOFF | termios.IXANY
+                   | termios.INPCK)
+        oflag &= ~termios.OPOST
+        lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
+        cflag &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB | getattr(termios, "CRTSCTS", 0))
+        cflag |= termios.CS8 | termios.CREAD | termios.CLOCAL
+        cc[termios.VMIN] = 0
+        cc[termios.VTIME] = 0
+        termios.tcsetattr(self._fd, termios.TCSANOW, [iflag, oflag, cflag, lflag, speed, speed, cc])
+        # tcsetattr() succeeds if ANY change was applied (POSIX), so verify what matters.
+        got = termios.tcgetattr(self._fd)
+        if (got[2] & (termios.CSIZE | termios.PARENB | termios.CSTOPB)) != termios.CS8 \
+                or got[3] & termios.ICANON or got[4] != speed or got[5] != speed:
+            raise OSError(errno.EINVAL, "the tty did not accept raw 8N1 at the requested speed")
+        termios.tcflush(self._fd, termios.TCIOFLUSH)                 # drop stale octets
+
+    def _error(self, exc: BaseException, action: str) -> OSError:
+        """OSError carrying the errno, the port and the operation (termios.error too)."""
+        if isinstance(exc, OSError):
+            code = exc.errno if exc.errno is not None else errno.EIO
+            text = exc.strerror or str(exc)
+        else:                                  # termios.error: args = (errno, message)
+            args = exc.args
+            code = args[0] if args and isinstance(args[0], int) else errno.EIO
+            text = str(args[1]) if len(args) > 1 else str(exc)
+        return OSError(code, f"{self.path}: {action} failed: {text}{_ERRNO_HINTS.get(code, '')}")
+
+    def _live_fd(self) -> int:
+        if self._fd < 0:
+            raise OSError(errno.EBADF, f"{self.path}: port is closed")
+        return self._fd
+
+    @property
+    def is_open(self) -> bool:
+        return self._fd >= 0
+
+    def fileno(self) -> int:
+        return self._live_fd()
+
+    def read(self, max_octets: int = 4096, timeout_s: float | None = None) -> bytes:
+        """Waits up to `timeout_s` (default: the port's) for the first octet, then returns
+        what has already arrived, at most `max_octets`. b"" on timeout."""
+        if isinstance(max_octets, bool) or not isinstance(max_octets, int) or not 1 <= max_octets <= 65536:
+            raise ValueError(f"max_octets {max_octets!r} outside 1..65536")
+        fd = self._live_fd()
+        wait = self.timeout_s if timeout_s is None else max(0.0, min(float(timeout_s), 60.0))
+        events = self._poll_in.poll(int(wait * 1000.0 + 0.999))
+        if not events:
+            return b""
+        if events[0][1] & (select.POLLERR | select.POLLNVAL):
+            raise OSError(errno.EIO, f"{self.path}: read failed: device error{_ERRNO_HINTS[errno.EIO]}")
+        try:
+            data = os.read(fd, max_octets)
+        except BlockingIOError:
+            return b""
+        except OSError as e:
+            raise self._error(e, "read") from e
+        if not data:                           # readable but end-of-file: the tty hung up
+            raise OSError(errno.EIO, f"{self.path}: read failed: hang-up{_ERRNO_HINTS[errno.EIO]}")
+        return data
+
+    def write(self, data: bytes | bytearray | memoryview, timeout_s: float = 2.0) -> None:
+        """Queues every octet of `data`, waiting (at most `timeout_s`) while the kernel
+        buffer is full. Raises OSError(ETIMEDOUT) if the deadline passes."""
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError(f"data must be bytes-like, not {type(data).__name__}")
+        if not 0.0 < timeout_s <= 60.0:
+            raise ValueError(f"timeout_s {timeout_s!r} outside (0, 60] s")
+        fd = self._live_fd()
+        view = memoryview(bytes(data))
+        deadline = time.monotonic() + timeout_s
+        while view:                            # each pass writes >= 1 octet or nears the deadline
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                raise OSError(errno.ETIMEDOUT, f"{self.path}: write timed out, {len(view)} octets unsent")
+            if not self._poll_out.poll(int(left * 1000.0 + 0.999)):
+                continue
+            try:
+                view = view[os.write(fd, view):]
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                raise self._error(e, "write") from e
+
+    def out_waiting(self) -> int:
+        """Octets still queued in the kernel / USB driver for transmission (TIOCOUTQ)."""
+        try:
+            raw = fcntl.ioctl(self._live_fd(), termios.TIOCOUTQ, b"\0\0\0\0")
+        except OSError as e:
+            raise self._error(e, "TIOCOUTQ") from e
+        return int(struct.unpack("i", raw)[0])
+
+    def flush(self, timeout_s: float = 5.0) -> None:
+        """Waits until the queued octets have left the driver (a tcdrain() with a bound:
+        tcdrain itself can block forever on a stalled USB adapter). 5 s covers a full
+        255-octet buffer at 1200 bit/s twice over."""
+        deadline = time.monotonic() + timeout_s
+        while (pending := self.out_waiting()) > 0:
+            if time.monotonic() >= deadline:
+                raise OSError(errno.ETIMEDOUT, f"{self.path}: flush timed out, {pending} octets queued")
+            time.sleep(0.002)                  # about two octet times at 9600 bit/s
+
+    def reset_input_buffer(self) -> None:
+        """Discards every received octet not yet read (tcflush TCIFLUSH)."""
+        try:
+            termios.tcflush(self._live_fd(), termios.TCIFLUSH)
+        except termios.error as e:
+            raise self._error(e, "flush input") from e
 
     def close(self) -> None:
-        self.ser.close()
+        """Releases the port and its lock. Idempotent."""
+        fd, self._fd = self._fd, -1
+        if fd >= 0:
+            try:
+                os.close(fd)                   # also releases the flock()
+            except OSError as e:
+                log.warning("%s: close: %s", self.path, e)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        if getattr(self, "_fd", -1) >= 0:
+            self.close()
 
 
-def _cmd(ser, data: bytes, reply_len: int, timeout: float = 1.5) -> bytes:
-    """One configuration-mode exchange; returns what arrived within the timeout."""
-    ser.reset_input_buffer()
-    ser.write(data)
-    ser.flush()
-    t0, buf = time.time(), b""
-    while len(buf) < reply_len and time.time() - t0 < timeout:
-        buf += ser.read(reply_len - len(buf))
+class E22Serial(RadioBackend):
+    """Byte-stream backend used by the GDS in NORMAL mode.
+
+    Opening fails loudly (a wrong port must stop the station at start-up). After that it
+    keeps the RadioBackend contract (link.py): read() and write() never raise on link
+    errors. A fault (e.g. the USB-UART unplugged) is logged once, counted, the port is
+    closed and reopened at most once per REOPEN_HOLDOFF_S; meanwhile read() sleeps its
+    timeout and returns b"" (no busy loop) and write() drops the data (counted)."""
+    packet_mode = False
+
+    def __init__(self, port: str, baud: int = CONFIG_BAUD):
+        self.port, self.baud = port, baud
+        self.ser: SerialPort | None = SerialPort(port, baud, READ_TIMEOUT_S)
+        self.faults = 0                        # link errors seen
+        self.reopens = 0                       # successful reopens after a fault
+        self.tx_dropped = 0                    # octets not sent while the port was down
+        self.last_error = ""
+        self._retry_t = 0.0
+
+    @property
+    def connected(self) -> bool:
+        return self.ser is not None
+
+    def _fault(self, e: OSError) -> None:
+        self.faults += 1
+        self.last_error = str(e)
+        log.error("E22 serial link lost: %s (reopening every %.0f s)", e, REOPEN_HOLDOFF_S)
+        if self.ser is not None:
+            self.ser.close()
+        self.ser = None
+        self._retry_t = time.monotonic() + REOPEN_HOLDOFF_S
+
+    def _port(self) -> SerialPort | None:
+        if self.ser is None and time.monotonic() >= self._retry_t:
+            try:
+                self.ser = SerialPort(self.port, self.baud, READ_TIMEOUT_S)
+            except OSError as e:
+                self.last_error = str(e)
+                self._retry_t = time.monotonic() + REOPEN_HOLDOFF_S
+            else:
+                self.reopens += 1
+                log.warning("E22 serial link restored: %s", self.port)
+        return self.ser
+
+    def read(self) -> bytes:
+        ser = self._port()
+        if ser is None:
+            time.sleep(READ_TIMEOUT_S)
+            return b""
+        try:
+            return ser.read()
+        except OSError as e:
+            self._fault(e)
+            return b""
+
+    def write(self, data: bytes) -> None:
+        ser = self._port()
+        if ser is None:
+            self.tx_dropped += len(data)
+            return
+        try:
+            ser.write(data)
+            ser.flush()
+        except OSError as e:
+            self.tx_dropped += len(data)
+            self._fault(e)
+
+    def close(self) -> None:
+        if self.ser is not None:
+            self.ser.close()
+        self.ser = None
+
+
+def _cmd(port: SerialPort, data: bytes, reply_len: int, timeout_s: float = 1.5) -> bytes:
+    """One configuration-mode exchange; returns what arrived before the deadline."""
+    port.reset_input_buffer()
+    port.write(data)
+    port.flush()
+    deadline, buf = time.monotonic() + timeout_s, b""
+    while len(buf) < reply_len:                # bounded by the deadline
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            break
+        buf += port.read(reply_len - len(buf), timeout_s=left)
     return buf
 
 
@@ -143,8 +405,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--write", action="store_true", help="write (save) the configuration")
     ap.add_argument("--volatile", action="store_true", help="use C2 (not saved) instead of C0")
     a = ap.parse_args(argv)
-    if serial is None:
-        sys.exit("pyserial is required: pip install pyserial")
     cfg: dict = {}
     if a.config or a.write:
         from ..config import load_config
@@ -154,7 +414,10 @@ def main(argv: list[str] | None = None) -> None:
     except ValueError as e:
         sys.exit(str(e))
     print(f"model: {model.name}")
-    ser = serial.Serial(a.port, CONFIG_BAUD, timeout=0.2)
+    try:
+        ser = SerialPort(a.port, CONFIG_BAUD, timeout_s=0.2)
+    except OSError as e:
+        sys.exit(str(e))
     try:
         pid = _cmd(ser, bytes([0xC1, 0x80, 0x07]), 10)
         if len(pid) == 10 and pid[0] == 0xC1:

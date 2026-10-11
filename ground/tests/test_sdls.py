@@ -1,33 +1,40 @@
-"""SDLS authenticated encryption: flight (C++) <-> ground (Python) cross-check.
+"""SDLS authenticated encryption: the ground's pure-Python AES-256-GCM and the flight
+(C++) <-> ground (Python) cross-check.
 
-Builds tools/host_test (the EXACT flight AES / GCM / SDLS sources), runs it into a
-temporary directory and checks its sdls_ae_vectors.txt with an independent
-implementation (the `cryptography` package) in both directions:
-  flight -> ground  the ground decrypts / verifies every flight-built frame
-  ground -> flight  the ground builds the same frames byte-exact (GCM is
-                    deterministic for a given key and IV), so anything the
-                    ground sends is what the flight receive path was tested with
-plus known answers shared with tools/host_test/test_crypto.cpp and pure-Python
-behaviour (tamper, replay, null SA, epoch rules). The C++ part is skipped
-automatically if no C++ toolchain is available.
+Primitives (dssq.ccsds.aes_gcm, standard library only) against published known answers:
+  FIPS-197 Appendix C.3 (AES-256) and the S-box octet for octet against the flight table;
+  McGrew & Viega GCM specification test cases 13-16 (AES-256, 96-bit IV) in full;
+  tamper / length / type rejection.
+Flight <-> ground: builds tools/host_test (the EXACT flight AES / GCM / SDLS sources),
+runs it into a temporary directory and checks its sdls_ae_vectors.txt in both directions:
+  flight -> ground  every flight AES / GCM vector is reproduced byte for byte and every
+                    flight-built frame decrypts and verifies on the ground
+  ground -> flight  the ground builds the same frames byte-exact (GCM is deterministic
+                    for a given key and IV), so anything the ground sends is what the
+                    flight receive path was tested with
+plus known answers shared with tools/host_test/test_crypto.cpp and SDLS behaviour
+(tamper, replay, null SA, epoch rules). The C++ part is skipped automatically if no C++
+toolchain is available. The `cryptography` package is NOT needed: when it happens to be
+installed (development PC) one extra randomized cross-check runs against it.
 """
+import random
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("cryptography")
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
-
-from dssq.ccsds.crc import crc16_ccitt  # noqa: E402
-from dssq.ccsds.sdls import (AE_OVERHEAD, LABEL_TC_AE, LABEL_TM_AE, SERVICE_AE,  # noqa: E402
-                             SERVICE_AUTH, SERVICE_NONE, SPI_TC_AE, SdlsReceiver, SdlsSender,
-                             SdlsTmReceiver, SdlsTmSender, build_iv, derive_key, link_snapshot,
-                             parse_service)
+from dssq.ccsds.aes_gcm import SBOX, Aes256, AesGcm, InvalidTag
+from dssq.ccsds.crc import crc16_ccitt
+from dssq.ccsds.sdls import (AE_OVERHEAD, LABEL_TC_AE, LABEL_TM_AE, SERVICE_AE, SERVICE_AUTH,
+                             SERVICE_NONE, SPI_TC_AE, SdlsReceiver, SdlsSender, SdlsTmReceiver,
+                             SdlsTmSender, build_iv, derive_key, link_snapshot, parse_service)
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST = ROOT / "tools" / "host_test"
+FLIGHT_AES = ROOT / "spacecraft" / "vgq1_flight" / "sketch" / "src" / "ccsds" / "aes.cpp"
 
 MASTER = bytes(range(32))
 NOOP = bytes.fromhex("18c0c000000001")
@@ -36,9 +43,26 @@ KAT_TC_KEY = "6a0fc847b89c96f2a51182cb604701ce276d706174bda2907b13e4d1e7bdacf1"
 KAT_TM_KEY = "e2344f0a091558afade4702042d0a9c9a9209464743e95fca02c3bd2ac3d6a59"
 KAT_TC_AE = ("00a7002b0000025443000000000000000000073e53f988b9490963030370d67a616f9bb7736a06f68fbed67d")
 KAT_TC_AUTH = "00a700230000010000000718c0c0000000010a45be9321446143549fe23fdaf3d435473a"
-# McGrew-Viega GCM test cases 13-16 (AES-256): tags
-SPEC_TAGS = {"gcm_tc13": "530f8afbc74536b9a963b4f1c4cb738b", "gcm_tc14": "d0d1c8a799996bf0265b98b5d48ab919",
-             "gcm_tc15": "b094dac5d93471bdec1a502270e3cc6c", "gcm_tc16": "76fc6ece0f4e1768cddf8853bb2d551b"}
+# FIPS-197 Appendix C.3 (AES-256): key, plaintext, ciphertext.
+FIPS197_C3 = ("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+              "00112233445566778899aabbccddeeff", "8ea2b7ca516745bfeafc49904b496089")
+# McGrew & Viega GCM specification, test cases 13-16 (AES-256, 96-bit IV); the same
+# values as tools/host_test/test_crypto.cpp (crypto_gcm_test_vectors).
+_K0 = "00" * 32
+_K = "feffe9928665731c6d6a8f9467308308" * 2
+_IV = "cafebabefacedbaddecaf888"
+_P = ("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+      "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255")
+_C = ("522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa"
+      "8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad")
+GCM_SPEC = {   # name: (key, iv, aad, plaintext, ciphertext, tag)
+    "gcm_tc13": (_K0, "00" * 12, "", "", "", "530f8afbc74536b9a963b4f1c4cb738b"),
+    "gcm_tc14": (_K0, "00" * 12, "", "00" * 16, "cea7403d4d606b6e074ec5d3baf39d18",
+                 "d0d1c8a799996bf0265b98b5d48ab919"),
+    "gcm_tc15": (_K, _IV, "", _P, _C, "b094dac5d93471bdec1a502270e3cc6c"),
+    "gcm_tc16": (_K, _IV, "feedfacedeadbeeffeedfacedeadbeefabaddad2", _P[:120], _C[:120],
+                 "76fc6ece0f4e1768cddf8853bb2d551b"),
+}
 INT_FIELDS = {"hdr_len", "prot_end", "epoch", "sn"}
 
 
@@ -70,25 +94,133 @@ def vectors(tmp_path_factory) -> dict[str, dict]:
     return cases
 
 
-# --- primitives -------------------------------------------------------------------
+# --- primitives: dssq.ccsds.aes_gcm against published known answers ---------------
 
-def test_flight_aes_and_gcm_spec_vectors(vectors):
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+def test_aes256_fips197_appendix_c3():
+    key, pt, ct = (bytes.fromhex(x) for x in FIPS197_C3)
+    assert Aes256(key).encrypt_block(pt) == ct
+    assert Aes256(bytearray(key)).encrypt_block(memoryview(pt)) == ct     # any bytes-like input
+
+
+def test_sbox_is_the_flight_table():
+    # FIPS-197 5.1.1 worked example: SubBytes({53}) = {ed}; the S-box is a permutation.
+    assert SBOX[0x00] == 0x63 and SBOX[0x53] == 0xED and sorted(SBOX) == list(range(256))
+    if not FLIGHT_AES.exists():
+        pytest.skip(f"flight source not found: {FLIGHT_AES}")
+    body = FLIGHT_AES.read_text().split("kSbox[256] = {", 1)[1].split("};", 1)[0]
+    assert tuple(int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]{2}", body)) == SBOX
+
+
+@pytest.mark.parametrize("name", sorted(GCM_SPEC))
+def test_gcm_specification_test_cases(name):
+    key, iv, aad, pt, ct, tag = (bytes.fromhex(x) for x in GCM_SPEC[name])
+    gcm = AesGcm(key)
+    sealed = gcm.encrypt(iv, pt, aad)
+    assert sealed == ct + tag
+    assert gcm.decrypt(iv, sealed, aad) == pt
+
+
+def test_gcm_rejects_any_modification():
+    key, iv, aad, pt, _, _ = (bytes.fromhex(x) for x in GCM_SPEC["gcm_tc16"])
+    gcm = AesGcm(key)
+    sealed = gcm.encrypt(iv, pt, aad)
+    for i in range(len(sealed)):                       # every ciphertext and tag octet
+        b = bytearray(sealed)
+        b[i] ^= 1 << (i % 8)
+        with pytest.raises(InvalidTag):
+            gcm.decrypt(iv, b, aad)
+    for i in range(len(aad)):
+        a = bytearray(aad)
+        a[i] ^= 0x80
+        with pytest.raises(InvalidTag):
+            gcm.decrypt(iv, sealed, a)
+    for i in range(len(iv)):
+        v = bytearray(iv)
+        v[i] ^= 0x01
+        with pytest.raises(InvalidTag):
+            gcm.decrypt(v, sealed, aad)
+    with pytest.raises(InvalidTag):
+        gcm.decrypt(iv, sealed[:-1], aad)               # truncated
+    with pytest.raises(InvalidTag):
+        gcm.decrypt(iv, sealed, aad + b"\x00")          # extended AAD
+    with pytest.raises(InvalidTag):
+        AesGcm(bytes(32)).decrypt(iv, sealed, aad)      # wrong key
+    assert gcm.decrypt(iv, sealed, aad) == pt           # the object holds no state
+
+
+def test_gcm_input_validation():
+    for n in (0, 16, 24, 31, 33, 64):
+        with pytest.raises(ValueError, match="32 octets"):
+            AesGcm(bytes(n))
+    for bad in ("00" * 32, 32, None):
+        with pytest.raises(TypeError):
+            AesGcm(bad)                                 # type: ignore[arg-type]
+    gcm = AesGcm(MASTER)
+    for n in (0, 8, 11, 13, 16, 60):                   # 96-bit IVs only
+        with pytest.raises(ValueError, match="96 bits"):
+            gcm.encrypt(bytes(n), b"x")
+        with pytest.raises(ValueError, match="96 bits"):
+            gcm.decrypt(bytes(n), bytes(17))
+    with pytest.raises(ValueError, match="tag"):
+        gcm.decrypt(bytes(12), bytes(15))
+    with pytest.raises(TypeError):
+        gcm.encrypt(bytes(12), "plaintext")             # type: ignore[arg-type]
+    for n in (0, 15, 17):
+        with pytest.raises(ValueError, match="16 octets"):
+            Aes256(MASTER).encrypt_block(bytes(n))
+    assert len(gcm.encrypt(bytes(12), b"")) == 16       # empty plaintext: the tag alone
+
+
+def test_flight_aes_and_gcm_vectors_byte_identical(vectors):
     c3 = vectors["aes_c3"]
-    enc = Cipher(algorithms.AES(c3["key"]), modes.ECB()).encryptor()
-    assert enc.update(c3["pt"]) + enc.finalize() == c3["ct"]
-    for name, tag in SPEC_TAGS.items():
-        assert vectors[name]["tag"].hex() == tag, name
-
-
-def test_flight_gcm_vectors_match_cryptography(vectors):
-    gcm = [n for n in vectors if n.startswith("gcm_")]
-    assert len(gcm) == 16
-    for name in gcm:
+    assert c3["ct"].hex() == FIPS197_C3[2] and Aes256(c3["key"]).encrypt_block(c3["pt"]) == c3["ct"]
+    names = [n for n in vectors if n.startswith("gcm_")]
+    assert len(names) == 16                             # 4 specification + 12 random lengths
+    for name in names:
         v = vectors[name]
-        aead = AESGCM(v["key"])
-        assert aead.encrypt(v["iv"], v["pt"], v["aad"]) == v["ct"] + v["tag"], name
-        assert aead.decrypt(v["iv"], v["ct"] + v["tag"], v["aad"]) == v["pt"], name
+        gcm = AesGcm(v["key"])
+        assert gcm.encrypt(v["iv"], v["pt"], v["aad"]) == v["ct"] + v["tag"], name
+        assert gcm.decrypt(v["iv"], v["ct"] + v["tag"], v["aad"]) == v["pt"], name
+    for name, case in GCM_SPEC.items():
+        assert vectors[name]["ct"].hex() == case[4] and vectors[name]["tag"].hex() == case[5], name
+
+
+def test_gcm_matches_cryptography_package_if_installed():
+    """Optional development-PC cross-check against an independent implementation."""
+    aead = pytest.importorskip("cryptography.hazmat.primitives.ciphers.aead")
+    ciphers = pytest.importorskip("cryptography.hazmat.primitives.ciphers")
+    rng = random.Random(20261011)
+    for n_pt in (0, 1, 15, 16, 17, 31, 32, 33, 156, 158, 183, 255, 1000):
+        for n_aad in (0, 1, 13, 16, 20, 22, 40):
+            key, iv, aad, pt = rng.randbytes(32), rng.randbytes(12), rng.randbytes(n_aad), rng.randbytes(n_pt)
+            ref = aead.AESGCM(key).encrypt(iv, pt, aad)
+            gcm = AesGcm(key)
+            assert gcm.encrypt(iv, pt, aad) == ref, (n_pt, n_aad)
+            assert gcm.decrypt(iv, ref, aad) == pt, (n_pt, n_aad)
+        block = rng.randbytes(16)
+        ecb = ciphers.Cipher(ciphers.algorithms.AES(key), ciphers.modes.ECB()).encryptor()
+        assert Aes256(key).encrypt_block(block) == ecb.update(block) + ecb.finalize()
+
+
+def test_sdls_ae_needs_no_third_party_package():
+    """In a fresh interpreter where importing `cryptography` (or pyserial / tomli) fails,
+    the TC AE known answer is still produced and verified."""
+    code = "\n".join((
+        "import sys",
+        f"sys.path.insert(0, {str(ROOT / 'ground')!r})",
+        "for name in ('cryptography', 'serial', 'tomli'):",
+        "    sys.modules[name] = None             # any import of it now raises ImportError",
+        "from dssq.ccsds.crc import crc16_ccitt",
+        "from dssq.ccsds.sdls import SdlsReceiver, SdlsSender",
+        "tx = SdlsSender(bytes(range(32)), service='AE')",
+        "tx.sn = 6",
+        "hdr = bytes.fromhex('00a7002b00')",
+        f"f = hdr + tx.protect(hdr, bytes.fromhex({NOOP.hex()!r}))",
+        "f += crc16_ccitt(f).to_bytes(2, 'big')",
+        f"assert f.hex() == {KAT_TC_AE!r}, f.hex()",
+        "assert SdlsReceiver(bytes(range(32)), service='AE').process(f, f[5:-2])[1] == 'OK'",
+    ))
+    subprocess.run([sys.executable, "-I", "-c", code], check=True, timeout=60)
 
 
 def test_key_derivation_known_answer(vectors):

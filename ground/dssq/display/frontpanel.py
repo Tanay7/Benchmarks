@@ -1,9 +1,14 @@
 """Station I/O + Radio Control Unit link (VENTUNO Q Linux <-> its own MCU).
 
-The GDS runs as an ordinary Linux service on the VENTUNO Q's Dragonwing CPU and
-talks to the board's STM32H5 (App Lab app ground/station_io) through
-the Arduino Router: `pip install arduino-router-bridge`, socket
-unix:///var/run/arduino-router.sock. No App Lab container is required. The web
+The GDS runs on the VENTUNO Q's Linux processor (Qualcomm Dragonwing IQ8 QCS8275) and
+talks to the board's STM32H5F5 MCU (sketch ground/station_io) through the Arduino
+Bridge RPC layer (VENTUNO Q datasheet ABX00181 section 7; USB 2.0 transport between the
+two processors), via the arduino-router Unix socket: the library's DEFAULT_ADDRESS
+unless station.toml [gds] router_address overrides it (App Lab's arduino-app-cli
+looks for the socket at /run or /var/run, arduino-router or arduino-router.sock).
+The client module `arduino.router_bridge` is NOT vendored and needs no download inside
+App Lab: the App Lab Python base image installs it (package arduino-router-bridge, a
+dependency of arduino/app-bricks-py, which also provides arduino.app_utils). The web
 dashboard is the station's only display; the MCU provides the CardKB keyboards,
 the annunciator LEDs / buzzer and the Radio Control Unit.
 
@@ -33,6 +38,8 @@ def status_lines(s: dict) -> list[str]:
 
 class _RouterTransport:
     def __init__(self, address: str | None = None):
+        # Provided by the App Lab Python base image (arduino-router-bridge); imported here,
+        # not at module level, so the simulator and the tests run without it.
         from arduino.router_bridge import DEFAULT_ADDRESS, Bridge
         self.bridge = Bridge(address or DEFAULT_ADDRESS)
         self.inbox: list[str] = []

@@ -19,8 +19,10 @@ been accepted. The SN is persisted so it keeps increasing across restarts; AUTH
 and AE share it. TM: (epoch, sn) must increase lexicographically; epoch = the
 spacecraft's SCLK partition, sn = its frame counter within the epoch.
 
-AES-GCM comes from the `cryptography` package, imported only when AE is used,
-so AUTH / NONE stations keep working without it.
+AES-256-GCM is dssq.ccsds.aes_gcm (pure Python, standard library only, validated
+against FIPS-197, the GCM specification's AES-256 test cases and the flight C++
+vectors), so the station needs no third-party package (contract section 23 rule 2).
+One cipher object is built per derived key (about 0.1 ms) and reused for every frame.
 
 Regulatory: encryption is generally not permitted on amateur frequencies; use
 AUTH or NONE there (docs/09_Regulatory_and_Safety.md).
@@ -31,6 +33,8 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from pathlib import Path
+
+from .aes_gcm import AesGcm, InvalidTag
 
 SDLS_HDR_LEN = 6            # AUTH security header: SPI + SN
 SDLS_MAC_LEN = 16           # AUTH trailer: truncated HMAC-SHA-256
@@ -79,19 +83,16 @@ def mac(key: bytes, primary: bytes, sec_hdr: bytes, data: bytes) -> bytes:
     return hmac.new(key, primary + sec_hdr + data, hashlib.sha256).digest()[:SDLS_MAC_LEN]
 
 
-def _aesgcm(key: bytes):
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    except ImportError as e:            # pragma: no cover - depends on the installation
-        raise RuntimeError("SDLS AE needs the 'cryptography' package "
-                           "(pip install -r ground/requirements.txt)") from e
-    return AESGCM(key)
+def _keyed(gcm: AesGcm | None) -> AesGcm:
+    """The AE cipher of an SA. Using AE without a key is a programming error (every
+    caller checks `enabled` / `ae` first): a clear RuntimeError, not an AttributeError."""
+    if gcm is None:
+        raise RuntimeError("SDLS AE used without a key")
+    return gcm
 
 
-def _gcm_open(key: bytes, iv: bytes, aad: bytes, ct_tag: bytes) -> bytes | None:
-    """Plaintext, or None when the tag does not verify."""
-    gcm = _aesgcm(key)
-    from cryptography.exceptions import InvalidTag
+def _gcm_open(gcm: AesGcm, iv: bytes, aad: bytes, ct_tag: bytes) -> bytes | None:
+    """Plaintext, or None when the tag does not verify (nothing is decrypted then)."""
     try:
         return gcm.decrypt(iv, ct_tag, aad)
     except InvalidTag:
@@ -125,6 +126,7 @@ class SdlsSender:
     def key(self, key: bytes | None) -> None:
         self._key = key
         self._k_ae = derive_key(key, LABEL_TC_AE) if key else None
+        self._gcm_ae = AesGcm(self._k_ae) if self._k_ae else None
 
     @property
     def enabled(self) -> bool:
@@ -152,14 +154,14 @@ class SdlsSender:
         header is `hdr` (TC v1 5 octets, USLP TFPH 7/8; it must already carry the
         final frame length, i.e. include `overhead`). `data` = TC frame data field
         (TC v1) or the whole TFDF (USLP). Consumes the next sequence number."""
-        if not self.enabled:
+        if not self.enabled or self._key is None:
             return bytes(data)
         sn = self.next_sn()
         if self.service == SERVICE_AUTH:
             sh = self.spi.to_bytes(2, "big") + sn.to_bytes(4, "big")
             return sh + bytes(data) + mac(self._key, bytes(hdr), sh, bytes(data))
         sh = SPI_TC_AE.to_bytes(2, "big") + build_iv(IV_DIR_TC, 0, sn)
-        return sh + _aesgcm(self._k_ae).encrypt(sh[2:], bytes(data), bytes(hdr) + sh)
+        return sh + _keyed(self._gcm_ae).encrypt(sh[2:], bytes(data), bytes(hdr) + sh)
 
     # The hooks dssq.ccsds.tc.build_tc_frame / build_uslp_tc_frame look for.
     def tc_overhead(self) -> int:
@@ -178,6 +180,7 @@ class SdlsReceiver:
         self.key = key
         self.spi = SPI_TC_AE if self.service == SERVICE_AE else spi
         self._k_ae = derive_key(key, LABEL_TC_AE) if key else None
+        self._gcm_ae = AesGcm(self._k_ae) if self._k_ae else None
         self.last_sn = 0
         self.failures = 0
 
@@ -211,9 +214,10 @@ class SdlsReceiver:
                     or iv[4:8] != bytes(4)):
                 return self._fail("BAD_IV")
             sn = int.from_bytes(iv[8:12], "big")
-            body = _gcm_open(self._k_ae, iv, hdr + sh, data[AE_HDR_LEN:])
-            if body is None:
+            plain = _gcm_open(_keyed(self._gcm_ae), iv, hdr + sh, data[AE_HDR_LEN:])
+            if plain is None:
                 return self._fail("BAD_MAC")
+            body = plain
         else:
             return bytes(data), "DISABLED"
         if sn <= self.last_sn:              # only after the MAC/tag is proven
@@ -229,7 +233,8 @@ class SdlsTmSender:
 
     def __init__(self, key: bytes | None, service: int | str = SERVICE_AE):
         self.ae = bool(key) and parse_service(service) == SERVICE_AE
-        self._k = derive_key(key, LABEL_TM_AE) if self.ae else None
+        self._k = derive_key(key, LABEL_TM_AE) if self.ae and key else None
+        self._gcm = AesGcm(self._k) if self._k else None
         self.epoch = 0
         self.sn = 0
         self.fallback = False
@@ -269,7 +274,7 @@ class SdlsTmSender:
             return None
         self.sn += 1
         sh = SPI_TM_AE.to_bytes(2, "big") + build_iv(IV_DIR_TM, self.epoch, self.sn)
-        return sh + _aesgcm(self._k).encrypt(sh[2:], bytes(data), bytes(hdr) + sh)
+        return sh + _keyed(self._gcm).encrypt(sh[2:], bytes(data), bytes(hdr) + sh)
 
 
 @dataclass
@@ -297,7 +302,8 @@ class SdlsTmReceiver:
 
     def __init__(self, key: bytes | None, service: int | str = SERVICE_AE, accept_null: bool = True):
         self.ae = bool(key) and parse_service(service) == SERVICE_AE
-        self._k = derive_key(key, LABEL_TM_AE) if self.ae else None
+        self._k = derive_key(key, LABEL_TM_AE) if self.ae and key else None
+        self._gcm = AesGcm(self._k) if self._k else None
         self.accept_null = accept_null
         self.last: tuple[int, int] = (0, 0)       # last accepted (epoch, sn)
         self.frames_ok = 0
@@ -369,7 +375,7 @@ class SdlsTmReceiver:
         sn = int.from_bytes(iv[8:12], "big")
         if int.from_bytes(iv[0:2], "big") != IV_DIR_TM or iv[4:8] != bytes(4) or epoch == 0:
             return self._fail("BAD_IV", spi=spi, epoch=epoch, sn=sn)
-        plain = _gcm_open(self._k, iv, bytes(header) + sh, data + trailer)
+        plain = _gcm_open(_keyed(self._gcm), iv, bytes(header) + sh, data + trailer)
         if plain is None:
             return self._fail("BAD_MAC", spi=spi, epoch=epoch, sn=sn)
         if (epoch, sn) <= self.last:
