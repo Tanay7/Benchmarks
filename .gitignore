@@ -10,3 +10,6 @@ spacecraft/vgq1_flight/sketch/src/sdls_key.h
 ground/.venv/
 tools/host_test/*.bin
 tools/host_test/*.txt
+# RadioLib copies written by tools/radiolib.py fetch (bundled into the App Lab packages, never committed)
+spacecraft/vgq1_flight/sketch/libraries/
+ground/station_io/sketch/libraries/

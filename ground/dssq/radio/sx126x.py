@@ -2,9 +2,11 @@
 
 The VENTUNO Q MCU (ground/station_io/sketch, build switch DSSQ_RADIO_SX126X = 1)
 drives an SX1268 / SX1262 module (reference: EBYTE E22-400M33S) over SPI with
-RadioLib 7.8.1 and exchanges WHOLE LoRa packets with Linux through the Router Bridge
-(MessagePack-RPC). Unlike the E22 UART firmware it reports, for every packet, the
-packet RSSI, the SNR and the LoRa frequency-error estimate (contract v3 2.2, 14).
+RadioLib 7.8.1 (the patched copy bundled by tools/radiolib.py, contract 25) and
+exchanges WHOLE LoRa packets with Linux through the Router Bridge (MessagePack-RPC).
+Unlike the E22 UART firmware it reports, for every packet, the packet RSSI, the SNR
+and the LoRa frequency-error estimate (contract v3 2.2, 14), and it accepts the RF
+frequency offset of the ground AFC (contract 24.8, link.AfcLoop).
 
 MCU -> Linux notifications (handlers registered by attach()):
   rf_rx(hex: str, rssi_ddbm: int, snr_cdb: int, freq_err_hz: int, crc_ok: int)
@@ -14,9 +16,14 @@ MCU -> Linux notifications (handlers registered by attach()):
       raw frequency-error estimate in Hz (signed, no calibration applied).
   rf_evt(line: str), '|'-separated:
       S|fw|chip|state|ch|code|pwr|flags|rx_gain_reg|rx_ok|rx_crc|rx_hdr|tx_ok|tx_fail|
-        cad_busy|cad_forced|faults|resets|txq|uptime_s     status, every 5 s and after
-        each configuration change. flags: b0 CAD before TX, b1 Rx boosted gain
-        requested, b2 boosted gain VERIFIED (register 0x08AC read back = 0x96).
+        cad_busy|cad_forced|faults|resets|txq|uptime_s|foff_hz     status, every 5 s and
+        after each configuration change. flags: b0 CAD before TX, b1 Rx boosted gain
+        requested, b2 boosted gain VERIFIED (register 0x08AC read back = 0x96), b3 the
+        TCXO did not start and RadioLib fell back to the crystal (VERIFY the module),
+        b4 an rf_cfg / rf_foff change is waiting to be applied (radio busy), b5 an
+        OpError calibration bit (DS Table 13-86 bits 0-4) was seen since the radio's
+        last initialisation. foff_hz: RF offset in effect (signed Hz, rf_foff); a status
+        line without it (an older sketch) parses with freq_offset_hz = None.
       C|detected|ms        result of an operator CAD (rf_cad)
       T|ok|ms|octets       an uplink transmission finished (ok = 0: TX timeout)
       E|code|text          fault / recovery event (EVENT_CODES)
@@ -27,11 +34,24 @@ Linux -> MCU calls (Bridge.provide_safe on the MCU: executed in its loop thread)
   rf_cfg(channel, rate_code, power_code, flags) -> 1 applied | 2 queued (applied when the
       radio is idle) | -1 out of range; -1 in an argument = keep the current value.
       flags: b0 CAD before every transmission, b1 Rx boosted gain.
+  rf_foff(hz) -> 1 applied | -1 |hz| > FOFF_MAX_HZ | -2 radio down, or a radio fault during
+      the call (the radio is reset): not applied, the previous offset stays in use
+      RF offset of the receiver AND the transmitter from the channel centre (contract
+      24.8), exact to the SX126x PLL step (32 MHz / 2^25 = 0.95 Hz). 1 also when the
+      radio is busy (TX, CAD, a packet arriving): the MCU then applies it right after,
+      before the next reception or transmission.
   rf_noise() -> median of 8 instantaneous RSSI samples in 0.1 dBm, NOISE_NA = n/a
   rf_cad() -> 1 started (result as a C| event) | 0 busy | -2 radio down
   rf_wake(hex) -> as rf_tx; transmitted with the 32-symbol wake-up preamble that the
       hibernating spacecraft's duty-cycled receiver listens for (flight
       kSxWakePreambleSym; the SX126x counterpart of the E22 WOR wake-up code)
+
+Frequency offset: the backend keeps the offset the GDS wants (set_freq_offset(), or the
+freq_offset_hz constructor argument for the start-up value) and re-sends it whenever a
+status line of the receiving station (state RX, no change pending) reports a different
+one - after an MCU reboot (compiled default 0), after a GDS restart, or when a reply was
+lost - so the AFC loop's belief and the station's tuning cannot drift apart. The
+station keeps the offset across its own radio resets.
 
 Routing: the Router Bridge lets ONE Linux client provide a given method name. The
 GDS already owns a Bridge client in display/frontpanel.py (FrontPanel.t.bridge,
@@ -45,13 +65,15 @@ packets(), write() and the control calls are made from the GDS radio thread.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from ..link import CHANNEL_MAX, SX126X, RadioBackend, RadioSettings, RxPacket, channel_freq_mhz, rate_label
+from ..link import (AFC_RPC_MAX_HZ, CHANNEL_MAX, SX126X, RadioBackend, RadioSettings, RxPacket, channel_freq_mhz,
+                    rate_label)
 
 log = logging.getLogger("dssq.sx126x")
 
@@ -63,6 +85,9 @@ FERR_ABS_MAX_HZ = 500_000              # far outside any LoRa bandwidth: a corru
 NOISE_NA = -32768
 NOISE_DDBM_RANGE = (-1600, 0)
 CFG_APPLIED, CFG_QUEUED = 1, 2
+FOFF_MAX_HZ = AFC_RPC_MAX_HZ           # rf_foff range, |hz| <= 50000 (sketch kFoffMaxHz, contract 24.8)
+FOFF_APPLIED, FOFF_RANGE, FOFF_RADIO_DOWN = 1, -1, -2
+FOFF_SETTLE_S = 2.0                    # a status line this soon after an rf_foff reply may predate it
 STATUS_STALE_S = 15.0                  # MCU status older than this: backend not connected
 PUSH_RETRY_S = 5.0                     # pacing of configuration pushes that failed
 EVT_MAX_LEN = 256
@@ -70,14 +95,18 @@ E22_QUERY_PREFIX = bytes([0xC0, 0xC1, 0xC2, 0xC3])
 STATE_NAMES = {0: "OFF", 1: "RX", 2: "CAD", 3: "TX", 4: "RESET"}
 EVENT_CODES = {1: "BUSY_TIMEOUT", 2: "SPI_ERROR", 3: "TX_TIMEOUT", 4: "INIT_FAILED", 5: "RECOVERED",
                6: "RX_GAIN_REASSERTED", 7: "CAD_TIMEOUT", 8: "DEVICE_ERRORS", 9: "RX_ERROR",
-               10: "CONFIG_FAILED", 11: "MODE_RESTORED"}
+               10: "CONFIG_FAILED", 11: "MODE_RESTORED", 12: "TCXO_FALLBACK"}
 STATUS_FIELDS = ("fw", "chip", "state", "channel", "rate_code", "power_code", "flags", "rx_gain_reg",
                  "rx_ok", "rx_crc_err", "rx_hdr_err", "tx_ok", "tx_fail", "cad_busy", "cad_forced",
-                 "faults", "resets", "txq", "uptime_s")
+                 "faults", "resets", "txq", "uptime_s", "freq_offset_hz")
 _U32 = 0xFFFFFFFF
 STATUS_RANGES = {"state": (0, 4), "channel": (0, CHANNEL_MAX), "rate_code": (0, 7), "power_code": (0, 3),
-                 "flags": (0, 7), "rx_gain_reg": (0, 255), "txq": (0, 16)}
+                 "flags": (0, 63), "rx_gain_reg": (0, 255), "txq": (0, 16),
+                 "freq_offset_hz": (-FOFF_MAX_HZ, FOFF_MAX_HZ)}
+SIGNED_STATUS_FIELDS = frozenset({"freq_offset_hz"})
 RX_GAIN_BOOSTED = 0x96                 # SX1261/2 DS Table 9-3
+_UNSIGNED_RE = re.compile(r"[0-9]{1,10}")      # ASCII digits only: str.isdigit() also accepts e.g. "²"
+_SIGNED_RE = re.compile(r"-?[0-9]{1,10}")
 
 
 def _int(v: object, lo: int, hi: int) -> int | None:
@@ -85,6 +114,13 @@ def _int(v: object, lo: int, hi: int) -> int | None:
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         return None
     return v
+
+
+def _dec(txt: str, lo: int, hi: int, signed: bool = False) -> int | None:
+    """Range-checked decimal field of an rf_evt line (ASCII digits, optional '-')."""
+    if (_SIGNED_RE if signed else _UNSIGNED_RE).fullmatch(txt) is None:
+        return None
+    return _int(int(txt), lo, hi)
 
 
 def parse_rf_rx(args: tuple, ert: float) -> RxPacket | None:
@@ -110,20 +146,19 @@ def parse_rf_rx(args: tuple, ert: float) -> RxPacket | None:
 
 
 def parse_status(fields: list[str]) -> dict | None:
-    """Validates the fields of an S| status line (without the leading 'S')."""
-    if len(fields) != len(STATUS_FIELDS):
+    """Validates the fields of an S| status line (without the leading 'S'). A line
+    without the trailing foff_hz field (sketch before rf_foff) gives freq_offset_hz None."""
+    if len(fields) not in (len(STATUS_FIELDS), len(STATUS_FIELDS) - 1):
         return None
-    out: dict[str, Any] = {}
-    for name, txt in zip(STATUS_FIELDS, fields, strict=True):
+    out: dict[str, Any] = {"freq_offset_hz": None}
+    for name, txt in zip(STATUS_FIELDS, fields):              # shorter list: legacy line
         if name in ("fw", "chip"):
             if not 0 < len(txt) <= 32:
                 return None
             out[name] = txt
             continue
-        if not txt.isdigit():
-            return None
         lo, hi = STATUS_RANGES.get(name, (0, _U32))
-        v = _int(int(txt), lo, hi)
+        v = _dec(txt, lo, hi, name in SIGNED_STATUS_FIELDS)
         if v is None:
             return None
         out[name] = v
@@ -131,17 +166,30 @@ def parse_status(fields: list[str]) -> dict | None:
     out["cad_before_tx"] = bool(out["flags"] & 1)
     out["rx_boost"] = bool(out["flags"] & 2)
     out["rx_boost_verified"] = bool(out["flags"] & 4)
+    out["tcxo_fallback"] = bool(out["flags"] & 8)
+    out["cfg_pending"] = bool(out["flags"] & 16)
+    out["calib_error"] = bool(out["flags"] & 32)
     return out
+
+
+def _check_foff(hz: object) -> int:
+    """A frequency offset for rf_foff: int Hz within +-FOFF_MAX_HZ, else ValueError."""
+    if isinstance(hz, bool) or not isinstance(hz, int) or not -FOFF_MAX_HZ <= hz <= FOFF_MAX_HZ:
+        raise ValueError(f"frequency offset {hz!r} outside -{FOFF_MAX_HZ}..{FOFF_MAX_HZ} Hz (int)")
+    return hz
 
 
 class Sx126xBridge(RadioBackend):
     """Packet backend for the GDS. `bridge` needs provide(name, fn) and
-    call(name, *args, timeout=s) (arduino.router_bridge.Bridge or a test double)."""
+    call(name, *args, timeout=s) (arduino.router_bridge.Bridge or a test double).
+    freq_offset_hz: RF offset the station is to use from the start (Hz, |hz| <=
+    FOFF_MAX_HZ), e.g. the AFC loop's static offset; sent once the MCU reports in."""
     packet_mode = True
 
     def __init__(self, bridge: Any, radio_cfg: Mapping[str, object] | None = None,
                  clock: Callable[[], float] = time.time, call_timeout_s: float = 2.0,
-                 poll_s: float = 0.05, max_queue: int = 256, max_tx_backlog: int = 16):
+                 poll_s: float = 0.05, max_queue: int = 256, max_tx_backlog: int = 16,
+                 freq_offset_hz: int = 0):
         self.bridge = bridge
         self.settings = RadioSettings.from_config({**(radio_cfg or {}), "model": SX126X})
         self.clock = clock
@@ -157,6 +205,9 @@ class Sx126xBridge(RadioBackend):
         self._need_push = False                          # station config must be (re)sent
         self._next_push_t = 0.0
         self._last_uptime: int | None = None
+        self.freq_offset_hz = _check_foff(freq_offset_hz)   # offset the station must use
+        self._foff_t = -float("inf")                     # when the last rf_foff reply arrived
+        self._next_foff_t = 0.0                          # pacing of automatic re-sends
         self.mcu: dict | None = None                     # last validated status line
         self.mcu_t: float | None = None
         self.last_cad: dict | None = None
@@ -165,7 +216,8 @@ class Sx126xBridge(RadioBackend):
         self.stats = {k: 0 for k in ("rx_packets", "rx_crc_fail", "rx_rejected", "rx_overflow",
                                      "evt_rejected", "tx_sent", "tx_busy", "tx_rejected", "tx_dropped",
                                      "tx_done", "tx_failed", "call_errors", "e22_queries_ignored",
-                                     "mcu_reboots", "config_pushes")}
+                                     "mcu_reboots", "config_pushes", "foff_set", "foff_failed",
+                                     "foff_resyncs")}
 
     # ----------------------------------------------------------- wiring
     def attach(self) -> None:
@@ -177,10 +229,13 @@ class Sx126xBridge(RadioBackend):
 
     @classmethod
     def from_router(cls, address: str | None = None, radio_cfg: Mapping[str, object] | None = None,
-                    timeout_s: float = 10.0) -> Sx126xBridge:
-        """Opens a dedicated Router Bridge client (when the front panel is not running)."""
-        from arduino.router_bridge import DEFAULT_ADDRESS, Bridge     # pip install arduino-router-bridge
-        obj = cls(Bridge(address or DEFAULT_ADDRESS), radio_cfg)
+                    timeout_s: float = 10.0, freq_offset_hz: int = 0) -> Sx126xBridge:
+        """Opens a dedicated Router Bridge client (when the front panel is not running).
+        arduino.router_bridge ships with Arduino App Lab's Python image (package
+        arduino-router-bridge, a dependency of app-bricks-py; contract 23): nothing is
+        downloaded at run time. Imported here so the tests run without it."""
+        from arduino.router_bridge import DEFAULT_ADDRESS, Bridge
+        obj = cls(Bridge(address or DEFAULT_ADDRESS), radio_cfg, freq_offset_hz=freq_offset_hz)
         obj._own_bridge = True
         obj.attach()
         if not obj.bridge.connect(timeout=timeout_s):
@@ -216,13 +271,13 @@ class Sx126xBridge(RadioBackend):
                     self._need_push = True                   # MCU rebooted with compiled defaults
                 self._last_uptime = st["uptime_s"]
                 self.mcu, self.mcu_t = st, now
-            elif kind == "C" and len(f) == 2 and f[0] in ("0", "1") and f[1].isdigit():
-                self.last_cad = {"t": now, "detected": f[0] == "1", "duration_ms": int(f[1])}
-            elif kind == "T" and len(f) == 3 and f[0] in ("0", "1") and f[1].isdigit() and f[2].isdigit():
-                self.last_tx = {"t": now, "ok": f[0] == "1", "airtime_ms": int(f[1]), "octets": int(f[2])}
+            elif kind == "C" and len(f) == 2 and f[0] in ("0", "1") and (ms := _dec(f[1], 0, _U32)) is not None:
+                self.last_cad = {"t": now, "detected": f[0] == "1", "duration_ms": ms}
+            elif kind == "T" and len(f) == 3 and f[0] in ("0", "1") and (ms := _dec(f[1], 0, _U32)) is not None \
+                    and (octets := _dec(f[2], 0, RF_RX_MAX_OCTETS)) is not None:
+                self.last_tx = {"t": now, "ok": f[0] == "1", "airtime_ms": ms, "octets": octets}
                 self.stats["tx_done" if f[0] == "1" else "tx_failed"] += 1
-            elif kind == "E" and len(f) >= 2 and f[0].isdigit() and int(f[0]) in EVENT_CODES:
-                code = int(f[0])
+            elif kind == "E" and len(f) >= 2 and (code := _dec(f[0], 0, 255)) is not None and code in EVENT_CODES:
                 text = "|".join(f[1:])[:120]
                 self.events.append({"t": now, "code": code, "name": EVENT_CODES[code], "text": text})
                 if code != 5:                                # 5 = RECOVERED
@@ -301,8 +356,25 @@ class Sx126xBridge(RadioBackend):
             self._next_push_t = now + PUSH_RETRY_S
             if self.push_config() in (CFG_APPLIED, CFG_QUEUED):
                 self._need_push = False
+        if self._foff_resync_due(now):
+            self._next_foff_t = now + PUSH_RETRY_S
+            self._count("foff_resyncs")
+            self._send_foff(self.freq_offset_hz)
         if self._tx_backlog and self._send(self._tx_backlog[0]):   # one attempt per read()
             self._tx_backlog.popleft()
+
+    def _foff_resync_due(self, now: float) -> bool:
+        """True when a fresh status of the receiving station (state RX, no change
+        pending) reports an offset other than the wanted one. While the MCU transmits,
+        scans or holds a deferred change the reported offset is legitimately the old
+        one; a status line within FOFF_SETTLE_S of an rf_foff reply may predate it."""
+        with self._lock:
+            st, t = self.mcu, self.mcu_t
+        if st is None or t is None or now - t >= STATUS_STALE_S or now < self._next_foff_t:
+            return False
+        reported = st["freq_offset_hz"]
+        return (reported is not None and reported != self.freq_offset_hz and st["state_name"] == "RX"
+                and not st["cfg_pending"] and t - self._foff_t >= FOFF_SETTLE_S)
 
     def close(self) -> None:
         if self._own_bridge:
@@ -336,6 +408,33 @@ class Sx126xBridge(RadioBackend):
         self._count("config_pushes")
         s = self.settings
         return self.configure(s.channel, s.rate_code, s.power_code, s.cad, s.rx_boost)
+
+    def set_freq_offset(self, hz: int) -> int | None:
+        """rf_foff: tunes the station receiver and transmitter to channel centre + hz
+        (contract 24.8). Returns FOFF_APPLIED (1, also when the MCU applies it right
+        after a transmission / CAD / packet in progress), FOFF_RANGE (-1),
+        FOFF_RADIO_DOWN (-2: not applied, the previous offset stays in use) or None (no
+        or an unexpected reply: unknown whether it was applied; the next MCU status
+        line resolves it). ValueError for a value outside +-FOFF_MAX_HZ or not an int.
+        For link.AfcLoop: pass an int result to confirm(); on None do not confirm, the
+        loop's confirmation time-out then counts the failure."""
+        return self._send_foff(_check_foff(hz))
+
+    def _send_foff(self, hz: int) -> int | None:
+        rc = self._call("rf_foff", hz)
+        self._foff_t = self.clock()
+        if rc == FOFF_APPLIED:
+            self.freq_offset_hz = hz
+            self._count("foff_set")
+            return rc
+        if rc in (FOFF_RANGE, FOFF_RADIO_DOWN):
+            self._count("foff_failed")
+            log.warning("ground SX126x rf_foff(%d): %s", hz, "out of range" if rc == FOFF_RANGE else "radio down")
+            return rc
+        if rc is not None:
+            self._count("call_errors")
+            log.warning("ground SX126x rf_foff(%d): unexpected reply %r", hz, rc)
+        return None
 
     def noise_dbm(self) -> float | None:
         rc = self._call("rf_noise")
@@ -372,6 +471,8 @@ class Sx126xBridge(RadioBackend):
                 "power_code": st["power_code"], "lbt": st["cad_before_tx"],
                 "rssi_byte": True, "rssi_noise_enable": True,      # per-packet RSSI, rf_noise
                 "rx_boost": st["rx_boost"], "rx_boost_verified": st["rx_boost_verified"],
+                "freq_offset_hz": st["freq_offset_hz"], "tcxo_fallback": st["tcxo_fallback"],
+                "calib_error": st["calib_error"], "cfg_pending": st["cfg_pending"],
                 "chip": st["chip"], "fw": st["fw"], "state": st["state_name"]}
 
     def snapshot(self) -> dict:
@@ -380,4 +481,4 @@ class Sx126xBridge(RadioBackend):
                     "mcu_age_s": None if self.mcu_t is None else self.clock() - self.mcu_t,
                     "stats": dict(self.stats), "tx_backlog": len(self._tx_backlog),
                     "rx_queue": len(self._rx), "last_cad": self.last_cad, "last_tx": self.last_tx,
-                    "events": list(self.events)[-10:]}
+                    "freq_offset_hz": self.freq_offset_hz, "events": list(self.events)[-10:]}

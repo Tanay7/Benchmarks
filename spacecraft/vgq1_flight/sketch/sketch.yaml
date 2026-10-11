@@ -1,14 +1,18 @@
-# Arduino sketch project file (used by App Lab / arduino-cli profiles).
-# The router bridge, LED matrix and Wire libraries ship with the arduino:zephyr
-# platform. The instrument libraries below are OPTIONAL at compile time: the
-# flight code detects them with __has_include and reports a missing instrument
-# in HK. If App Lab cannot resolve a listed version, install the library from
-# the Library Manager (any recent version) and adjust the version here.
+# UNO Q MCU (STM32U585, Arduino core on Zephyr): VGQ-1 flight software. App Lab and
+# arduino-cli always build the default profile below.
+# Wire, SPI, Arduino_LED_Matrix and Arduino_RouterBridge ship with arduino:zephyr. The
+# one library listed is RadioLib 7.8.1 for the SX126x radio option (config.h:
+# VGQ_RADIO = VGQ_RADIO_SX126X). It is never downloaded by the board: tools/radiolib.py
+# fetches the release, verifies the tag commit, applies tools/radiolib-7.8.1.patch and
+# writes the copy to libraries/RadioLib next to this file (contract 25.2 / 30); the App
+# Lab package contains it. arduino-cli refuses a profile whose "dir:" is missing, so run
+#   python3 tools/radiolib.py fetch spacecraft/vgq1_flight/sketch/libraries/RadioLib
+# before building from the repository. The default E22 build never includes
+# RadioLib.h (drivers/sx126x.h is guarded by VGQ_RADIO), so none of it is compiled in.
 profiles:
   default:
     platforms:
       - platform: arduino:zephyr
     libraries:
-      - SparkFun Spectral Triad AS7265X (1.0.5)
-      - Arduino_NiclaSenseEnv (1.0.1)
+      - dir: libraries/RadioLib
 default_profile: default

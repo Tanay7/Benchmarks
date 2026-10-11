@@ -142,6 +142,11 @@ struct RxPacket {
   int16_t snr_cdb = kRadioNaI16;       // packet SNR, 0.01 dB (SX126x only)
   int32_t freq_err_hz = kRadioNaI32;   // carrier offset estimate, Hz (SX126x only)
   uint32_t t_ms = 0;             // millis() when the packet ended (last octet / RxDone)
+  // false: the modem's LoRa payload CRC failed but the payload was delivered anyway
+  // (contract 20, "RS rescue"): the flight still runs BCH + FECF + SDLS on it, which
+  // decide alone whether the uplink is accepted. Default true (the E22 modules drop
+  // CRC failures internally; a driver sets false only where it delivers them).
+  bool crc_ok = true;
 };
 
 // ---- Channel plan -------------------------------------------------------------------
