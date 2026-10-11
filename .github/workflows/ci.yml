@@ -1,0 +1,109 @@
+# =============================================================================
+#  Continuous integration for the VGQ-1 spacecraft / DSS-Q ground station.
+#
+#  Runs on every push and pull request:
+#    host-tests     The flight protocol code (src/ccsds, src/fsw, radio tables)
+#                   built with the host compiler: warnings are errors, then a
+#                   second build under AddressSanitizer + UBSan. Includes the
+#                   full official CCSDS 121.0 test data (libaec 121B2TestData).
+#    ground-tests   The ground data system test suite on the oldest and newest
+#                   supported Python (3.11, 3.13). The station needs no pip
+#                   package at run time; ground/requirements.txt lists only the
+#                   test tools and the optional independent references.
+#    arduino-build  The real Arduino build (official arduino:zephyr platform via
+#                   arduino-cli, the same compiler App Lab uses) of the
+#                   VENTUNO Q station sketch.
+#
+#  Actions are pinned to full commit hashes (version in the comment).
+# =============================================================================
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FLIGHT: ../../spacecraft/vgq1_flight/sketch/src
+      CCSDS121_TESTDATA: ${{ github.workspace }}/libaec/data/121B2TestData
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Fetch official CCSDS 121.0 test data (libaec, pinned commit)
+        run: |
+          git init -q libaec
+          git -C libaec fetch -q --depth 1 https://github.com/MathisRosenhauer/libaec.git b8fd98cfbba2fcc82f1c99813465d7c4806b9d4d
+          git -C libaec checkout -q FETCH_HEAD
+
+      - name: Build and run (warnings are errors)
+        run: |
+          make -C tools/host_test host_test \
+            CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -Wshadow -Wno-unused-parameter -Werror -DVGQ_HOST_BUILD -I$FLIGHT"
+          mkdir -p "$RUNNER_TEMP/vectors"
+          tools/host_test/host_test "$RUNNER_TEMP/vectors"
+
+      - name: Build and run under AddressSanitizer + UBSan
+        run: |
+          make -C tools/host_test clean
+          make -C tools/host_test host_test \
+            CXXFLAGS="-std=c++17 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wall -Wextra -Wno-unused-parameter -DVGQ_HOST_BUILD -I$FLIGHT"
+          mkdir -p "$RUNNER_TEMP/vectors-san"
+          tools/host_test/host_test "$RUNNER_TEMP/vectors-san"
+
+  ground-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install test tools
+        run: python -m pip install -r ground/requirements.txt
+      - name: Run the ground test suite
+        working-directory: ground
+        run: python -m pytest -q
+
+  arduino-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02  # v2.0.0
+        with:
+          version: "1.5.1"
+
+      - name: Bundle the patched RadioLib where a sketch profile references it
+        run: |
+          for sketch in ground/station_io/sketch spacecraft/vgq1_flight/sketch; do
+            if grep -q "dir: libraries/RadioLib" "$sketch/sketch.yaml"; then
+              python3 tools/radiolib.py fetch "$sketch/libraries/RadioLib"
+            fi
+          done
+
+      # "Arduino Q Boards" = arduino:zephyr (UNO Q and VENTUNO Q; ArduinoCore-zephyr
+      # extra/artifacts/zephyr_unoq.json). A profile that names the platform without a
+      # version uses the installed one, as App Lab does, so install it first.
+      - name: Install the Arduino Q Boards platform
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:zephyr
+          arduino-cli core list
+
+      - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
+        run: arduino-cli compile --profile default --warnings all ground/station_io/sketch

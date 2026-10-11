@@ -1,0 +1,15 @@
+# VENTUNO Q MCU (STM32H5F5, Arduino core on Zephyr). FQBN: arduino:zephyr:ventunoq
+# Station I/O: one CardKB on the header I2C pins, annunciator LEDs / buzzer, Radio
+# Control Unit for the UART E22 and, optionally, the SX126x ground radio.
+# Default build: no third-party libraries (Wire and Arduino_RouterBridge ship with
+# arduino:zephyr). SX126x build (sketch.ino: #define DSSQ_RADIO_SX126X 1): un-comment
+# the RadioLib line below - the version is pinned because the sketch uses RadioLib
+# 7.8.1 internals (protected register / command helpers) through a subclass.
+profiles:
+  default:
+    fqbn: arduino:zephyr:ventunoq
+    platforms:
+      - platform: arduino:zephyr
+    # libraries:
+    #   - RadioLib (7.8.1)
+default_profile: default

@@ -1,0 +1,12 @@
+tools/host_test/host_test
+tools/host_test/vectors/
+__pycache__/
+*.pyc
+.pytest_cache/
+ground/archive/
+spacecraft/vgq1_flight/python/egse_data/
+ground/config/sdls_key.hex
+spacecraft/vgq1_flight/sketch/src/sdls_key.h
+ground/.venv/
+tools/host_test/*.bin
+tools/host_test/*.txt
