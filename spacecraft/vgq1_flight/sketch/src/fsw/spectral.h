@@ -25,6 +25,13 @@
 //               counts <= 5 at GAIN 64x, 165 ms, 25 degC; 20 nm FWHM; +/-10 nm
 //  Units: spectral values are the chip's calibrated output in uW/cm2 (band
 //  irradiance of one 20 nm channel); uncertainties are 1-sigma in uW/cm2.
+//  APPROXIMATE: the calibrated output is ASSUMED independent of GAIN and integration
+//  time. The datasheet calibrates at GAIN 16x / INT_T 166 ms (Figures 16-20, note 2) and
+//  warns that "any operation other than these conditions might require a new
+//  calibration" (General Description). AGC, HDR merges and change detection compare
+//  values taken at other exposures on this assumption. VERIFY with T-SC-08 (docs/08):
+//  steady diffuse source at all four gains and N = 29 / 59 / 127 / 255, calibrated value
+//  per channel compared against the +/-12 % accuracy.
 //  Channel order is wavelength order (index 0 = 410 nm ... 17 = 940 nm).
 //  FP32 only (the STM32U585 FPU has no FP64); every loop has a fixed bound.
 // =============================================================================
@@ -127,6 +134,10 @@ static const float kSpecHdrMaxFrac = 0.90f;       // usable raw count < 90 % of 
 // raw count and the index of the frame chosen; sat_mask = channels saturated even there.
 // Channels not valid in every frame come out NaN / 0xFFFF. n is clamped to
 // kSpecHdrMaxFrames; frames == nullptr or n == 0 gives an all-n/a result.
+// The merged spectrum mixes channels from different exposures: APPROXIMATE, it rests on
+// the gain/time-independence assumption stated in the file header (VERIFY, T-SC-08).
+// raw[ch] is the count of the frame chosen for that channel, so its full scale is that
+// frame's (spec_full_scale(frames[chosen[ch]].exp.int_cycles)), not the bracket centre's.
 void spec_hdr_merge(const SpecFrame* frames, uint8_t n, float spec[kSpecChannels],
                     float unc[kSpecChannels], uint16_t raw[kSpecChannels], uint32_t& sat_mask,
                     uint8_t chosen[kSpecChannels]);
@@ -244,7 +255,8 @@ struct SpecConfig {
   uint8_t int_cycles = 59;        // 60 x 2.78 = 166.8 ms: the datasheet calibration time
   uint8_t lamps = 0;              // b0 white (AS72651 LED_DRV), b1 IR (AS72652), b2 UV (AS72653)
   uint8_t led_cur = 0;            // LED_DRV codes: b1:0 white, b3:2 IR, b5:4 UV; 0..3 = 12.5,
-                                  // 25, 50, 100 mA (Figure 32; current accuracy +/-10 %)
+                                  // 25, 50, 100 mA (Figure 32; current accuracy +/-10 %),
+                                  // each at most kSpecLedMaxCode (white 0..3, IR 0..2, UV 0)
   uint8_t ind = 0;                // indicator LED (AS72651 LED_IND): 0 off, 1..4 = 1/2/4/8 mA
                                   // (+/-30 %); on while a cycle runs
   uint8_t n = 1;                  // HDR exposures 2..4, LOCKIN/FLUOR pairs 1..16, BURST s 1..60
@@ -252,10 +264,60 @@ struct SpecConfig {
   uint8_t burst_bank = 2;         // BURST BANK mode: 2 = all 6 channels (2 integrations),
                                   // 0 / 1 = 4 channels per device in one integration
 };
-// Range check of every field, per mode (LOCKIN needs at least one lamp).
+// Range check of every field, per mode (LOCKIN needs at least one lamp); led_cur must
+// also respect kSpecLedMaxCode for every lamp.
 bool spec_config_valid(const SpecConfig& c);
-// Lamps actually used: FLUOR -> UV only; HDR and BURST -> none; else c.lamps.
+// Lamps the mode uses: FLUOR -> UV only; HDR and BURST -> none; else c.lamps. Lamp bit d
+// (SpecLamp) is the LED_DRV of device d, so a lamp on an absent slave is masked with the
+// device mask (DEV_SEL) by the driver.
 uint8_t spec_effective_lamps(const SpecConfig& c);
+
+// ---- Lamp drive limits ------------------------------------------------------------------
+// Highest LED_DRV current code (0..3 = 12.5 / 25 / 50 / 100 mA, Figure 32) each board lamp
+// may be driven at, indexed by device (= lamp bit). Source: the board vendor's limits in the
+// SparkFun AS7265x Arduino library 1.0.5, examples/Example3_Settings.ino lines 65-81:
+//   white LED (AS72651): "max forward current of 120mA", all four codes allowed  -> 3
+//   IR LED    (AS72652): "max forward current of 65mA", 100 mA "Not allowed"      -> 2
+//   UV LED    (AS72653): "max forward current of 30mA so do not set the drive
+//                        current higher", 25 / 50 / 100 mA "Not allowed"          -> 0
+// The datasheet's 12.5..100 mA (LED_DRV pin) is the driver's range, not the lamps' rating.
+extern const uint8_t kSpecLedMaxCode[kSpecDevices];
+// LED_DRV current code of device dev from a led_cur field (b1:0 white, b3:2 IR, b5:4 UV),
+// clamped to kSpecLedMaxCode[dev]; 0 for dev >= kSpecDevices. Every LED_CONFIG value the
+// driver writes takes its current from here, whatever led_cur holds.
+uint8_t spec_led_code(uint8_t led_cur, uint8_t dev);
+// led_cur rebuilt from the three clamped codes: the currents actually applied.
+uint8_t spec_led_cur_applied(uint8_t led_cur);
+
+// ---- AS72651 virtual-register write policy (datasheet Figures 26-51) ----------------------
+// Kept here, free of I2C, so that the host tests check it; drivers/as7265x.cpp uses it for
+// every byte it writes. Writable virtual registers the driver uses:
+static const uint8_t kSpecVFwH = 0x02, kSpecVFwL = 0x03;    // FW version selector (Figure 28)
+static const uint8_t kSpecVConfig = 0x04;                   // CONFIG (Figure 29)
+static const uint8_t kSpecVInteg = 0x05;                    // INTEGRATION (Figure 30)
+static const uint8_t kSpecVLed = 0x07;                      // LED_CONFIG (Figure 32)
+static const uint8_t kSpecVDevSel = 0x4F;                   // DEV_SEL (Figure 48)
+static const uint8_t kSpecVCoefRead = 0x54;                 // COEF_READ sub-address (Figure 50)
+static const uint8_t kSpecCfgFrst = 0x01;                   // CONFIG b0 FRST (factory reset)
+static const uint8_t kSpecLedDrvEn = 0x08, kSpecLedIndEn = 0x01;   // LED_CONFIG b3 / b0
+// True if `data` may be written to `vreg`. Refused: every other register - COEF_DATA
+// (0x50-0x53) and COEF_WRITE (0x55, writes "to persistent memory", Figure 51), the
+// firmware-update block (0x48-0x4B, Figures 45-47) - CONFIG.FRST, INTEGRATION 0 (reads back
+// as "error"), LED_CONFIG b7 (read-only), DEV_SEL above 2, FW selectors outside 1..3 and
+// COEF_READ sub-addresses >= 64.
+bool spec_vreg_write_allowed(uint8_t vreg, uint8_t data);
+// Resynchronisation byte after a virtual WRITE to vreg whose outcome is unknown (any of its
+// two transactions failed: the slave may or may not have latched the byte). The datasheet
+// protocol has no cancel and STATUS reads the same (TX_VALID = 0) whether the slave is idle
+// or waiting for the data byte, so the driver sends this one byte on its own before
+// anything else. It has bit 7 clear and spec_vreg_write_allowed(vreg, byte) holds, so it
+// is harmless either way: if the slave waits for data it is a legal value for vreg that
+// lights nothing (LED_CONFIG = 0, CONFIG = 0 without SRST/FRST, INTEGRATION = 5, ...);
+// if the slave is idle it is a READ request (bit 7 clear = read marker, "I2C Virtual
+// Register Write Access") whose answer the driver drains. Either way the slave ends idle.
+// A byte with bit 7 set would instead be a WRITE address in the idle case and turn the
+// next byte into data for an arbitrary register (e.g. 0xD5 -> COEF_WRITE).
+uint8_t spec_vreg_resync_byte(uint8_t vreg);
 
 // ---- Product of one acquisition cycle ------------------------------------------------------
 enum SpecFlag : uint8_t {
@@ -266,10 +328,13 @@ struct SpecResult {
   uint8_t mode = SPEC_SURVEY;
   uint8_t flags = 0;              // SPEC v3.1 b0..b6 (b7 is set by spec_fill_v31)
   uint8_t gain_code = 0;
-  uint8_t int_cycles = 0;         // base exposure (HDR: bracket centre)
-  uint8_t led_cur = 0;
+  // Base exposure. HDR: the AGC centre of the bracket, which need not be one of the
+  // exposures taken (for an even n it lies between two of them, spec_hdr_bracket), and
+  // raw[] then holds counts of different exposures - see spec_hdr_merge.
+  uint8_t int_cycles = 0;
+  uint8_t led_cur = 0;            // LED_DRV codes applied (spec_led_cur_applied)
   uint8_t n_frames = 0;           // exposures merged / on-off pairs / burst samples (<= 255)
-  uint8_t lamps = 0;              // lamps used
+  uint8_t lamps = 0;              // lamps actually driven (lamps on absent slaves excluded)
   uint8_t dev_mask = 0;           // devices that delivered data (b0..b2)
   uint32_t valid_mask = 0;        // channels with data
   uint32_t sat_mask = 0;          // bit i = channel i saturated
@@ -281,6 +346,7 @@ struct SpecResult {
   uint16_t burst_samples = 0;
   uint16_t burst_rate_dhz = 0;    // achieved sample rate, 0.1 Hz
   uint16_t burst_dropped = 0;     // samples lost because the ring was full
+  uint16_t burst_read_max_ms = 0; // longest sample read (DATA_RDY seen -> last channel read)
 };
 void spec_result_clear(SpecResult& r);   // all channels NaN / 0xFFFF / -128, counters 0
 
@@ -313,10 +379,21 @@ size_t pack_spec_v31(const SpecV31& p, uint8_t* out, size_t cap);
 
 // SPECBURST (APID 0x024, VC1), docs/05: t0_ms u32 | rate_dhz u16 | gain_code u8 |
 // int_cycles u8 | n u8 | n x {dt_ms u16, raw u16[18]}, n = 1..3 (9 + 38 n <= 123 octets).
+// The channels of one sample are NOT simultaneous: dt_ms stamps the DATA_RDY detection and
+// the values are then read one virtual register at a time (BANK 2: 3 DEV_SEL writes and 36
+// single-octet reads, each a four-step handshake of several I2C transactions), so at the
+// 100 kHz bus clock one sample read lasts longer than one conversion at short integration
+// times and its channels come from successive conversions (datasheet "Interrupt Operation":
+// only the two octets of one value are shadow-protected). SpecResult.burst_read_max_ms
+// reports the longest read of the burst.
 struct SpecBurstSample {
-  uint16_t dt_ms;                     // since the first sample of the burst
-  uint16_t raw[kSpecChannels];        // 0xFFFF = channel not converted in this BANK mode
+  uint16_t dt_ms;                     // DATA_RDY detection, since the first sample of the burst
+  uint16_t raw[kSpecChannels];        // spec_burst_raw(); 0xFFFF = not converted in this BANK mode
 };
+// SPECBURST raw value of a converted channel. 0xFFFF is reserved for "not converted", so a
+// real count of 65535 (reachable when int_cycles >= 63: full scale 65535, Figure 30) is sent
+// as 0xFFFE - at or above full scale - 1, i.e. saturated by spec_saturation_mask's rule.
+uint16_t spec_burst_raw(uint16_t counts);
 static const uint8_t kSpecBurstPerPacket = 3;
 static const size_t kSpecBurstMaxLen = 9 + 38 * kSpecBurstPerPacket;
 // Returns the length, or 0 if n is outside 1..3 or cap is too small.

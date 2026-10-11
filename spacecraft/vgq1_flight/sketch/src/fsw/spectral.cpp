@@ -11,6 +11,9 @@ const uint8_t kSpecSlotChannel[kSpecDevices][kSpecSlots] = {
     {6, 7, 9, 11, 16, 17},     // AS72652 (VIS): G560 H585 I645 J705 K900 L940
     {0, 1, 2, 3, 4, 5},        // AS72653 (UV) : A410 B435 C460 D485 E510 F535
 };
+// SparkFun Example3_Settings.ino lines 65-81 (see spectral.h): white 120 mA, IR 65 mA, UV 30 mA
+// maximum forward current -> codes 3 (100 mA), 2 (50 mA), 0 (12.5 mA).
+const uint8_t kSpecLedMaxCode[kSpecDevices] = {3, 2, 0};
 
 // HEURISTIC thresholds - see SpecClassThresholds and the synthetic spectra in
 // test_spectral.cpp. Feature values of those spectra (20 nm Gaussian channels):
@@ -534,6 +537,7 @@ bool spec_config_valid(const SpecConfig& c) {
   if (c.mode > SPEC_BURST) return false;
   if (c.gain > 3 && c.gain != kSpecGainAuto) return false;
   if (c.int_cycles == 0 || c.lamps > 7 || c.led_cur > 63 || c.ind > 4) return false;
+  if (spec_led_cur_applied(c.led_cur) != c.led_cur) return false;   // a lamp above its rating
   if (c.burst_cycles == 0 || c.burst_bank > 2) return false;
   switch (c.mode) {
     case SPEC_HDR: return c.n >= 2 && c.n <= 4;
@@ -552,6 +556,42 @@ uint8_t spec_effective_lamps(const SpecConfig& c) {
     default: return (uint8_t)(c.lamps & 7);
   }
 }
+
+uint8_t spec_led_code(uint8_t led_cur, uint8_t dev) {
+  if (dev >= kSpecDevices) return 0;
+  const uint8_t code = (uint8_t)((led_cur >> (2u * dev)) & 3u);
+  return code < kSpecLedMaxCode[dev] ? code : kSpecLedMaxCode[dev];
+}
+
+uint8_t spec_led_cur_applied(uint8_t led_cur) {
+  uint8_t v = 0;
+  for (uint8_t d = 0; d < kSpecDevices; ++d) v = (uint8_t)(v | (spec_led_code(led_cur, d) << (2u * d)));
+  return v;
+}
+
+bool spec_vreg_write_allowed(uint8_t vreg, uint8_t data) {
+  switch (vreg) {
+    case kSpecVFwH: case kSpecVFwL: return data >= 1 && data <= 3;   // version selector only
+    case kSpecVConfig: return (data & kSpecCfgFrst) == 0;
+    case kSpecVInteg: return data >= 1;
+    case kSpecVLed: return (data & 0x80) == 0;                      // b7 READ_ERR is read-only
+    case kSpecVDevSel: return data <= 2;
+    case kSpecVCoefRead: return data < 64;
+    default: return false;
+  }
+}
+
+uint8_t spec_vreg_resync_byte(uint8_t vreg) {
+  switch (vreg) {
+    case kSpecVInteg: return kSpecVInteg;        // data: INTEGRATION = 5; address: read INTEGRATION
+    case kSpecVFwH: case kSpecVFwL: return 0x01; // data: selector MAJOR; address: read HW version L
+    default: return 0x00;                        // data: LED / CONFIG / DEV_SEL / COEF_READ = 0
+                                                 // (all off, no SRST/FRST, master, sub 0);
+                                                 // address: read HW version H
+  }
+}
+
+uint16_t spec_burst_raw(uint16_t counts) { return counts == 0xFFFFu ? (uint16_t)0xFFFEu : counts; }
 
 void spec_result_clear(SpecResult& r) {
   r = SpecResult();

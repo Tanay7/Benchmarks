@@ -11,33 +11,21 @@ namespace {
 const uint8_t kRegStatus = 0x00, kRegWrite = 0x01, kRegRead = 0x02;
 const uint8_t kTxValid = 0x02, kRxValid = 0x01;
 // Virtual registers (Figure 26). Multi-byte values are big-endian and are read in
-// ascending address order (the chip shadows the rest after the first byte).
-const uint8_t kVHwH = 0x00, kVHwL = 0x01, kVFwH = 0x02, kVFwL = 0x03, kVConfig = 0x04,
-              kVInteg = 0x05, kVTemp = 0x06, kVLed = 0x07, kVRaw = 0x08, kVCal = 0x14,
-              kVDevSel = 0x4F, kVCoefData = 0x50, kVCoefRead = 0x54;
+// ascending address order (the chip shadows the rest after the first byte). The writable
+// ones and the write policy live in spectral.h (host-tested).
+const uint8_t kVHwH = 0x00, kVHwL = 0x01, kVTemp = 0x06, kVRaw = 0x08, kVCal = 0x14,
+              kVCoefData = 0x50;
+const uint8_t kVFwH = kSpecVFwH, kVFwL = kSpecVFwL, kVConfig = kSpecVConfig, kVInteg = kSpecVInteg,
+              kVLed = kSpecVLed, kVDevSel = kSpecVDevSel, kVCoefRead = kSpecVCoefRead;
 // CONFIG (Figure 29) and LED_CONFIG (Figure 32) bits.
-const uint8_t kCfgSrst = 0x80, kCfgInt = 0x40, kCfgDataRdy = 0x02, kCfgFrst = 0x01;
-const uint8_t kLedDrvEn = 0x08, kLedIndEn = 0x01;
+const uint8_t kCfgSrst = 0x80, kCfgInt = 0x40, kCfgDataRdy = 0x02;
+const uint8_t kLedDrvEn = kSpecLedDrvEn, kLedIndEn = kSpecLedIndEn;
 const uint8_t kBankOneShot = 3;
 const uint8_t kAbortCmd = 0xFE;           // abort_req_ value of a commanded abort
-const uint16_t kBeginMaxPolls = 400;      // begin(): 400 x (poll + 5 ms) bounds the boot wait
+// begin(): passes of (poll + 5 ms) that cover identification plus one soft reset with its
+// settling time and boot wait (kSpecResetWaitMs + kSpecBootWaitMs), plus 200 passes of work.
+const uint16_t kBeginMaxPolls = (uint16_t)((kSpecResetWaitMs + kSpecBootWaitMs) / 5u + 200u);
 const float kCalSanity = 1.0e7f;          // |uW/cm2| above this is a corrupted read
-
-// Virtual registers the driver may write, and the values it may write there. Everything
-// else - COEF_DATA / COEF_WRITE (persistent calibration memory), the firmware-update
-// block (0x48-0x4B, 0x60-0x63) - is refused, as are CONFIG.FRST (factory reset) and an
-// out-of-range DEV_SEL.
-bool write_allowed(uint8_t vreg, uint8_t data) {
-  switch (vreg) {
-    case kVFwH: case kVFwL: return data >= 1 && data <= 3;     // version selector only
-    case kVConfig: return (data & kCfgFrst) == 0;
-    case kVInteg: return data >= 1;
-    case kVLed: return (data & 0x80) == 0;                    // b7 READ_ERR is read-only
-    case kVDevSel: return data <= 2;
-    case kVCoefRead: return data < 64;
-    default: return false;
-  }
-}
 
 // Elapsed ms from t to now; 0 when t is later than now (time stamps taken with millis()
 // inside a pass may be newer than the pass's `now`).
@@ -74,14 +62,26 @@ bool As7265x::begin(I2cBus& bus, int int_pin) {
   lamps_lit_ = false;
   ring_n_ = 0;
   abort_req_ = ERR_NONE;
-  resync_ = false;
+  resync_ = resync_srst_ = false;
+  lamp_armed_ = false;
   cfg_ = SpecConfig();
-  if (!bus.probe(kAddr)) {
+  // The AS72651 answers its address only once its firmware runs (loaded from the board's
+  // EEPROM at power on): poll for the ACK like SparkFun isConnected() before declaring it
+  // absent. Bounded: kSpecBootWaitMs / kSpecBootProbeMs probes.
+  bool present = bus.probe(kAddr);
+  for (uint32_t i = 0; !present && i < kSpecBootWaitMs / kSpecBootProbeMs; ++i) {
+    delay(kSpecBootProbeMs);
+    present = bus.probe(kAddr);
+  }
+  if (!present) {
     state_ = ST_ABSENT;
     retry_at_ = millis() + retry_ms_;
     return false;
   }
   reset_tried_ = false;
+  // A lamp may have been left on (e.g. an MCU reset during an exposure): unknown until the
+  // configuration's LED_CONFIG read-back shows every LED_DRV disabled.
+  lamps_lit_ = true;
   start_init();
   // Boot only: drive identification/configuration (and at most one soft-reset retry)
   // to completion. Bounded by kBeginMaxPolls.
@@ -96,14 +96,19 @@ bool As7265x::begin(I2cBus& bus, int int_pin) {
 As7265x::State As7265x::poll(uint32_t now_ms) {
   if (!bus_) return state_;
   uint32_t now = now_ms;
-  // Lamp watchdog: an exposure that outlives its DATA_RDY deadline by kSpecLampMarginMs
-  // (e.g. poll() starved by the caller) is ended at the next safe point, lamps off.
-  if (lamps_lit_ && cycle_active_ && abort_req_ == ERR_NONE &&
-      since(now, lamp_on_ms_) > lamp_limit_ms_)
+  // Lamp watchdog: a lit exposure running (since its trigger) longer than conversion +
+  // DATA_RDY margin + kSpecLampMarginMs (e.g. poll() starved by the caller) is ended at the
+  // next safe point, lamps off. A lamp-off list already running is the lamp-off action
+  // itself and is never interrupted.
+  if (lamps_lit_ && lamp_armed_ && cycle_active_ && abort_req_ == ERR_NONE &&
+      phase_ != PH_LAMPS_OFF && since(now, lamp_on_ms_) > lamp_limit_ms_)
     abort_req_ = ERR_LAMP_WATCHDOG;
   const uint32_t t0 = micros();
   for (uint8_t i = 0; i < kSpecMaxStepsPerPoll; ++i) {   // each step <= 2 I2C transactions
-    if ((uint32_t)(micros() - t0) >= budget_us_) break;
+    // Lamp-off lists keep at least the default budget whatever the caller set.
+    const bool lamp_off = phase_ == PH_LAMPS_OFF || phase_ == PH_SAFE_OFF;
+    const uint32_t budget = lamp_off && budget_us_ < kSpecPollBudgetUs ? kSpecPollBudgetUs : budget_us_;
+    if ((uint32_t)(micros() - t0) >= budget) break;
     if (!advance(now)) break;
     now = millis();
   }
@@ -114,7 +119,11 @@ bool As7265x::start_cycle(const SpecConfig& cfg, uint32_t now_ms) {
   if (!spec_config_valid(cfg) || state_ != ST_IDLE || phase_ != PH_NONE || n_ops_) return false;
   cfg_ = cfg;
   result_ready_ = result_held_ = false;
-  lamps_eff_ = spec_effective_lamps(cfg);
+  cycle_dev_ = info_.dev_mask;
+  // Lamp bit d is the LED_DRV of device d: a lamp on an absent slave cannot be lit and is
+  // neither used nor reported (re-masked after this cycle's DEV_SEL read).
+  lamps_eff_ = (uint8_t)(spec_effective_lamps(cfg) & cycle_dev_);
+  lamps_used_ = 0;
   ind_on_ = cfg.ind > 0;
   agc_ = cfg.gain == kSpecGainAuto && cfg.mode != SPEC_BURST;
   frames_done_ = probes_ = main_j_ = main_total_ = n_bracket_ = 0;
@@ -122,7 +131,6 @@ bool As7265x::start_cycle(const SpecConfig& cfg, uint32_t now_ms) {
   on_peak_ = 0;
   for (uint8_t i = 0; i < kSpecChannels; ++i) on_raw_[i] = 0xFFFF;
   lock_.reset();
-  cycle_dev_ = info_.dev_mask;
   t_start_ = now_ms;
   cycle_active_ = true;
   state_ = ST_BUSY;
@@ -134,7 +142,7 @@ bool As7265x::start_cycle(const SpecConfig& cfg, uint32_t now_ms) {
     burst_exp_.int_cycles = cfg.burst_cycles;
     burst_bank_ = cfg.burst_bank;
     burst_active_ = true;
-    burst_n_ = burst_drop_ = 0;
+    burst_n_ = burst_drop_ = burst_read_max_ = 0;
     burst_sat_ = 0;
     burst_t0_ms_ = burst_last_ms_ = 0;
     burst_start_ = now_ms;                           // re-stamped when continuous mode starts
@@ -237,10 +245,11 @@ void As7265x::ops_begin(Phase ph) {
   status_errs_ = 0;
   ops_bad_ = false;
   devsel_op_ = 0xFF;
-  // A write whose address byte reached the chip but whose data byte did not leaves the
-  // chip waiting for data: deliver the owed byte first, or the next address would be
-  // taken as data (the datasheet protocol has no cancel).
-  if (resync_) ops_[n_ops_++] = Op{OPK_DATA, resync_vreg_, resync_data_};
+  // A failed transaction of a virtual write left the chip idle or waiting for that
+  // write's data byte. Resynchronise with the one byte that is harmless in both cases
+  // (spec_vreg_resync_byte, spectral.h) - never the "owed" data byte, which the chip
+  // takes as a WRITE address if it is in fact idle and the byte has bit 7 set.
+  if (resync_) ops_[n_ops_++] = Op{OPK_DATA, resync_vreg_, spec_vreg_resync_byte(resync_vreg_)};
   op_base_ = n_ops_;
 }
 
@@ -250,8 +259,21 @@ void As7265x::op_r(uint8_t vreg) {
 }
 
 void As7265x::op_w(uint8_t vreg, uint8_t data) {
-  if (n_ops_ >= kMaxOps || !write_allowed(vreg, data)) { ops_bad_ = true; return; }
+  if (n_ops_ >= kMaxOps || !spec_vreg_write_allowed(vreg, data)) { ops_bad_ = true; return; }
   ops_[n_ops_++] = Op{OPK_WRITE, vreg, data};
+}
+
+// A transaction of virtual write `op` failed: the chip may or may not have latched the
+// byte. The next list starts with a resynchronisation byte; the registers the write may
+// have changed are no longer known (the resync byte itself may land as INTEGRATION or
+// LED_CONFIG data), so the integration value is rewritten and every LED_CONFIG is treated
+// as possibly lit until a lamp-off list reads it back.
+void As7265x::mark_unknown(const Op& op) {
+  resync_ = true;
+  resync_vreg_ = op.vreg;
+  if (op.kind == OPK_WRITE && op.vreg == kVConfig && (op.data & kCfgSrst)) resync_srst_ = true;
+  int_shadow_ = 0;
+  for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = kLedUnknown;
 }
 
 // SparkFun-proven transaction shape for this chip: register pointer write with STOP,
@@ -293,6 +315,10 @@ As7265x::Step As7265x::bus_glitch() {
 //   1 write the virtual address to WRITE (bit 7 set = write)
 //   2 poll STATUS: read -> RX_VALID = 1, write -> TX_VALID = 0
 //   3 read READ / write the data byte to WRITE
+//   4 (resync byte only) poll STATUS until TX_VALID = 0, then kSpecResyncPolls idle polls,
+//     draining the answer if the chip took the byte as a read request
+// A failure in steps 1..4 of a write leaves the chip's protocol state unknown: advance()
+// then calls mark_unknown().
 As7265x::Step As7265x::step_op() {
   const Op& op = ops_[op_i_];
   uint8_t st = 0;
@@ -313,7 +339,6 @@ As7265x::Step As7265x::step_op() {
     case 1: {
       const uint8_t a = op.kind == OPK_READ ? op.vreg : (uint8_t)(op.vreg | 0x80);
       if (!reg_write(kRegWrite, a)) { step_err_ = ERR_I2C; return STEP_FAIL; }
-      if (op.kind == OPK_WRITE) { resync_ = true; resync_vreg_ = op.vreg; resync_data_ = op.data; }
       sub_ = 2;
       sub_polls_ = 0;
       return STEP_CONT;
@@ -327,18 +352,46 @@ As7265x::Step As7265x::step_op() {
       sub_polls_ = 0;
       return STEP_CONT;
     }
-    default:
+    case 3:
       if (op.kind == OPK_READ) {
         if (!reg_read(kRegRead, rd_[op_i_])) { step_err_ = ERR_I2C; return STEP_FAIL; }
-      } else {
-        if (!reg_write(kRegWrite, op.data)) { step_err_ = ERR_I2C; return STEP_FAIL; }
-        resync_ = false;                             // the write (or the owed byte) is complete
+        return op_complete();
       }
-      ++op_i_;
-      sub_ = 0;
-      sub_polls_ = 0;
-      return STEP_CONT;
+      // Backstop: a lone data byte (no address phase of its own) must never have bit 7 set,
+      // or a chip that is in fact idle takes it as a WRITE address (datasheet "I2C Virtual
+      // Register Write Access"). Only spec_vreg_resync_byte() builds these; a byte breaking
+      // the rule is refused, not sent.
+      if (op.kind == OPK_DATA && (op.data & 0x80)) { step_err_ = ERR_INTERNAL; return STEP_FAIL; }
+      if (!reg_write(kRegWrite, op.data)) { step_err_ = ERR_I2C; return STEP_FAIL; }
+      if (op.kind == OPK_DATA) {
+        sub_ = 4;
+        sub_polls_ = 0;
+        settle_ = 0;
+        return STEP_CONT;
+      }
+      return op_complete();
+    default: {                                       // 4: settle after a resync byte
+      if (!reg_read(kRegStatus, st)) return bus_glitch();
+      status_errs_ = 0;
+      if (st & kRxValid) {                           // taken as a read request: drain it
+        uint8_t junk = 0;
+        if (!reg_read(kRegRead, junk)) return bus_glitch();
+      } else if (st & kTxValid) {
+        return handshake_wait();                     // not consumed yet
+      } else if (++settle_ < kSpecResyncPolls) {
+        return STEP_CONT;
+      }
+      resync_ = false;                               // the chip is idle again
+      return op_complete();
+    }
   }
+}
+
+As7265x::Step As7265x::op_complete() {
+  ++op_i_;
+  sub_ = 0;
+  sub_polls_ = 0;
+  return STEP_CONT;
 }
 
 // One unit of work; false = nothing more can be done in this pass (waiting or idle).
@@ -353,10 +406,14 @@ bool As7265x::advance(uint32_t now) {
   // failure, whose recovery operations are now in flight) makes it void.
   if (abort_req_ != ERR_NONE && !cycle_active_ && !burst_active_) abort_req_ = ERR_NONE;
   if (op_i_ < n_ops_) {
-    if (abort_req_ != ERR_NONE && sub_ == 0) {       // only between complete handshakes
+    // An abort drops the list only between complete handshakes, and never a lamp-off list
+    // (it is the lamp-off action; the abort takes effect once it has completed).
+    if (abort_req_ != ERR_NONE && sub_ == 0 && phase_ != PH_LAMPS_OFF) {
       n_ops_ = op_i_ = 0;
     } else {
       if (step_op() == STEP_FAIL) {
+        const Op& op = ops_[op_i_];
+        if (op.kind != OPK_READ && sub_ >= 1) mark_unknown(op);   // byte may have been latched
         n_ops_ = op_i_ = sub_ = 0;
         on_failure(now, step_err_);
         return true;
@@ -386,11 +443,12 @@ bool As7265x::phase_tick(uint32_t now) {
     case PH_NONE:
       if (state_ == ST_ABSENT || state_ == ST_FAULT) {
         if ((int32_t)(now - retry_at_) < 0) return false;
-        if (state_ == ST_FAULT) { start_srst(now); return true; }   // enter_fault() rescheduled
+        if (state_ == ST_FAULT) return fault_retry(now);
         retry_at_ = now + retry_ms_;
         retry_ms_ = retry_ms_ * 2u > kSpecRetryMaxMs ? kSpecRetryMaxMs : retry_ms_ * 2u;
         if (!bus_->probe(kAddr)) return false;         // still absent
         reset_tried_ = false;
+        lamps_lit_ = true;                             // never commanded: unknown until verified
         start_init();
         return true;
       }
@@ -420,6 +478,11 @@ bool As7265x::phase_tick(uint32_t now) {
       if (since(now, burst_start_) >= (uint32_t)cfg_.n * 1000u) {
         ops_begin(PH_BURST_STOP);
         op_w(kVConfig, config_value(burst_exp_.gain_code, kBankOneShot));   // ends continuous mode
+        for (uint8_t d = 0; d < kSpecDevices; ++d) {   // fresh die temperatures for the result
+          if (!(cycle_dev_ & (1u << d))) continue;
+          op_w(kVDevSel, d);
+          op_r(kVTemp);
+        }
         return true;
       }
       // Continuous BANK modes: the chip keeps converting and reading the data releases
@@ -427,9 +490,13 @@ bool As7265x::phase_tick(uint32_t now) {
       // relies on the same). A new conversion cannot finish sooner than one conversion
       // time after the previous DATA_RDY, so sampling never runs faster than that even
       // if the flag were not cleared (VERIFY with T-SC-08: achieved rate <= 1 / conversion).
-      // At 100 kHz one sample read takes longer than one conversion: samples are not
-      // contiguous and the channels of one sample may straddle two conversions (only the
-      // two octets of one value are shadow-protected).
+      // One sample read is up to 3 DEV_SEL writes + 36 single-octet reads (BANK 2), each a
+      // four-step handshake of at least 6 (write) or 7 (read) I2C transactions: at 100 kHz
+      // that is tens of ms, i.e. several conversions at burst_cycles = 1 (12 ms in BANK 2,
+      // spec_conversion_ms). Samples are therefore not contiguous and the channels of one
+      // sample come from successive conversions (only the two octets of one value are
+      // shadow-protected); dt_ms stamps DATA_RDY and burst_read_max_ms reports the longest
+      // read (spectral.h SpecBurstSample).
       const uint32_t t = since(now, burst_ref_ms_);
       if (burst_n_ == 0 && t < conv_ms_ + conv_ms_ / 32u + 1u) return false;
       if (burst_n_ > 0 && since(now, burst_sample_ms_) < conv_ms_) return false;
@@ -448,10 +515,20 @@ bool As7265x::phase_tick(uint32_t now) {
       op_r(kVConfig);
       return true;
     }
-    case PH_SRST_WAIT:
-      if (since(now, srst_t_) < kSpecResetWaitMs) return false;
+    case PH_SRST_WAIT: {
+      const uint32_t t = since(now, srst_t_);
+      if (t < kSpecResetWaitMs) return false;
+      // Boot wait: identify only once the rebooted chip ACKs its address (polled like
+      // SparkFun isConnected(), uncounted probes), for at most kSpecBootWaitMs more; then
+      // identification runs anyway and its failure takes the normal recovery path.
+      if (t < kSpecResetWaitMs + kSpecBootWaitMs) {
+        if (since(now, probe_t_) < kSpecBootProbeMs) return false;
+        probe_t_ = now;
+        if (!bus_->probe(kAddr)) return false;
+      }
       start_init();
       return true;
+    }
     default:
       // An operation phase without operations cannot occur by design; if it ever does,
       // recover through the normal failure path instead of idling in it forever.
@@ -476,6 +553,7 @@ void As7265x::phase_done(uint32_t now) {
         led_want_[d] = led_value(d, false, false);
         op_w(kVDevSel, d);
         op_w(kVLed, led_want_[d]);
+        op_r(kVLed);                                   // read back: LED_DRV must be off
       }
       op_w(kVInteg, cfg_.int_cycles);
       op_r(kVInteg);
@@ -487,8 +565,9 @@ void As7265x::phase_done(uint32_t now) {
       }
       return;
     case PH_INIT_CFG: {
-      uint8_t k = 0;
-      for (uint8_t d = 0; d < kSpecDevices; ++d) { led_shadow_[d] = led_want_[d]; k = (uint8_t)(k + 2u); }
+      // b: 3 x {DEV_SEL w, LED w, LED r}, INTEG w, INTEG r, CONFIG w, n x {DEV_SEL w, TEMP r}
+      const bool lit = led_readback_lit(b, 2, 3, 7);
+      uint8_t k = (uint8_t)(3u * kSpecDevices);
       const uint8_t integ = b[k + 1u];                 // read-back of the integration register
       k = (uint8_t)(k + 3u);
       for (uint8_t d = 0; d < kSpecDevices; ++d) {
@@ -496,12 +575,15 @@ void As7265x::phase_done(uint32_t now) {
         info_.temp[d] = to_i8(b[k + 1u]);
         k = (uint8_t)(k + 2u);
       }
-      if (integ != cfg_.int_cycles) { on_failure(now, ERR_VERIFY); return; }
+      if (lit) lamps_lit_ = true;                      // a lamp is known to be on
+      if (lit || integ != cfg_.int_cycles) { on_failure(now, ERR_VERIFY); return; }
+      for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = led_want_[d];
       int_shadow_ = integ;
-      lamps_lit_ = false;
+      lamps_lit_ = lamp_armed_ = false;
       consec_fail_ = 0;
       srst_fails_ = 0;
       reset_tried_ = false;
+      fault_init_next_ = true;
       retry_ms_ = kSpecRetryMs;
       if (in_recovery_) {
         in_recovery_ = false;
@@ -513,10 +595,18 @@ void As7265x::phase_done(uint32_t now) {
       return;
     }
     case PH_SETUP:
-      if (devsel_op_ != 0xFF) { decode_devsel(rd_[devsel_op_]); cycle_dev_ = info_.dev_mask; }
+      if (devsel_op_ != 0xFF) {
+        decode_devsel(rd_[devsel_op_]);
+        cycle_dev_ = info_.dev_mask;
+        // A slave reported missing now: its lamp is not used (nor reported) from here on.
+        lamps_eff_ &= cycle_dev_;
+        frame_lamps_ &= cycle_dev_;
+        cur_.lamps &= cycle_dev_;
+      }
       int_shadow_ = exp_.int_cycles;
       for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = led_want_[d];
       t_trig_ = millis();
+      if (lamps_lit_) { lamp_armed_ = true; lamp_on_ms_ = t_trig_; }   // lamp watchdog runs
       conv_ms_ = spec_conversion_ms(exp_.int_cycles, kBankOneShot);
       drdy_deadline_ = conv_ms_ + conv_ms_ / 32u + kSpecDrdyMarginMs;
       last_drdy_poll_ = t_trig_;
@@ -537,8 +627,11 @@ void As7265x::phase_done(uint32_t now) {
       return;
     }
     case PH_LAMPS_OFF:
+      // b: per device in off_list_ {DEV_SEL w, LED w, LED r}
+      if (led_readback_lit(b, 2, 3, off_list_)) { lamps_lit_ = true; on_failure(now, ERR_VERIFY); return; }
       for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = led_want_[d];
       lamps_lit_ = shadow_lit(0) || shadow_lit(1) || shadow_lit(2);
+      if (!lamps_lit_) lamp_armed_ = false;
       start_read(0);
       return;
     case PH_READ: {
@@ -574,9 +667,16 @@ void As7265x::phase_done(uint32_t now) {
     case PH_BURST_READ:
       burst_sample_done();
       return;
-    case PH_BURST_STOP:
+    case PH_BURST_STOP: {
+      uint8_t k = 1;                                   // b[0] is the CONFIG write
+      for (uint8_t d = 0; d < kSpecDevices; ++d) {     // n x {DEV_SEL w, TEMP r}
+        if (!(cycle_dev_ & (1u << d))) continue;
+        info_.temp[d] = to_i8(b[k + 1u]);
+        k = (uint8_t)(k + 2u);
+      }
       finish_burst(now);
       return;
+    }
     case PH_END:
       led_shadow_[0] = led_want_[0];
       result_held_ = false;
@@ -615,8 +715,11 @@ void As7265x::phase_done(uint32_t now) {
       return;
     }
     case PH_SAFE_OFF:
+      // b: CONFIG w, 3 x {DEV_SEL w, LED w, LED r}. ACKs alone do not prove the lamps off
+      // (a desynchronised byte stream is ACKed too): a lit read-back escalates to a soft reset.
+      if (led_readback_lit(b, 3, 3, 7)) { lamps_lit_ = true; on_failure(now, ERR_VERIFY); return; }
       for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = led_want_[d];
-      lamps_lit_ = false;
+      lamps_lit_ = lamp_armed_ = false;
       ind_on_ = false;
       state_ = ST_IDLE;
       phase_ = PH_NONE;
@@ -624,8 +727,8 @@ void As7265x::phase_done(uint32_t now) {
     case PH_SRST:
       // A soft reset returns LED_CONFIG to its defaults (both drivers off, Figure 32).
       for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = 0xFF;
-      lamps_lit_ = false;
-      srst_t_ = millis();
+      lamps_lit_ = lamp_armed_ = false;
+      srst_t_ = probe_t_ = millis();
       phase_ = PH_SRST_WAIT;
       return;
     default:
@@ -640,6 +743,9 @@ void As7265x::on_failure(uint32_t now, uint8_t err) {
   last_err_ = err;
   if (consec_fail_ < 255) ++consec_fail_;
   n_ops_ = op_i_ = sub_ = 0;
+  // The failed list may have written INTEGRATION (e.g. a BURST setup) before it ended:
+  // the shadow is no longer trusted and the next frame rewrites the register.
+  int_shadow_ = 0;
   const Phase failed = phase_;
   if (result_held_) {                                // only the indicator-off write failed:
     result_held_ = false;                            // the measurement itself is complete
@@ -661,7 +767,7 @@ void As7265x::on_failure(uint32_t now, uint8_t err) {
       return;
     case PH_SRST:                                    // wait and re-initialise; back off if it persists
       if (++srst_fails_ >= kSpecMaxConsecFails) { srst_fails_ = 0; enter_fault(now); return; }
-      srst_t_ = millis();
+      srst_t_ = probe_t_ = millis();
       phase_ = PH_SRST_WAIT;
       state_ = ST_RESET;
       return;
@@ -679,15 +785,16 @@ void As7265x::on_failure(uint32_t now, uint8_t err) {
 // Initialisation and recovery
 // =============================================================================
 void As7265x::start_init() {
-  if (resync_ && resync_vreg_ == kVConfig && (resync_data_ & kCfgSrst)) {
-    // The byte still owed to the chip completes a SOFT RESET: deliver it on its own and
-    // let the chip settle, or it would reset in the middle of the identification below.
-    state_ = ST_RESET;
-    ops_begin(PH_SRST);
+  if (resync_srst_) {
+    // A soft reset whose delivery is unknown: issue it again in full (resynchronisation
+    // byte, address, data) and let the chip settle, rather than identify a chip that may
+    // be about to reset - or resend a lone 0x80, which an idle chip takes as an address.
+    start_srst(millis());
     return;
   }
   state_ = ST_INIT;
-  for (uint8_t d = 0; d < kSpecDevices; ++d) led_shadow_[d] = 0xFF;   // unknown: rewrite
+  for (uint8_t d = 0; d < kSpecDevices; ++d)          // unknown: rewrite (keep "possibly lit")
+    if (led_shadow_[d] != kLedUnknown) led_shadow_[d] = 0xFF;
   int_shadow_ = 0;
   ops_begin(PH_INIT_ID);
   op_r(kVHwH);
@@ -706,6 +813,7 @@ void As7265x::start_srst(uint32_t now) {
   (void)now;
   reset_tried_ = true;
   in_recovery_ = true;
+  resync_srst_ = false;                              // issued now (set again if it fails)
   state_ = ST_RESET;
   ops_begin(PH_SRST);
   op_w(kVConfig, kCfgSrst);
@@ -713,13 +821,19 @@ void As7265x::start_srst(uint32_t now) {
 
 void As7265x::start_safe_off() {
   state_ = ST_BUSY;
+  int_shadow_ = 0;                                   // an aborted list may have written it
   ops_begin(PH_SAFE_OFF);
+  // CONFIG first: it ends a continuous burst, and its address byte 0x84 is the least
+  // harmful first byte should the chip ever be waiting for data unexpectedly (as CONFIG
+  // data it is a soft reset, as LED_CONFIG data it lights nothing) - unlike 0xCF (DEV_SEL
+  // write), which as CONFIG data would be SRST | FRST and as LED_CONFIG data a lit lamp.
+  op_w(kVConfig, config_value(exp_.gain_code, kBankOneShot));
   for (uint8_t d = 0; d < kSpecDevices; ++d) {       // all three, whatever DEV_SEL reported
     led_want_[d] = led_value(d, false, false);
     op_w(kVDevSel, d);
     op_w(kVLed, led_want_[d]);
+    op_r(kVLed);                                     // read back (phase_done PH_SAFE_OFF)
   }
-  op_w(kVConfig, config_value(exp_.gain_code, kBankOneShot));   // also ends a continuous burst
 }
 
 void As7265x::enter_fault(uint32_t now) {
@@ -727,13 +841,45 @@ void As7265x::enter_fault(uint32_t now) {
   state_ = ST_FAULT;
   phase_ = PH_NONE;
   if (lamps_lit_) {
-    // A lamp may still be lit: lamp safety outranks bus-noise backoff. Retry the soft
-    // reset (which switches every LED driver off) once per settling time.
+    // A lamp may still be lit: lamp safety outranks bus-noise backoff. Retry (probe, then
+    // soft reset or re-initialisation, both of which switch every LED driver off) once per
+    // settling time.
     retry_at_ = millis() + kSpecResetWaitMs;
     return;
   }
   retry_at_ = millis() + retry_ms_;
   retry_ms_ = retry_ms_ * 2u > kSpecRetryMaxMs ? kSpecRetryMaxMs : retry_ms_ * 2u;
+}
+
+// One FAULT retry. A chip that does not ACK its address cannot receive a soft reset, so it
+// is only probed (uncounted: no bus-error noise while it is unpowered or disconnected).
+// A chip that answers is alternately re-identified without a reset (a healthy chip that
+// merely booted slowly) and soft-reset first.
+bool As7265x::fault_retry(uint32_t now) {
+  if (!bus_->probe(kAddr)) {
+    enter_fault(now);                                // reschedule (lamp-safety cadence or backoff)
+    return false;
+  }
+  const bool init_only = fault_init_next_;
+  fault_init_next_ = !fault_init_next_;
+  if (!init_only) { start_srst(now); return true; }
+  reset_tried_ = true;                               // a failure returns to FAULT directly
+  start_init();                                      // writes every LED_CONFIG off as well
+  return true;
+}
+
+// True if a LED_CONFIG read-back in b (the k-th device listed in dev_list, ascending, at
+// b[first + k x stride]) still has LED_DRV enabled on a device DEV_SEL reports present.
+// An absent slave's read-back is not meaningful and is ignored.
+bool As7265x::led_readback_lit(const uint8_t* b, uint8_t first, uint8_t stride,
+                               uint8_t dev_list) const {
+  uint8_t idx = first;
+  for (uint8_t d = 0; d < kSpecDevices; ++d) {
+    if (!(dev_list & (1u << d))) continue;
+    if ((info_.dev_mask & (1u << d)) && (b[idx] & kLedDrvEn)) return true;
+    idx = (uint8_t)(idx + stride);
+  }
+  return false;
 }
 
 void As7265x::decode_devsel(uint8_t v) {
@@ -745,13 +891,16 @@ void As7265x::decode_devsel(uint8_t v) {
     if (!(info_.dev_mask & (1u << d))) info_.temp[d] = -128;
 }
 
-// Shadow says LED_DRV of device d is enabled (0xFF = unknown after a reset: drivers off).
+// Shadow says LED_DRV of device d may be enabled (0xFF = unknown after a reset: drivers
+// off; kLedUnknown = unknown after a failed write: possibly lit).
 bool As7265x::shadow_lit(uint8_t d) const {
+  if (led_shadow_[d] == kLedUnknown) return true;
   return led_shadow_[d] != 0xFF && (led_shadow_[d] & kLedDrvEn) != 0;
 }
 
 uint8_t As7265x::led_value(uint8_t dev, bool lamp_on, bool ind_on) const {
-  uint8_t v = (uint8_t)(((cfg_.led_cur >> (2u * dev)) & 3u) << 4);   // LED_DRV current code
+  // LED_DRV current code, capped at the lamp's rating (kSpecLedMaxCode) whatever cfg_ holds.
+  uint8_t v = (uint8_t)(spec_led_code(cfg_.led_cur, dev) << 4);
   if (lamp_on) v |= kLedDrvEn;
   if (dev == 0 && cfg_.ind > 0) {                    // indicator LED sits on the AS72651
     v |= (uint8_t)((cfg_.ind - 1u) << 1);            // 1/2/4/8 mA = codes 0..3
@@ -760,8 +909,13 @@ uint8_t As7265x::led_value(uint8_t dev, bool lamp_on, bool ind_on) const {
   return v;
 }
 
+// CONFIG.INT is always set, as the SparkFun library does on this board (begin() ends with
+// enableInterrupt(), SparkFun_AS7265X.cpp:66; Example3_Settings.ino marks it "Default"):
+// the datasheet describes DATA_RDY only "if interrupts are enabled" ("Interrupt
+// Operation"), so DATA_RDY polling uses the documented configuration whether or not the
+// INT line is wired (it is read only when int_pin_ >= 0).
 uint8_t As7265x::config_value(uint8_t gain, uint8_t bank) const {
-  return (uint8_t)((int_pin_ >= 0 ? kCfgInt : 0) | ((gain & 3u) << 4) | ((bank & 3u) << 2));
+  return (uint8_t)(kCfgInt | ((gain & 3u) << 4) | ((bank & 3u) << 2));
 }
 
 // =============================================================================
@@ -777,6 +931,10 @@ bool As7265x::frame_wants_lamps() const {
 }
 
 void As7265x::begin_frame(uint32_t now) {
+  if ((cfg_.mode == SPEC_LOCKIN || cfg_.mode == SPEC_FLUOR) && lamps_eff_ == 0) {
+    finish_no_lamp(now);                             // every lamp sits on an absent slave
+    return;
+  }
   frame_lamps_ = frame_wants_lamps() ? lamps_eff_ : 0;
   // Probe frames only steer the AGC: raw counts suffice, except in SURVEY where the
   // final probe becomes the measurement.
@@ -800,7 +958,7 @@ void As7265x::build_setup(uint32_t now) {
     led_want_[d] = led_shadow_[d];
     if (!(cycle_dev_ & (1u << d))) continue;
     led_want_[d] = led_value(d, on, ind_on_);
-    lit = lit || on;
+    if (on) { lit = true; lamps_used_ = (uint8_t)(lamps_used_ | (1u << d)); }
     if (led_want_[d] != led_shadow_[d]) { op_w(kVDevSel, d); op_w(kVLed, led_want_[d]); }
   }
   // BANK 3 write = trigger. INTEGRATION and CONFIG are written under whatever DEV_SEL the
@@ -809,8 +967,11 @@ void As7265x::build_setup(uint32_t now) {
   // apply to all three devices - VERIFY with T-SC-08 (a gain step moves all 18 channels).
   op_w(kVConfig, config_value(exp_.gain_code, kBankOneShot));
   if (lit) {
-    lamps_lit_ = true;
-    lamp_on_ms_ = millis();
+    lamps_lit_ = true;                               // conservative: from the list on
+    // The watchdog timer starts at the trigger (phase_done PH_SETUP), so that the rest of
+    // this list on a slow bus (reduced poll budget, long loop) does not eat into the
+    // exposure margin; every operation of the list is bounded by the handshake limits.
+    lamp_armed_ = false;
     const uint32_t conv = spec_conversion_ms(exp_.int_cycles, kBankOneShot);
     lamp_limit_ms_ = conv + conv / 32u + kSpecDrdyMarginMs + kSpecLampMarginMs;
   }
@@ -831,11 +992,14 @@ void As7265x::after_drdy(uint32_t now) {
     return;
   }
   ops_begin(PH_LAMPS_OFF);
+  off_list_ = 0;
   for (uint8_t d = 0; d < kSpecDevices; ++d) {
     if (!shadow_lit(d)) continue;
+    off_list_ = (uint8_t)(off_list_ | (1u << d));
     led_want_[d] = led_value(d, false, ind_on_);
     op_w(kVDevSel, d);
     op_w(kVLed, led_want_[d]);
+    op_r(kVLed);                                     // read back (phase_done PH_LAMPS_OFF)
   }
 }
 
@@ -894,9 +1058,9 @@ void As7265x::frame_done(uint32_t now) {
       keep_ = cur_;
       sat_acc_ |= sat;
       stage_ = STAGE_MAIN;
-      main_total_ = lamps_eff_ ? 2 : 1;
+      main_total_ = keep_.lamps ? 2 : 1;
       main_j_ = 1;
-      if (lamps_eff_) { begin_frame(now); return; }  // dark frame at the same exposure
+      if (keep_.lamps) { begin_frame(now); return; } // dark frame at the same exposure
       finish_cycle(now);
       return;
     }
@@ -933,7 +1097,8 @@ void As7265x::frame_done(uint32_t now) {
       if (main_j_ == 0) {
         keep_ = cur_;
         main_j_ = 1;
-        if (lamps_eff_) { begin_frame(now); return; }
+        if (keep_.lamps) { begin_frame(now); return; }   // its dark frame
+        main_total_ = 1;                             // lamp on an absent slave: passive
       }
       finish_cycle(now);
       return;
@@ -943,13 +1108,16 @@ void As7265x::frame_done(uint32_t now) {
 void As7265x::finish_cycle(uint32_t now) {
   SpecResult& r = result_;
   spec_result_clear(r);
+  // Lamps actually driven: commanded on (build_setup) on a device still present after this
+  // cycle's DEV_SEL read. A lamp on an absent slave is never reported as used.
+  const uint8_t used = (uint8_t)(lamps_used_ & cycle_dev_ & 7u);
   r.mode = cfg_.mode;
-  r.led_cur = cfg_.led_cur;
-  r.lamps = lamps_eff_;
+  r.led_cur = spec_led_cur_applied(cfg_.led_cur);
+  r.lamps = used;
   r.dev_mask = cycle_dev_;
   r.gain_code = exp_.gain_code;
   r.int_cycles = exp_.int_cycles;
-  uint8_t flags = (uint8_t)(SPEC_F_VALID | (lamps_eff_ << 1) | (agc_ ? SPEC_F_AGC : 0));
+  uint8_t flags = (uint8_t)(SPEC_F_VALID | (used << 1) | (agc_ ? SPEC_F_AGC : 0));
   uint32_t sat = sat_acc_;
   switch (cfg_.mode) {
     case SPEC_HDR: {
@@ -971,7 +1139,8 @@ void As7265x::finish_cycle(uint32_t now) {
       lock_.finish(model, r.spec, r.unc);
       memcpy(r.raw, on_raw_, sizeof r.raw);
       r.n_frames = lock_.count();
-      flags |= SPEC_F_ACTIVE;
+      if (used) flags |= SPEC_F_ACTIVE;
+      else flags &= (uint8_t)~SPEC_F_VALID;          // no lamp was driven: dark minus dark
       if (agc_) {                                    // start the next cycle nearer the target
         SpecExposure nx;
         spec_agc_step(exp_, cfg_.int_cycles, on_peak_, on_sat_ != 0, nx);
@@ -980,7 +1149,7 @@ void As7265x::finish_cycle(uint32_t now) {
       break;
     }
     default: {                                       // SURVEY: keep_ = ambient or lamp-on frame
-      const bool active = lamps_eff_ != 0;
+      const bool active = keep_.lamps != 0 && used != 0;
       for (uint8_t ch = 0; ch < kSpecChannels; ++ch) {
         const uint32_t bit = 1u << ch;
         r.raw[ch] = keep_.raw[ch];
@@ -1011,6 +1180,24 @@ void As7265x::finish_cycle(uint32_t now) {
   r.t_start_ms = t_start_;
   r.t_end_ms = millis();
   consec_fail_ = 0;
+  end_cycle(now);
+}
+
+// LOCKIN / FLUOR with no lamp on a present device: no difference can be formed, so the
+// cycle ends at once with an invalid result (no VALID, no ACTIVE) instead of reporting
+// dark minus dark as an own-lamp spectrum. Not a chip failure: no recovery follows.
+void As7265x::finish_no_lamp(uint32_t now) {
+  SpecResult& r = result_;
+  spec_result_clear(r);
+  r.mode = cfg_.mode;
+  r.led_cur = spec_led_cur_applied(cfg_.led_cur);
+  r.dev_mask = cycle_dev_;
+  r.gain_code = exp_.gain_code;
+  r.int_cycles = exp_.int_cycles;
+  r.flags = agc_ ? SPEC_F_AGC : 0;
+  r.t_start_ms = t_start_;
+  r.t_end_ms = millis();
+  last_err_ = ERR_NO_LAMP;
   end_cycle(now);
 }
 
@@ -1065,11 +1252,13 @@ void As7265x::burst_sample_done() {
       const uint8_t ch = kSpecSlotChannel[d][k];
       const uint16_t v = (uint16_t)(((uint16_t)rd_[idx] << 8) | rd_[idx + 1u]);
       idx = (uint8_t)(idx + 2u);
-      s.raw[ch] = v;
+      s.raw[ch] = spec_burst_raw(v);                 // 65535 -> 0xFFFE (0xFFFF = not converted)
       burst_sum_[ch] += v;
       if (v >= thr) burst_sat_ |= 1u << ch;
     }
   }
+  const uint32_t rd_ms = since(millis(), burst_sample_ms_);   // DATA_RDY seen -> data read
+  if (rd_ms > burst_read_max_) burst_read_max_ = (uint16_t)(rd_ms > 65535u ? 65535u : rd_ms);
   if (burst_n_ == 0) burst_t0_ms_ = burst_sample_ms_;
   const uint32_t dt = burst_sample_ms_ - burst_t0_ms_;
   s.dt_ms = (uint16_t)(dt > 65535u ? 65535u : dt);
@@ -1091,12 +1280,13 @@ void As7265x::finish_burst(uint32_t now) {
   r.mode = SPEC_BURST;
   r.gain_code = burst_exp_.gain_code;
   r.int_cycles = burst_exp_.int_cycles;
-  r.led_cur = cfg_.led_cur;
+  r.led_cur = spec_led_cur_applied(cfg_.led_cur);
   r.dev_mask = cycle_dev_;
   r.n_frames = (uint8_t)(burst_n_ > 255 ? 255 : burst_n_);
   r.burst_samples = burst_n_;
   r.burst_rate_dhz = burst_rate_dhz();
   r.burst_dropped = burst_drop_;
+  r.burst_read_max_ms = burst_read_max_;
   uint32_t conv = 0;                                 // channels converted in this BANK mode
   for (uint8_t d = 0; d < kSpecDevices; ++d) {
     if (!(cycle_dev_ & (1u << d))) continue;
@@ -1111,7 +1301,7 @@ void As7265x::finish_burst(uint32_t now) {
   r.sat_mask = burst_sat_ & conv;
   r.flags = (uint8_t)((burst_n_ ? SPEC_F_VALID : 0) | (cfg_.gain == kSpecGainAuto ? SPEC_F_AGC : 0) |
                       (r.sat_mask ? SPEC_F_SAT : 0));
-  for (uint8_t d = 0; d < kSpecDevices; ++d)
+  for (uint8_t d = 0; d < kSpecDevices; ++d)          // read by the PH_BURST_STOP list
     r.temp[d] = (cycle_dev_ & (1u << d)) ? info_.temp[d] : (int8_t)-128;
   r.t_start_ms = t_start_;
   r.t_end_ms = millis();

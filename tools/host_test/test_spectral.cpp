@@ -96,7 +96,9 @@ SpecFrame make_frame(uint8_t g, uint8_t c, const double* rate, double uw_per_cou
   for (int i = 0; i < kSpecChannels; ++i) {
     const double counts = rate[i] * spec_gain_factor(g) * (c + 1.0);
     f.raw[i] = (uint16_t)(counts >= fs ? fs : counts);
-    // the chip reports irradiance independent of gain/time: cal = counts / (gain x time) x k
+    // MODEL ASSUMPTION (not a datasheet fact): calibrated output independent of gain/time,
+    // cal = counts / (gain x time) x k. The datasheet calibrates at 16x / 166 ms only and
+    // warns other conditions may need recalibration - VERIFY with T-SC-08 (spectral.h).
     f.cal[i] = (float)(f.raw[i] / (spec_gain_factor(g) * (c + 1.0)) * uw_per_count);
   }
   return f;
@@ -233,6 +235,12 @@ HOST_TEST(spectral_hdr) {
   for (int i = 1; i < n; ++i)
     up = up && spec_exposure_rel(b[i]) > spec_exposure_rel(b[i - 1]);
   CHECK(up, "HDR bracket n=4: four distinct exposures, shortest first");
+  // An even bracket straddles its centre: the SpecResult int_cycles of an HDR cycle (the
+  // centre) is then not one of the exposures taken - documented in spectral.h.
+  n = spec_hdr_bracket(SpecExposure{2, 59}, 2, b);
+  bool centre_taken = false;
+  for (int i = 0; i < n; ++i) centre_taken = centre_taken || (b[i].gain_code == 2 && b[i].int_cycles == 59);
+  CHECK(n == 2 && !centre_taken, "HDR bracket n=2 around 16x/59: the centre itself is not taken");
 
   // Three exposures of one scene: channel 0 very bright, 1 dim, 2 saturates everywhere.
   double rate[kSpecChannels];
@@ -470,6 +478,155 @@ HOST_TEST(spectral_boresight) {
         "boresight from TRIAD (conjugated): yaw 30 deg -> az 30");
 }
 
+HOST_TEST(spectral_lamp_limits) {
+  // Board vendor's limits (SparkFun AS7265x library 1.0.5, Example3_Settings.ino lines 65-81):
+  // white LED max 120 mA (all codes), IR LED max 65 mA (100 mA not allowed), UV LED max
+  // 30 mA (25 / 50 / 100 mA not allowed).
+  CHECK(kSpecLedMaxCode[0] == 3 && kSpecLedMaxCode[1] == 2 && kSpecLedMaxCode[2] == 0,
+        "lamp limits: white up to 100 mA, IR up to 50 mA, UV 12.5 mA only (codes 3 / 2 / 0)");
+  SpecConfig c;
+  const uint8_t bad[] = {0x10, 0x20, 0x30, 0x0C, 0x3F, 0x1B};
+  bool rejected = true;
+  for (uint8_t v : bad) { c.led_cur = v; rejected = rejected && !spec_config_valid(c); }
+  CHECK(rejected, "SPECCFG led_cur: UV 25/50/100 mA (0x10/0x20/0x30), IR 100 mA (0x0C) rejected");
+  const uint8_t good[] = {0x00, 0x03, 0x08, 0x0B};
+  bool accepted = true;
+  for (uint8_t v : good) { c.led_cur = v; accepted = accepted && spec_config_valid(c); }
+  CHECK(accepted, "SPECCFG led_cur: 0x00, 0x03 (white 100 mA), 0x08 (IR 50 mA), 0x0B accepted");
+  c = SpecConfig(); c.mode = SPEC_FLUOR; c.n = 1; c.led_cur = 0x30;
+  CHECK(!spec_config_valid(c), "FLUOR (UV lamp forced) with UV 100 mA rejected");
+  // Second layer, used for every LED_CONFIG value the driver writes: clamped whatever led_cur holds.
+  bool clamped = true;
+  for (int v = 0; v < 256; ++v)
+    for (uint8_t d = 0; d < kSpecDevices; ++d) {
+      const int code = (v >> (2 * d)) & 3;
+      const int want = code < kSpecLedMaxCode[d] ? code : kSpecLedMaxCode[d];
+      clamped = clamped && spec_led_code((uint8_t)v, d) == want;
+    }
+  CHECK(clamped && spec_led_code(0xFF, kSpecDevices) == 0, "spec_led_code: every device's code capped at its lamp limit");
+  CHECK(spec_led_cur_applied(0x3F) == 0x0B && spec_led_cur_applied(0x0B) == 0x0B &&
+            spec_led_cur_applied(0x31) == 0x01, "applied led_cur: 0x3F -> 0x0B, 0x31 -> 0x01");
+  // Lamp bit d is device d's LED_DRV: the driver masks lamps with the DEV_SEL device mask.
+  CHECK(SPEC_LAMP_WHITE == 1 && SPEC_LAMP_IR == 2 && SPEC_LAMP_UV == 4, "lamp bit d = LED_DRV of device d");
+}
+
+namespace {
+// The AS72651's virtual-register protocol state as the datasheet describes it ("I2C Virtual
+// Register Write Access": bit 7 of an address byte marks a pending write, the next byte is
+// its data; bit 7 clear is a read request). Records every register write.
+struct VregSlave {
+  int pending = -1;                                   // register awaiting its data byte
+  int writes = 0, bad_writes = 0, reads = 0;
+  int value[128];
+  VregSlave() { for (int& v : value) v = -1; }
+  void byte(uint8_t b) {
+    if (pending >= 0) {
+      ++writes;
+      if (!spec_vreg_write_allowed((uint8_t)pending, b)) ++bad_writes;
+      value[pending] = b;
+      pending = -1;
+    } else if (b & 0x80) {
+      pending = b & 0x7F;
+    } else {
+      ++reads;
+    }
+  }
+  void write(uint8_t reg, uint8_t data) { byte((uint8_t)(reg | 0x80)); byte(data); }
+};
+}  // namespace
+
+HOST_TEST(spectral_vreg_protocol) {
+  bool refused = true;
+  for (int v = 0; v < 256; ++v) {
+    for (int a = 0x48; a <= 0x4B; ++a) refused = refused && !spec_vreg_write_allowed((uint8_t)a, (uint8_t)v);
+    for (int a = 0x50; a <= 0x53; ++a) refused = refused && !spec_vreg_write_allowed((uint8_t)a, (uint8_t)v);
+    refused = refused && !spec_vreg_write_allowed(0x55, (uint8_t)v);
+    if (v & kSpecCfgFrst) refused = refused && !spec_vreg_write_allowed(kSpecVConfig, (uint8_t)v);
+  }
+  CHECK(refused, "write policy: FW update 0x48-0x4B, COEF_DATA 0x50-0x53, COEF_WRITE 0x55, CONFIG.FRST refused");
+  CHECK(!spec_vreg_write_allowed(kSpecVInteg, 0) && !spec_vreg_write_allowed(kSpecVLed, 0x80) &&
+            !spec_vreg_write_allowed(kSpecVDevSel, 3) && spec_vreg_write_allowed(kSpecVInteg, 255),
+        "write policy: INTEGRATION 0, LED_CONFIG b7, DEV_SEL 3 refused; INTEGRATION 255 allowed");
+
+  // After a virtual write whose outcome is unknown the slave is idle or waits for that
+  // register's data byte. The resync byte must be harmless in both states and leave it idle.
+  const uint8_t regs[] = {kSpecVFwH, kSpecVFwL, kSpecVConfig, kSpecVInteg, kSpecVLed, kSpecVDevSel,
+                          kSpecVCoefRead};
+  bool ok = true;
+  for (uint8_t v : regs) {
+    const uint8_t b = spec_vreg_resync_byte(v);
+    ok = ok && !(b & 0x80) && spec_vreg_write_allowed(v, b);
+    if (v == kSpecVLed) ok = ok && !(b & (kSpecLedDrvEn | kSpecLedIndEn));   // lights nothing
+    VregSlave waiting;
+    waiting.pending = v;
+    waiting.byte(b);
+    VregSlave idle;
+    idle.byte(b);
+    ok = ok && waiting.pending < 0 && waiting.writes == 1 && waiting.bad_writes == 0 && idle.pending < 0 &&
+         idle.writes == 0 && idle.reads == 1;
+  }
+  CHECK(ok, "resync byte: bit 7 clear, legal for its register, lights nothing; slave idle in both states");
+
+  // Regression AS-PROT-1 / AS-T2: the former recovery resent the "owed" data byte. If the
+  // slave had latched it after all, INTEGRATION 0xD5 became a write address of COEF_WRITE
+  // (0x55) and the safe-off list's first byte 0xCF its data (persistent calibration memory).
+  VregSlave old_scheme;
+  old_scheme.byte(0xD5);
+  old_scheme.write(kSpecVDevSel, 0);
+  CHECK(old_scheme.bad_writes == 1 && old_scheme.value[0x55] == 0xCF,
+        "former scheme reproduced: owed 0xD5 to an idle slave -> COEF_WRITE <- 0xCF");
+  // The resync byte does not depend on the value: INTEGRATION 0x80..0xFF are all safe.
+  const uint8_t integ_resync = spec_vreg_resync_byte(kSpecVInteg);
+  bool all_integ = true;
+  for (int integ = 1; integ < 256; ++integ) {
+    for (int latched = 0; latched <= 1; ++latched) {
+      VregSlave s;
+      s.byte((uint8_t)(0x80 | kSpecVInteg));                 // address delivered
+      if (latched) s.byte((uint8_t)integ);                   // data latched, failure reported
+      s.byte(integ_resync);                                  // next list: resync byte first
+      s.write(kSpecVConfig, 0x6C);                           // then the safe-off list
+      s.write(kSpecVDevSel, 0);
+      s.write(kSpecVLed, 0x00);
+      all_integ = all_integ && s.bad_writes == 0 && s.pending < 0 && s.value[kSpecVConfig] == 0x6C &&
+                  s.value[kSpecVDevSel] == 0 && s.value[kSpecVLed] == 0x00;
+    }
+  }
+  CHECK(all_integ, "resync after INTEGRATION 1..255, data latched or not: safe-off bytes land as intended");
+  // Regression AS-PROT-3 / AS-T1: a latched address byte (CONFIG 0x84 or LED_CONFIG 0x87)
+  // whose write was reported failed. The former safe-off list began with 0xCF, which became
+  // CONFIG data SRST | INT | BANK 3 | FRST, or LED_CONFIG data with LED_DRV enabled.
+  VregSlave old_cfg;
+  old_cfg.byte((uint8_t)(0x80 | kSpecVConfig));
+  old_cfg.write(kSpecVDevSel, 0);
+  VregSlave old_led;
+  old_led.byte((uint8_t)(0x80 | kSpecVLed));
+  old_led.write(kSpecVDevSel, 0);
+  CHECK(old_cfg.bad_writes == 1 && old_cfg.value[kSpecVConfig] == 0xCF && old_led.value[kSpecVLed] == 0xCF,
+        "former scheme reproduced: 0xCF taken as CONFIG data (refused: FRST) / LED_CONFIG data (lamp on)");
+  bool addr_ok = true;
+  for (uint8_t v : regs) {
+    for (int latched = 0; latched <= 1; ++latched) {
+      VregSlave s;
+      if (latched) s.byte((uint8_t)(0x80 | v));             // address latched, failure reported
+      s.byte(spec_vreg_resync_byte(v));
+      s.write(kSpecVConfig, 0x6C);
+      s.write(kSpecVDevSel, 0);
+      s.write(kSpecVLed, 0x00);
+      addr_ok = addr_ok && s.bad_writes == 0 && s.pending < 0 && s.value[kSpecVConfig] == 0x6C &&
+                s.value[kSpecVDevSel] == 0 && s.value[kSpecVLed] == 0x00;
+    }
+  }
+  CHECK(addr_ok, "resync after a write address of any register, latched or not: no stray data, lamp off");
+
+  // SPECBURST raw code (AS-DP-07): 0xFFFF is reserved for "not converted".
+  CHECK(spec_burst_raw(0xFFFF) == 0xFFFE && spec_burst_raw(0xFFFE) == 0xFFFE && spec_burst_raw(1234) == 1234 &&
+            spec_burst_raw(0) == 0, "SPECBURST raw: a real count of 65535 is sent as 0xFFFE");
+  uint16_t raw[kSpecChannels] = {0};
+  raw[0] = spec_burst_raw(0xFFFF);
+  CHECK(spec_saturation_mask(raw, 63, kSpecAllChannels) == 1u,
+        "SPECBURST raw 0xFFFE at full scale 65535 (int_cycles >= 63) counts as saturated");
+}
+
 HOST_TEST(spectral_config_and_packets) {
   SpecConfig c;
   CHECK(spec_config_valid(c), "default SpecConfig valid (SURVEY, AGC, 166.8 ms)");
@@ -497,11 +654,13 @@ HOST_TEST(spectral_config_and_packets) {
   const bool l8 = spec_config_valid(c);
   c.lamps = 7; c.led_cur = 64;
   const bool c64 = spec_config_valid(c);
-  c.led_cur = 63; c.ind = 5;
+  c.led_cur = 0x0B; c.ind = 5;
   const bool i5 = spec_config_valid(c);
-  c.ind = 4; c.mode = 5;
-  CHECK(!g4 && !i0 && !l8 && !c64 && !i5 && !spec_config_valid(c),
-        "SPECCFG ranges: gain 0..3|255, cycles 1..255, lamps 0..7, led_cur 0..63, ind 0..4, mode 0..4");
+  c.ind = 4;
+  const bool ok4 = spec_config_valid(c);
+  c.mode = 5;
+  CHECK(!g4 && !i0 && !l8 && !c64 && !i5 && ok4 && !spec_config_valid(c),
+        "SPECCFG ranges: gain 0..3|255, cycles 1..255, lamps 0..7, led_cur <= 63, ind 0..4, mode 0..4");
   c = SpecConfig(); c.mode = SPEC_FLUOR; c.lamps = SPEC_LAMP_WHITE;
   CHECK(spec_effective_lamps(c) == SPEC_LAMP_UV, "FLUOR forces the UV lamp");
   c.mode = SPEC_HDR; c.lamps = 7;
@@ -512,7 +671,7 @@ HOST_TEST(spectral_config_and_packets) {
   spec_result_clear(r);
   r.mode = SPEC_LOCKIN;
   r.flags = SPEC_F_VALID | SPEC_F_WHITE | SPEC_F_AGC | SPEC_F_ACTIVE | SPEC_F_SAT;
-  r.gain_code = 2; r.int_cycles = 59; r.led_cur = 0x39; r.n_frames = 8; r.lamps = SPEC_LAMP_WHITE;
+  r.gain_code = 2; r.int_cycles = 59; r.led_cur = 0x0B; r.n_frames = 8; r.lamps = SPEC_LAMP_WHITE;
   r.sat_mask = (1u << 3) | (1u << 17);
   r.valid_mask = kSpecAllChannels & ~(1u << 9);
   for (int i = 0; i < kSpecChannels; ++i) {
@@ -536,7 +695,7 @@ HOST_TEST(spectral_config_and_packets) {
   CHECK(pack_spec_v31(v, pkt, kSpecV31Len - 1) == 0 && pack_spec_v31(v, nullptr, 200) == 0,
         "SPEC v3.1: short or null buffer -> 0, nothing written");
   CHECK(pkt[0] == SPEC_LOCKIN && pkt[1] == (r.flags | SPEC_F_ATTITUDE) && pkt[2] == 2 && pkt[3] == 59 &&
-            pkt[4] == 0x39 && pkt[5] == 8, "SPEC v3.1 header octets (mode, flags + attitude, exposure)");
+            pkt[4] == 0x0B && pkt[5] == 8, "SPEC v3.1 header octets (mode, flags + attitude, exposure)");
   CHECK(pkt[6] == 0x00 && pkt[7] == 0x02 && pkt[8] == 0x00 && pkt[9] == 0x08, "sat_mask big-endian at 6..9");
   CHECK(pkt[10] == 0 && pkt[11] == 0 && pkt[28] == 0xFF && pkt[29] == 0xFF && pkt[82] == 0 && pkt[83] == 7,
         "spec_log at 10 (0 -> 0x0000, NaN -> 0xFFFF at 410/645 nm), raw at 82");
