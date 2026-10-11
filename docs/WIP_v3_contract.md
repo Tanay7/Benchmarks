@@ -810,3 +810,73 @@ appears in the reference, so the doc cannot drift. Also offer in docs (FAQ) the 
 facts given in chat: expected range per scenario (link budget assumptions; 35 dBi antenna claim not physical: ~17 m dish
 at 433 MHz), SF/profile selection (8 profiles, AIRRATE command, E22 has no SF control), where signal processing happens,
 UNO Q Linux-side (EGSE) workload, coding standard summary, CI, regulatory note (433 MHz power/encryption).
+
+## 32 Repository renamed by the owner (2026-10-11): Tanay7/Benchmarks -> Tanay7/vgq1-deep-space-link
+Same repository (history, branch claude/wonderful-hamilton-dzjfby, PR #1 carried over). Local working copy stays at
+/home/user/Benchmarks with origin = https://github.com/Tanay7/vgq1-deep-space-link. Phase D: every doc/README/link that
+names the repository uses the new name (grep for "Benchmarks").
+
+## 33. Radio model selection without code edits (user request 2026-10-11)
+- Requirement: switching between E22-400T33D and the preserved E22-400T37S must need NO source edit.
+- Flight: VGQ_RADIO stays the compile-time default, but the E22 build reads a strap pin at boot:
+  a spare header pin (proposed A0, INPUT_PULLUP; verify against ABX00162 before fixing it) jumpered
+  to GND = E22-400T37S, open = E22-400T33D. Both share the E22 UART register protocol, so one
+  binary serves both. Selected model goes in the RF packet radio_model field (contract 3.2)
+  and an EVR at boot. T37S implies: power code ignored (always 37 dBm), 50 % TX duty limit,
+  FF FF FF 0x fault log decoded, REG1 = 0x24.
+- Ground: station.toml [radio] model = "E22-400T33D" | "E22-400T37S" | "SX126x" (config, not code);
+  if absent, the ground follows the radio_model the spacecraft reports. Station sketch is
+  model-agnostic for both E22s.
+- SX126x (SPI) remains a build switch: a different wiring, not a strap.
+- Docs: a "Switching to the 5 W E22-400T37S" section (jumper, PSU, M0/M1 pull-ups, TBH-02 caps, licence).
+- Schedule: implemented in WS6b (after G1), tested in host_test (strap -> model) and ground pytest.
+
+## 34. Phase C review scale (user, 2026-10-11)
+- User agreed to a larger read-only reviewer panel in Phase C (about 15-20 reviewers, distinct lenses:
+  protocol/CCSDS, memory safety, radio driver, SDLS/security, sensors, ground UI, docs vs code). Findings
+  are adversarially verified before any fix; fixes are applied serially with the full gates.
+
+## 35. Knowledge capture (user, 2026-10-11)
+- Phase D adds docs/12_Design_Decisions.md: every decision (choice, alternatives, reason, source/test).
+- Fold the chat explanations into docs: radio transport path, SDLS in plain words, Rice, the test layers,
+  range/SF/power FAQ, CV-neutral project summary. Goal: any future session answers from the repo alone.
+
+## 36. Additional documentation sections (CONFIRMED by the user 2026-10-11: Tier 1 and Tier 2 are both required in Phase D)
+Tier 1: Glossary & acronyms; Configuration reference (every config.h define / station.toml key: default,
+range, must-match pairs); Troubleshooting fault tree + EVR/alarm operator-response catalogue; Known
+limitations & open-items register (all VERIFY tags, hardware-unverified items); Developer guide (code map,
+"add a sensor/packet/command end to end" touch-point checklist, coding standard, local test commands);
+Security model & recovery (threat model, key compromise, counter-file backup: sdls_sn.txt / boot counter
+loss = nonce risk, re-flash, E22 register factory reset); Hardware test record templates (range,
+RSSI vs distance, power draw, magcal) - the measured numbers for the CV.
+Tier 2: BOM with part numbers/cost; power budget & PSU sizing (T37S 5 W); resource budgets (flash/RAM/
+stack/loop timing, link capacity per mode); data products guide (archive layout, TDM, XTCE, loading in
+Python); build/release/packaging + RadioLib update procedure; Mermaid diagrams (architecture, data flow,
+mode state machine, COP-1); CHANGELOG; one-page project summary.
+Also: docs/11 §3 "why not RadioLib" is obsolete (v3 uses the patched bundled RadioLib) - rewrite.
+
+## 37. Web UI Reference: highly detailed (user, 2026-10-11) - extends §31
+The Phase D "Ground Station Web UI Reference" (docs/13_Web_UI_Reference.md) is a full explainer, not a table dump.
+Per tab: a plain-language introduction (what the tab is for, when to look at it, a screenshot-free layout sketch).
+Per metric (every one, incl. all 43 HK and 24 RF fields): name as shown | snapshot key | unit and displayed
+resolution | exact source (which receiver measurement, packet + field + scaling, or computation) | formula with
+symbols defined (e.g. FSPL = 20log10(d_km) + 20log10(f_MHz) + 32.44; margin; C/N0; SEM; Doppler -> range-rate) |
+update rate / window | typical, good, marginal and bad ranges for THIS hardware (E22-400T33D, T37S, SX126x profiles) |
+how to interpret it | what to do when it is abnormal (cross-reference the event/alarm catalogue) | related metrics |
+a worked numeric example. Plus: display conventions, the statistics windows explained (mean/SEM/min/max/std/
+percentiles, why 4 dp), estimate vs measured badges, alarm logic tables, the /metrics endpoint, and a
+"reading the RECEIVER tab during a range test" walkthrough. Every number and formula is checked against the
+final code (gds.py snapshot/science_snapshot, rxstats.py, link.py, dashboard.html); the drift test of §31 applies.
+
+## 38. RESUME STATE (written 2026-10-11 17:50 UTC, before a usage-limit pause)
+Pushed on claude/wonderful-hamilton-dzjfby: f0ff5e8 (G1 RadioLib), a90e7e7 (WS1-WS4), 02c273a (WS6a); CI green on f0ff5e8.
+PR #1 was merged into main by the owner (4554bff); the branch was restarted from main; a new PR only if asked.
+In flight at the pause (uncommitted, half-written possible): WS5 web UI (web.py, dashboard.html, station_io python,
+app.yaml, test_web.py) and WS6b (F-40 RS rescue, F-55/56/57/62, F-65 CI flight build, PB-6.4 annunciator, RL
+handoffs, §33 strap-selected E22 model: flight config.h/e22.*/radio.*/sx126x.*/flight.*, ground link/config/gds/
+station.toml/sx126x.py, station sketch, check_firmware.sh, ci.yml, .gitignore, tools/host_test/test_radio_model.cpp).
+On resume: read each in-progress file fully, keep correct partial edits, finish, then gate each set in a clean worktree
+(host tests strict + ASan/UBSan, check_firmware, ground pytest 3.13 + 3.11, real builds via realbuild/bin/acompile.sh
+unoq/ventunoq main + rel100, actionlint for ci.yml) and commit/push; then screenshots of all v3 tabs (scratchpad/shot/
+shot.js, zero page errors), gate B4, Phase C (15-20 read-only reviewers, adversarial verify, serial fixes), Phase D
+(§31, §35, §36, §37 docs; App Lab zips via tools/package_apps.py; remove docs/WIP_*; final token/time report).
