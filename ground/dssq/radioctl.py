@@ -1,45 +1,75 @@
-"""Ground radio control through the Radio Control Unit (RCU).
+"""Ground radio control: configuration, RF survey and Wake-on-Radio procedures.
 
-The E22-400TBH-02 board's USB port carries only TXD/RXD. With its M0/M1 jumpers
-removed and those pins driven by the VENTUNO Q MCU (front-panel sketch, which also
-reads AUX), the GDS gains full software control of the ground E22:
+Two control paths behind one API (RadioManager), selected by the radio backend:
 
-  * configuration read-back / volatile writes (C1 / C2) — verifies the station
-  * RF spectrum survey: step channels, read the ambient-noise register
-  * Wake-on-Radio transmission (WOR-transmitter role, long preamble) to wake a
-    hibernating spacecraft
-  * the ground half of coordinated air-rate / channel changes
+  E22 UART models (E22-400T33D default, E22-400T37S) - through the Radio Control Unit:
+    the VENTUNO Q MCU drives the module's M0/M1 pins and reads AUX (station_io sketch,
+    RPC rcu_mode), so the GDS can enter CONFIG mode for register read-back and
+    volatile (C2) writes, read the ambient-noise register, and use the module's WOR
+    transmitter role. Model differences: the T33D's REG1 b4..b2 are reserved and are
+    never written 1 (e22.sanitize_reg1); power codes mean different dBm per model.
+  SX126x (packet backend radio/sx126x.py) - through the Router Bridge RPCs rf_cfg /
+    rf_noise / rf_wake of the same MCU, which owns the SPI radio; no M0/M1 pins.
 
-All procedures run in the GDS main thread (they briefly take the radio out of
-NORMAL mode, so they are scheduled right after a frame has been received).
+  * configuration read-back - verifies the station against station.toml
+  * RF spectrum survey - step channels, sample the noise floor on each
+  * wake-up transmission - long-preamble wake-up of a hibernating spacecraft (E22 WOR
+    transmitter role; SX126x 32-symbol preamble via rf_wake)
+  * the ground half of coordinated air-rate / channel / power changes
+
+All procedures run in the GDS radio thread; they briefly take the radio off the
+operational channel (the station is deaf meanwhile), so the GDS schedules them right
+after a frame has been received.
 """
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
-from .radio.e22 import describe
+from .link import CHANNEL_MAX, SX126X, RadioModel, get_model
+from .radio.e22 import NOISE_QUERY, describe, sanitize_reg1
 
 NORMAL, WOR, CONFIG, SLEEP = 0, 1, 2, 3
+MODE_SETTLE_S = 0.05                   # E22: >= 2 ms after a mode change, plus AUX settle
+CHANNEL_SETTLE_S = 0.06                # receiver settles on the new channel before a noise sample
+WOR_TAIL_S = 1.0                       # payload time after the WOR preamble (E22 manual 6.3)
+SX_APPLIED = 1                         # rf_cfg result: configuration applied immediately
 
 
 class RadioManager:
-    def __init__(self, radio, rcu, clock=time.time, sleep=time.sleep):
+    """Model-aware ground radio procedures. `radio` is the GDS radio backend;
+    `rcu` an object with set_mode(int) -> bool (VENTUNO Q MCU or simulator), None
+    for packet backends. `model` defaults to the backend's model (SX126x for a packet
+    backend, else the default E22 model)."""
+
+    def __init__(self, radio, rcu, clock: Callable[[], float] = time.time,
+                 sleep: Callable[[float], None] = time.sleep, model: str | RadioModel | None = None):
         self.radio = radio
-        self.rcu = rcu                   # object with set_mode(int)->bool (VENTUNO Q MCU or simulator)
+        self.rcu = rcu
         self.clock = clock
         self.sleep = sleep
+        self.packet = bool(getattr(radio, "packet_mode", False))
+        self.model = get_model(model if model is not None else (SX126X if self.packet else None))
+        if self.packet != self.model.packet_mode:
+            raise ValueError(f"radio backend does not match model {self.model.name}")
         self.regs: bytes | None = None
         self.last_scan: dict | None = None
         self.log: list[str] = []
 
     @property
     def available(self) -> bool:
+        if self.packet:
+            return bool(getattr(self.radio, "connected", False))
         return self.rcu is not None
+
+    def _note(self, text: str) -> None:
+        self.log.append(text)
+        del self.log[:-100]                                  # bounded history
 
     # ------------------------------------------------------------- primitives
     def _mode(self, m: int) -> bool:
-        ok = self.rcu.set_mode(m)
-        self.sleep(0.05)                 # EBYTE: >= 2 ms after a mode change; AUX settle
+        ok = bool(self.rcu.set_mode(m))
+        self.sleep(MODE_SETTLE_S)
         return ok
 
     def _wait(self, prefix: bytes, n: int, timeout: float = 1.0) -> bytes | None:
@@ -53,20 +83,40 @@ class RadioManager:
         return None
 
     def read_config(self) -> dict | None:
-        if not self.available or not self._mode(CONFIG):
+        if not self.available:
+            return None
+        if self.packet:
+            cfg = self.radio.get_config()
+            if cfg is None:
+                self._note("ground SX126x: no status from the station MCU")
+            return cfg
+        if not self._mode(CONFIG):
+            self._mode(NORMAL)                               # never leave the radio half-switched
             return None
         self.radio.write(bytes([0xC1, 0x00, 0x09]))
         r = self._wait(bytes([0xC1, 0x00, 0x09]), 12)
         self._mode(NORMAL)
         if r is None:
-            self.log.append("ground E22 config read: no reply")
+            self._note("ground E22 config read: no reply")
             return None
         self.regs = r[3:]
-        return describe(self.regs)
+        return describe(self.regs, self.model)
 
     def write_regs(self, start: int, values: bytes) -> bool:
-        """Volatile register write (C2) with echo check, back to NORMAL mode."""
-        if not self.available or not self._mode(CONFIG):
+        """E22 volatile register write (C2) with echo check, back to NORMAL mode."""
+        if self.packet:
+            self._note("write_regs: the SX126x has no E22 register set")
+            return False
+        if not 0 <= start <= 8 or not values or start + len(values) > 9:
+            raise ValueError(f"register range {start}+{len(values)} outside 00..08")
+        if start <= 4 < start + len(values):                 # REG1: never set reserved bits
+            v = bytearray(values)
+            v[4 - start] = sanitize_reg1(v[4 - start], self.model)
+            values = bytes(v)
+        if not self.available:
+            return False
+        if not self._mode(CONFIG):
+            self._mode(NORMAL)                               # never leave the radio half-switched
             return False
         self.radio.write(bytes([0xC2, start, len(values)]) + values)
         r = self._wait(bytes([0xC1, start, len(values)]), 3 + len(values))
@@ -78,55 +128,93 @@ class RadioManager:
             self.regs = bytes(regs)
         return ok
 
+    def _sx_configure(self, **kw: int) -> bool:
+        if not self.available:
+            return False
+        return self.radio.configure(**kw) == SX_APPLIED
+
     def set_channel(self, ch: int) -> bool:
+        if not 0 <= ch <= CHANNEL_MAX:
+            raise ValueError(f"channel {ch} outside 0..{CHANNEL_MAX}")
+        if self.packet:
+            return self._sx_configure(channel=ch)
         return self.write_regs(0x05, bytes([ch]))
 
     def set_air_rate(self, code: int) -> bool:
+        if not 0 <= code <= 7:
+            raise ValueError(f"rate code {code} outside 0..7")
+        if self.packet:
+            return self._sx_configure(rate_code=code)
         if self.regs is None and self.read_config() is None:
             return False
-        reg0 = (self.regs[3] & ~0x07) | (code & 7)
+        reg0 = (self.regs[3] & ~0x07) | code
         return self.write_regs(0x03, bytes([reg0]))
 
-    def noise_dbm(self) -> int | None:
-        self.radio.write(bytes([0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02]))
+    def set_power(self, code: int) -> bool:
+        """Ground transmit power code 0..3 (meaning per model, link.power_dbm)."""
+        if not 0 <= code <= 3:
+            raise ValueError(f"power code {code} outside 0..3")
+        if self.packet:
+            return self._sx_configure(power_code=code)
+        if self.regs is None and self.read_config() is None:
+            return False
+        reg1 = (self.regs[4] & ~0x03) | code
+        return self.write_regs(0x04, bytes([reg1]))
+
+    def noise_dbm(self) -> float | None:
+        """Ambient noise on the current channel (E22 register / SX126x RSSI median)."""
+        if self.packet:
+            return self.radio.noise_dbm() if self.available else None
+        self.radio.write(NOISE_QUERY)
         r = self._wait(bytes([0xC1, 0x00, 0x02]), 5, 0.5)
         return None if r is None else -(256 - r[3])
 
     # ------------------------------------------------------------ procedures
     def survey(self, first: int, last: int) -> dict | None:
-        """Ground RF survey: ambient noise on each channel (the station is deaf meanwhile)."""
+        """Ground RF survey: noise floor on each channel (the station is deaf meanwhile)."""
+        if not 0 <= first <= last <= CHANNEL_MAX:
+            raise ValueError(f"survey range {first}..{last} outside 0..{CHANNEL_MAX}")
         if not self.available:
             return None
-        if self.regs is None and self.read_config() is None:
+        cfg = self.read_config() if self.packet or self.regs is None else describe(self.regs, self.model)
+        if cfg is None:
             return None
-        home = self.regs[5]
+        home = int(cfg["channel"])
         t0 = self.clock()
-        noise = []
-        for ch in range(first, last + 1):
+        noise: list[float | None] = []
+        for ch in range(first, last + 1):                    # bounded: at most 84 channels
             if not self.set_channel(ch):
                 noise.append(None)
                 continue
-            self.sleep(0.06)
+            self.sleep(CHANNEL_SETTLE_S)
             noise.append(self.noise_dbm())
-        self.set_channel(home)
+        restored = self.set_channel(home)
+        if not restored:
+            self._note(f"survey: could not return to home channel {home}")
         valid = [(n, first + i) for i, n in enumerate(noise) if n is not None]
         best = min(valid)[1] if valid else None
         self.last_scan = {"t": self.clock(), "first": first, "noise": noise, "quietest": best,
-                          "duration_s": self.clock() - t0, "home": home}
+                          "duration_s": self.clock() - t0, "home": home, "home_restored": restored}
         return self.last_scan
 
     def wor_transmit(self, cltu: bytes, wor_cycle_code: int = 3) -> bool:
-        """Send one CLTU as a Wake-on-Radio transmitter (preamble spans the WOR cycle)."""
+        """Send one wake-up CLTU: E22 Wake-on-Radio transmitter role (preamble spans the
+        WOR cycle), or for the SX126x the long wake-up preamble of the flight's
+        duty-cycled receiver (rf_wake). wor_cycle_code applies to the E22 only."""
+        if self.packet:
+            return bool(self.available and self.radio.wake(cltu))
+        if not 0 <= wor_cycle_code <= 7:
+            raise ValueError(f"WOR cycle code {wor_cycle_code} outside 0..7")
         if not self.available:
             return False
         if self.regs is None and self.read_config() is None:
             return False
         reg3 = self.regs[6]
-        wor_reg3 = (reg3 & ~0x0F) | 0x08 | (wor_cycle_code & 7)     # WOR role = transmitter
+        wor_reg3 = (reg3 & ~0x0F) | 0x08 | wor_cycle_code             # WOR role = transmitter
         if not self.write_regs(0x06, bytes([wor_reg3])):
             return False
         self._mode(WOR)
         self.radio.write(cltu)
-        self.sleep((wor_cycle_code + 1) * 0.5 + 1.0)                 # preamble + payload
+        self.sleep((wor_cycle_code + 1) * 0.5 + WOR_TAIL_S)          # preamble + payload
         self._mode(NORMAL)
-        return self.write_regs(0x06, bytes([reg3]))                  # restore receiver role
+        return self.write_regs(0x06, bytes([reg3]))                   # restore receiver role

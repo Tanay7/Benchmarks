@@ -1,81 +1,82 @@
 // =============================================================================
-//  EBYTE E22-400T37S (SX1268 + PA/LNA, 5 W) UART LoRa module driver.
+//  EBYTE E22 UART LoRa modules - one driver for both supported models:
+//    E22-400T33D  SX1262 + PA/LNA, 2 W (33 dBm), 3.3-5.5 V (>= 4.7 V for full
+//                 power), 2.54 mm DIP: M0 M1 RXD TXD AUX VCC GND   (default)
+//    E22-400T37S  5 W (37 dBm) on the E22-400TBH-02 board, 4.5-15 V  (preserved)
 //
-//  Register map (EBYTE "E22-xxxT37S User Manual" v1.5, section 7.2):
+//  Register map (T33D manual v1.05 7.2 = T37S manual v1.5 7.2 except where noted):
 //    00H ADDH | 01H ADDL | 02H NETID
 //    03H REG0 = UART baud [7:5] | parity [4:3] | air data rate [2:0]
-//             E22-400T37S air rates: 000/001/010 = 2.4k (!), 011 = 4.8k, 100 = 9.6k,
-//             101 = 19.2k, 110 = 38.4k, 111 = 62.5k. There is NO 0.3k / 1.2k setting.
+//             air rates: 000/001/010 = 2.4k (no slower setting), 011 = 4.8k,
+//             100 = 9.6k, 101 = 19.2k, 110 = 38.4k, 111 = 62.5k
 //    04H REG1 = sub-packet size [7:6] | ambient-noise RSSI enable [5] |
-//             abnormal-status log enable [2] | TX power [1:0]
+//             T37S: abnormal-status log enable [2]; T33D: [4:2] reserved |
+//             TX power [1:0]  (T33D: 33/30/27/24 dBm, VERIFY T-RF-07; T37S: all 37 dBm)
 //    05H REG2 = channel (f = 410.125 MHz + CH x 1 MHz, CH 0..83)
-//    06H REG3 = RSSI byte [7] | fixed-point [6] | relay [5] | LBT [4] | WOR role [3] | WOR cycle [2:0]
-//    07H/08H CRYPT (write-only — left at 0: amateur rules forbid obscuring content)
-//  Commands (configuration mode M1=1 M0=0, UART must be 9600 8N1):
-//    C0 addr len data  -> write & save      C2 addr len data -> write volatile
-//    C1 addr len       -> read; reply C1 addr len data
-//  Normal mode RSSI query (needs REG1 bit5): C0 C1 C2 C3 00 02 -> C1 00 02 <noise> <last>
-//    dBm = -(256 - value)
-//  AUX: LOW while the module is busy (self-test, buffering, transmitting).
+//    06H REG3 = RSSI byte [7] | fixed-point [6] | relay [5] | LBT [4] |
+//             WOR role [3] | WOR cycle [2:0] (period (1 + code) x 500 ms)
+//    07H/08H CRYPT (write-only, left 0: content is never obscured by the radio)
+//    80H..86H product information (read-only)
+//  Commands (configuration mode M1 = 1, M0 = 0, UART 9600 8N1 only):
+//    C0 addr len data -> write and save     C2 addr len data -> write volatile
+//    C1 addr len      -> read; every reply is C1 addr len data; FF FF FF = wrong format
+//  Normal-mode ambient-noise query (needs REG1 bit 5): C0 C1 C2 C3 00 02 ->
+//    C1 00 02 <noise> <last-packet RSSI>, dBm = -(256 - value)
+//  AUX: LOW while the module is busy (self-test, buffering, transmitting, mode change).
+//  LBT (REG3 bit 4) runs inside the module: it defers a transmission for at most
+//  2 s, then sends anyway; the deferral is not observable from the host.
 //
-//  TX power: on the E22-400T37S all four power codes give 37 dBm ("This module has
-//  no power levels", manual v1.5 7.2). Output power cannot be reduced in software.
-//  Abnormal-status log (REG1 bit 2): while the module is under-voltage (< 4.5 V),
-//  over-voltage (> 15 V) or over-temperature (> 120 C) it stops transmitting and
-//  prints FF FF FF 01 / 02 / 03 / 04 (04 = over-voltage + over-temperature) on TXD
-//  every 500 ms (manual v1.5 5.7). The flight software decodes these reports.
+//  E22-400T37S only - abnormal-status log (REG1 bit 2, v1.5 5.7): while the module
+//  is under-voltage (< 4.5 V), over-voltage (> 15 V) or over-temperature (> 120 C)
+//  it stops transmitting and prints FF FF FF 01 / 02 / 03 / 04 every 500 ms. The
+//  E22-400T33D has no such log; this driver never sets that bit on it.
+//
+//  The receive byte stream is framed by vgq::E22StreamParser and the AUX-based
+//  transmission tracking is vgq::E22TxTracker (both pure, in radio.h/.cpp).
 // =============================================================================
 #pragma once
 #include <Arduino.h>
 
+#include "radio.h"
+
 namespace vgq {
 
-struct E22Config {
-  uint16_t address = 0;
-  uint8_t netid = 0;
-  uint8_t uart_code = 0b011;     // 9600 bps
-  uint8_t parity = 0b00;         // 8N1
-  uint8_t air_rate = 0b010;      // 2.4 kbps
-  uint8_t subpacket = 0b00;      // 240 octets
-  bool rssi_noise = true;        // enable C0 C1 C2 C3 ambient-noise reads
-  bool fault_log = true;         // REG1 bit 2: FF FF FF 0x abnormal-status reports
-  uint8_t power = 0b00;          // 37 dBm (all codes are 37 dBm on the T37S)
-  uint8_t channel = 23;          // 433.125 MHz
-  bool rssi_byte = true;         // append RSSI octet to every received packet
-  bool fixed = false, relay = false, lbt = false, wor_role = false;
-  uint8_t wor_cycle = 0;
-
-  void to_regs(uint8_t r[9]) const;
-  void from_regs(const uint8_t r[9]);
-};
-
-class E22 {
+class E22Radio : public Radio {
  public:
-  enum Mode : uint8_t { NORMAL = 0, WOR = 1, CONFIG = 2, SLEEP = 3 };
+  enum Mode : uint8_t { NORMAL = 0, WOR = 1, CONFIG = 2, SLEEP = 3 };   // M1:M0
 
-  void begin(HardwareSerial& s, int m0, int m1, int aux);
-  bool aux_ready() const { return digitalRead(aux_) == HIGH; }
-  bool wait_aux(uint32_t timeout_ms);
-  bool set_mode(Mode m);
+  // model: VGQ_RADIO_E22_T33D or VGQ_RADIO_E22_T37S (begin() fails for anything
+  // else). Stores references only; touches no hardware until begin().
+  E22Radio(HardwareSerial& serial, int pin_m0, int pin_m1, int pin_aux, uint8_t model);
+
+  const char* name() const override;
+  bool begin() override;
+  bool configure(const RadioSettings& s, bool persist) override;
+  bool transmit(const uint8_t* data, size_t n, uint32_t now) override;
+  bool busy(uint32_t now) const override;
+  RadioEvent poll(uint32_t now, RxPacket& rx, int32_t& value) override;
+  bool request_noise(uint32_t now) override;
+  bool channel_busy() const override { return false; }
+  bool set_hibernation(bool on, uint32_t now) override;
+  uint32_t rx_bytes() const override { return parser_.rx_bytes(); }
+
+  // ---- E22-specific ----
+  bool read_product_info(uint8_t info[7]);       // PID 80H..86H (returns in the previous mode)
   Mode mode() const { return mode_; }
-
-  // Writes, then reads back and compares. Leaves the module in NORMAL mode.
-  bool configure(const E22Config& c, bool save);
-  bool read_product_info(uint8_t info[7]);
-
-  // Queues `n` octets for transmission (non-blocking: the core UART TX ring is
-  // 1 KiB). Air-time is measured by the caller from AUX.
-  void transmit(const uint8_t* d, size_t n);
-
-  // Sends the ambient-noise query; the reply is parsed by the receive path.
-  void request_rssi();
-  HardwareSerial& serial() { return *s_; }
+  uint16_t command_rejects() const { return parser_.command_rejects(); }   // FF FF FF replies
 
  private:
+  bool aux_ready() const;
+  bool wait_aux(uint32_t timeout_ms);
+  bool set_mode(Mode m);
+  void drain_uart();
   bool command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len, uint32_t timeout_ms);
-  HardwareSerial* s_ = nullptr;
-  int m0_ = -1, m1_ = -1, aux_ = -1;
+
+  HardwareSerial& serial_;
+  const int m0_, m1_, aux_;
   Mode mode_ = SLEEP;
+  E22StreamParser parser_;
+  E22TxTracker tx_;
 };
 
 }  // namespace vgq

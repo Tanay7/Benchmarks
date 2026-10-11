@@ -1,115 +1,193 @@
+// =============================================================================
+//  EBYTE E22-400T33D / E22-400T37S UART driver (see e22.h for the register map).
+//
+//  Timing (manual 5.5, 5.6.4, 6.1): after power-on the module holds AUX low for
+//  its self-test; a mode change takes effect >= 2 ms after AUX is high; the
+//  register protocol is only available in mode 2 at 9600 8N1. Every wait below
+//  is bounded by both a time limit and an iteration count.
+// =============================================================================
+#include "../config.h"   // VGQ_RADIO, RADIO_SERIAL, PIN_E22_* (used by flight_radio())
 #include "e22.h"
+
+#include <string.h>
 
 namespace vgq {
 
-void E22Config::to_regs(uint8_t r[9]) const {
-  r[0] = (uint8_t)(address >> 8);
-  r[1] = (uint8_t)address;
-  r[2] = netid;
-  r[3] = (uint8_t)(((uart_code & 7) << 5) | ((parity & 3) << 3) | (air_rate & 7));
-  r[4] = (uint8_t)(((subpacket & 3) << 6) | ((rssi_noise ? 1 : 0) << 5) | ((fault_log ? 1 : 0) << 2) |
-                   (power & 3));
-  r[5] = channel;
-  r[6] = (uint8_t)(((rssi_byte ? 1 : 0) << 7) | ((fixed ? 1 : 0) << 6) | ((relay ? 1 : 0) << 5) |
-                   ((lbt ? 1 : 0) << 4) | ((wor_role ? 1 : 0) << 3) | (wor_cycle & 7));
-  r[7] = 0;   // CRYPT_H (no encryption)
-  r[8] = 0;   // CRYPT_L
-}
+namespace {
 
-void E22Config::from_regs(const uint8_t r[9]) {
-  address = (uint16_t)((r[0] << 8) | r[1]);
-  netid = r[2];
-  uart_code = (r[3] >> 5) & 7; parity = (r[3] >> 3) & 3; air_rate = r[3] & 7;
-  subpacket = (r[4] >> 6) & 3; rssi_noise = (r[4] >> 5) & 1; fault_log = (r[4] >> 2) & 1;
-  power = r[4] & 3;
-  channel = r[5];
-  rssi_byte = (r[6] >> 7) & 1; fixed = (r[6] >> 6) & 1; relay = (r[6] >> 5) & 1;
-  lbt = (r[6] >> 4) & 1; wor_role = (r[6] >> 3) & 1; wor_cycle = r[6] & 7;
-}
+const uint32_t kSelfTestMs = 2000;    // power-on self-test (AUX low)
+const uint32_t kModeAuxMs = 1000;     // AUX high before / after a mode change
+const uint32_t kModeSettleMs = 5;     // EBYTE: >= 2 ms after the mode pins change
+const uint32_t kCmdReplyMs = 1000;    // register command reply
+const uint32_t kCmdPollUs = 100;      // reply polling step (1 octet = 1.04 ms at 9600 bit/s)
+const int kMaxDrain = 512;            // UART octets handled per drain / poll() call
 
-void E22::begin(HardwareSerial& s, int m0, int m1, int aux) {
-  s_ = &s;
-  m0_ = m0; m1_ = m1; aux_ = aux;
+const uint8_t kNoiseQuery[6] = {0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02};
+
+}  // namespace
+
+E22Radio::E22Radio(HardwareSerial& serial, int pin_m0, int pin_m1, int pin_aux, uint8_t model)
+    : Radio(model, 0), serial_(serial), m0_(pin_m0), m1_(pin_m1), aux_(pin_aux), parser_(model) {}
+
+const char* E22Radio::name() const { return radio_model_name(model_); }
+
+bool E22Radio::begin() {
+  if (model_ != VGQ_RADIO_E22_T33D && model_ != VGQ_RADIO_E22_T37S) return false;
   pinMode(aux_, INPUT_PULLUP);
-  // Drive deep-sleep first (matches the external pull-ups), then configure.
+  // Drive deep sleep first (as the external 10 kOhm pull-ups do while the MCU boots).
   pinMode(m0_, OUTPUT);
   pinMode(m1_, OUTPUT);
   digitalWrite(m0_, HIGH);
   digitalWrite(m1_, HIGH);
   mode_ = SLEEP;
-  s_->begin(9600);     // config mode requires 9600 8N1; we also operate at 9600
-  wait_aux(2000);      // power-on self-test holds AUX low
+  serial_.begin(kE22UartBaud);        // mode 2 requires 9600 8N1; the link also runs at 9600
+  return wait_aux(kSelfTestMs);
 }
 
-bool E22::wait_aux(uint32_t timeout_ms) {
+bool E22Radio::aux_ready() const { return digitalRead(aux_) == HIGH; }
+
+bool E22Radio::wait_aux(uint32_t timeout_ms) {
   const uint32_t t0 = millis();
-  while (!aux_ready()) {
-    if (millis() - t0 > timeout_ms) return false;
+  for (uint32_t i = 0; !aux_ready(); ++i) {
+    if (millis() - t0 > timeout_ms || i > timeout_ms) return false;
     delay(1);
   }
   return true;
 }
 
-bool E22::set_mode(Mode m) {
-  if (!wait_aux(1000)) return false;
+void E22Radio::drain_uart() {
+  for (int i = 0; i < kMaxDrain && serial_.available() > 0; ++i) (void)serial_.read();
+}
+
+bool E22Radio::set_mode(Mode m) {
+  if (!wait_aux(kModeAuxMs)) return false;   // a busy module ignores the mode pins
   digitalWrite(m0_, (m & 1) ? HIGH : LOW);
   digitalWrite(m1_, (m & 2) ? HIGH : LOW);
-  delay(5);                 // EBYTE: allow >= 2 ms after a mode change
-  const bool ok = wait_aux(1000);
-  delay(2);
-  while (s_->available()) s_->read();   // discard anything emitted during the switch
   mode_ = m;
+  delay(kModeSettleMs);
+  const bool ok = wait_aux(kModeAuxMs);
+  delay(2);
+  drain_uart();                              // anything emitted during the switch
   return ok;
 }
 
-bool E22::command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len,
-                  uint32_t timeout_ms) {
-  while (s_->available()) s_->read();
-  s_->write(cmd, n);
-  s_->flush();
+bool E22Radio::command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len,
+                       uint32_t timeout_ms) {
+  drain_uart();
+  if (serial_.write(cmd, n) != n) return false;
+  serial_.flush();
   size_t got = 0;
   const uint32_t t0 = millis();
-  while (got < reply_len && millis() - t0 < timeout_ms) {
-    if (s_->available()) reply[got++] = (uint8_t)s_->read();
+  const uint32_t max_polls = timeout_ms * (1000u / kCmdPollUs);
+  for (uint32_t i = 0; got < reply_len && i < max_polls && millis() - t0 < timeout_ms; ++i) {
+    if (serial_.available() > 0) {
+      const int c = serial_.read();
+      if (c >= 0) reply[got++] = (uint8_t)c;
+    } else {
+      delayMicroseconds(kCmdPollUs);
+    }
   }
   return got == reply_len;
 }
 
-bool E22::read_product_info(uint8_t info[7]) {
+bool E22Radio::read_product_info(uint8_t info[7]) {
+  if (tx_.active()) return false;
   const Mode prev = mode_;
   if (!set_mode(CONFIG)) return false;
   const uint8_t cmd[3] = {0xC1, 0x80, 0x07};
   uint8_t r[10];
-  const bool ok = command(cmd, 3, r, 10, 1000) && r[0] == 0xC1 && r[1] == 0x80;
+  const bool ok = command(cmd, sizeof cmd, r, sizeof r, kCmdReplyMs) && r[0] == 0xC1 && r[1] == 0x80 &&
+                  r[2] == 0x07;
   if (ok) memcpy(info, r + 3, 7);
-  set_mode(prev == CONFIG ? NORMAL : prev);
-  return ok;
+  const bool back = set_mode(prev == CONFIG ? NORMAL : prev);
+  return ok && back;
 }
 
-bool E22::configure(const E22Config& c, bool save) {
-  if (!set_mode(CONFIG)) return false;
+bool E22Radio::configure(const RadioSettings& s, bool persist) {
+  if (!radio_settings_valid(s)) return false;
+  if (tx_.active()) return false;            // AUX is low while sending: mode 2 would time out
+  settings_ = s;
   uint8_t cmd[12];
-  cmd[0] = save ? 0xC0 : 0xC2;
+  cmd[0] = persist ? 0xC0 : 0xC2;
   cmd[1] = 0x00;
   cmd[2] = 0x09;
-  c.to_regs(cmd + 3);
-  uint8_t r[12];
-  bool ok = command(cmd, 12, r, 12, 1000) && r[0] == 0xC1;
-  // Independent read-back (CRYPT bytes read back as 0, which is what we wrote).
+  e22_build_regs(model_, s, cmd + 3);
+  bool ok = set_mode(CONFIG);
   if (ok) {
+    uint8_t r[12];
+    ok = command(cmd, sizeof cmd, r, sizeof r, kCmdReplyMs) && r[0] == 0xC1 && r[1] == 0x00 &&
+         r[2] == 0x09;
+  }
+  if (ok) {
+    // Independent read-back of 00H..06H (CRYPT_H/L are write-only).
     const uint8_t rd[3] = {0xC1, 0x00, 0x09};
     uint8_t rb[12];
-    ok = command(rd, 3, rb, 12, 1000) && memcmp(rb + 3, cmd + 3, 7) == 0;
+    ok = command(rd, sizeof rd, rb, sizeof rb, kCmdReplyMs) && rb[0] == 0xC1 && rb[1] == 0x00 &&
+         rb[2] == 0x09 && e22_regs_match(model_, cmd + 3, rb + 3);
   }
-  set_mode(NORMAL);
-  return ok;
+  // Leave mode 2 if the pins went there: WOR receiver while hibernating, else normal.
+  bool mode_ok = false;
+  if (mode_ == CONFIG) mode_ok = set_mode(hibernating_ ? WOR : NORMAL);
+  cfg_ok_ = ok && mode_ok;
+  return cfg_ok_;
 }
 
-void E22::transmit(const uint8_t* d, size_t n) { s_->write(d, n); }
-
-void E22::request_rssi() {
-  const uint8_t cmd[6] = {0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02};
-  s_->write(cmd, 6);
+bool E22Radio::transmit(const uint8_t* data, size_t n, uint32_t now) {
+  if (data == nullptr || n == 0 || n > kE22MaxPacket || tx_.active()) return false;
+  // Beacons while hibernating are sent from normal mode, as in v2.
+  if (mode_ != NORMAL && !set_mode(NORMAL)) return false;
+  // Non-blocking: the core's UART TX ring (1 KiB) takes a whole <= 240-octet frame.
+  if (serial_.write(data, n) == 0) return false;
+  tx_.start(now);
+  tx_launch_ms_ = now;
+  return true;
 }
+
+bool E22Radio::busy(uint32_t now) const {
+  return tx_.active() || !aux_ready() || parser_.receiving(now) || parser_.noise_pending();
+}
+
+RadioEvent E22Radio::poll(uint32_t now, RxPacket& rx, int32_t& value) {
+  for (int i = 0; i < kMaxDrain && serial_.available() > 0; ++i) {
+    const int c = serial_.read();
+    if (c < 0) break;
+    parser_.on_byte((uint8_t)c, now);
+  }
+  if (tx_.active()) {
+    const RadioEvent ev = tx_.poll(now, aux_ready(), value);
+    if (ev != RadioEvent::NONE) {
+      // After a hibernation beacon, back to the duty-cycled WOR receiver.
+      if (hibernating_ && !set_mode(WOR)) cfg_ok_ = false;
+      return ev;
+    }
+  }
+  return parser_.poll(now, rx, value);
+}
+
+bool E22Radio::request_noise(uint32_t now) {
+  // The query is defined for mode 0 (and the WOR transmitter role, never used here).
+  if (parser_.noise_pending() || tx_.active() || mode_ != NORMAL) return false;
+  if (serial_.write(kNoiseQuery, sizeof kNoiseQuery) != sizeof kNoiseQuery) return false;
+  parser_.noise_requested(now);
+  return true;
+}
+
+bool E22Radio::set_hibernation(bool on, uint32_t now) {
+  (void)now;
+  if (on == hibernating_) return true;
+  if (tx_.active()) return false;
+  hibernating_ = on;
+  // Entering: re-write the registers (WOR receiver role, settings_.wor_cycle) and end
+  // in mode 1. Leaving: mode 0; the registers need no change.
+  return on ? configure(settings_, false) : set_mode(NORMAL);
+}
+
+// ---- Flight instance (E22 builds) ----------------------------------------------------
+#if VGQ_RADIO == VGQ_RADIO_E22_T33D || VGQ_RADIO == VGQ_RADIO_E22_T37S
+namespace {
+E22Radio g_flight_radio(RADIO_SERIAL, PIN_E22_M0, PIN_E22_M1, PIN_E22_AUX, VGQ_RADIO);
+}  // namespace
+Radio& flight_radio() { return g_flight_radio; }
+#endif
 
 }  // namespace vgq

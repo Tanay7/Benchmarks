@@ -1,5 +1,11 @@
 // Minimal Arduino-API stub for HOST SYNTAX/TYPE CHECKING of the firmware.
 // It is NOT a simulator: functions are inert. Used by tools/host_test/check_firmware.sh.
+//
+// The declarations follow ArduinoCore-API (the API layer of the arduino:zephyr core used
+// by the UNO Q and VENTUNO Q) closely enough for the flight/station code AND for the
+// vendor libraries it includes (RadioLib 7.8.1's ArduinoHal and Print, U8g2, ...) to
+// type-check. PinMode / PinStatus are plain ints here; the real core uses enums, so code
+// must still pass the named constants (HIGH, OUTPUT, ...) rather than arbitrary integers.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -11,12 +17,24 @@
 #include <stdlib.h>
 #define HIGH 1
 #define LOW 0
+#define CHANGE 2
+#define FALLING 3
+#define RISING 4
 #define INPUT 0
 #define OUTPUT 1
 #define INPUT_PULLUP 2
+#define INPUT_PULLDOWN 3
+#define DEC 10
+#define HEX 16
+#define OCT 8
+#define BIN 2
 enum { A0 = 14, A1, A2, A3, A4, A5 };
 typedef uint8_t byte;
 typedef bool boolean;
+typedef uint8_t pin_size_t;
+typedef int PinMode;
+typedef int PinStatus;
+typedef void (*voidFuncPtr)(void);
 inline unsigned long millis() { return 0; }
 inline unsigned long micros() { return 0; }
 inline void delay(unsigned long) {}
@@ -27,9 +45,24 @@ inline int digitalRead(int) { return 1; }
 inline void noInterrupts() {}
 inline void interrupts() {}
 inline void yield() {}
+inline void attachInterrupt(int, voidFuncPtr, int) {}
+inline void detachInterrupt(int) {}
+inline int digitalPinToInterrupt(int pin) { return pin; }
+inline unsigned long pulseIn(int, int, unsigned long = 1000000UL) { return 0; }
+inline void tone(int, unsigned int, unsigned long = 0) {}
+inline void noTone(int) {}
 template <class T, class L> inline auto min(const T& a, const L& b) -> decltype(a < b ? a : b) { return a < b ? a : b; }
 template <class T, class L, class H> inline T constrain(T x, L lo, H hi) { return x < (T)lo ? (T)lo : (x > (T)hi ? (T)hi : x); }
 template <class T, class L> inline auto max(const T& a, const L& b) -> decltype(a < b ? b : a) { return a < b ? b : a; }
+
+// Program-memory helpers (flash and RAM share one address space on ARM).
+#define PROGMEM
+#define PGM_P const char*
+#define pgm_read_byte(addr) (*(const uint8_t*)(addr))
+#define pgm_read_dword(addr) (*(const uint32_t*)(addr))
+class __FlashStringHelper;
+#define F(s) (reinterpret_cast<const __FlashStringHelper*>(s))
+
 class String {
  public:
   String() {}
