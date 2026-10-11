@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSS-Q1 Mission Operations</title>
+<style>
+:root{--bg:#070b12;--panel:#0e1521;--panel2:#121c2b;--line:#22324a;--text:#d6e2f0;--dim:#7f93ad;
+--accent:#4fb3ff;--ok:#2ecc71;--warn:#f5c518;--bad:#ff4d4f;--mono:"JetBrains Mono","DejaVu Sans Mono",Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding:8px 14px;background:#0a111c;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header .title{font-weight:700;letter-spacing:.08em;color:var(--accent)}
+header .kv{font-family:var(--mono);font-size:12px;color:var(--dim)} header .kv b{color:var(--text);font-weight:600}
+.pill{padding:2px 9px;border-radius:10px;font-weight:700;font-family:var(--mono);font-size:12px;border:1px solid var(--line)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dim{color:var(--dim)}
+.bg-ok{background:#0f3b24;color:#7dffb0}.bg-warn{background:#3d3307;color:#ffe066}.bg-bad{background:#4a0f12;color:#ff9a9c}
+nav{display:flex;flex-wrap:wrap;gap:2px;padding:6px 14px 0;background:#0a111c;border-bottom:1px solid var(--line)}
+nav button{background:none;border:1px solid transparent;border-bottom:none;color:var(--dim);padding:6px 12px;cursor:pointer;font-weight:600;border-radius:6px 6px 0 0}
+nav button.active{background:var(--panel);color:var(--text);border-color:var(--line)}
+main{padding:12px 14px 40px}
+.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}
+.wide{grid-column:1/-1}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px;min-width:0}
+.panel h3{margin:0 0 7px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.panel h3 small{color:var(--dim);letter-spacing:0;text-transform:none;font-weight:400}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+td,th{padding:2px 5px;border-bottom:1px solid #182436;text-align:right;white-space:nowrap}
+th{color:var(--dim);font-weight:600;font-size:11px}
+td:first-child,th:first-child{text-align:left;color:var(--dim);font-family:system-ui,sans-serif}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
+.tile .l{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
+.tile .v{font-family:var(--mono);font-size:21px;font-weight:600;margin-top:2px}
+.tile .s{font-family:var(--mono);font-size:11px;color:var(--dim)}
+canvas{width:100%;height:170px;display:block;background:#0a0f18;border:1px solid #182436;border-radius:6px}
+.scroll{max-height:340px;overflow:auto}
+.log div{font-family:var(--mono);font-size:12px;border-bottom:1px solid #141f30;padding:2px 0;white-space:pre-wrap}
+input[type=text]{width:100%;background:#050910;border:1px solid var(--line);color:var(--text);font-family:var(--mono);font-size:14px;padding:7px 9px;border-radius:6px}
+.btn{background:#14304d;border:1px solid #2a5a88;color:#cfe8ff;padding:4px 10px;border-radius:6px;cursor:pointer;font-weight:600}
+.btn.red{background:#4a1214;border-color:#8a2a2e;color:#ffd2d3}
+.legend span{font-family:var(--mono);font-size:11px;margin-right:12px}
+.note{color:var(--dim);font-size:11px}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <span class="title" id="h-station">DSS-Q1</span>
+  <span class="pill" id="h-los">LOS</span>
+  <span class="pill" id="h-sync">SEARCH</span>
+  <span class="pill" id="h-alarm">ALARM</span>
+  <span class="kv">S/C <b id="h-sc">VGQ-1</b> <b id="h-mode">—</b></span>
+  <span class="kv">UTC <b id="h-utc">—</b></span>
+  <span class="kv">RSSI <b id="h-rssi">—</b></span>
+  <span class="kv">SNR<sub>est</sub> <b id="h-snr">—</b></span>
+  <span class="kv">margin<sub>est</sub> <b id="h-margin">—</b></span>
+  <span class="kv">FER <b id="h-fer">—</b></span>
+  <span class="kv">frames <b id="h-frames">—</b></span>
+  <span class="kv">SCLK <b id="h-sclk">—</b></span>
+  <span class="kv">COP-1 <b id="h-cop">—</b></span>
+</header>
+<nav id="tabs"></nav>
+<main>
+<!-- ============================== OVERVIEW ============================== -->
+<section data-tab="OVERVIEW">
+  <div class="tiles" id="ov-tiles"></div>
+  <div class="grid" style="margin-top:10px">
+    <div class="panel"><h3>Signal history <small>RSSI / noise floor / SNR est (last 300 frames)</small></h3><canvas id="ov-chart"></canvas>
+      <div class="legend"><span style="color:#4fb3ff">■ RSSI dBm</span><span style="color:#ff8c42">■ noise dBm</span><span style="color:#2ecc71">■ SNR est dB (right)</span></div></div>
+    <div class="panel"><h3>Spacecraft summary</h3><table id="ov-sc"></table></div>
+    <div class="panel"><h3>Latest events</h3><div class="log scroll" id="ov-events"></div></div>
+    <div class="panel"><h3>Command status</h3><table id="ov-cmds"></table></div>
+  </div>
+</section>
+<!-- ============================== RECEIVER ============================== -->
+<section data-tab="RECEIVER" class="hidden">
+  <div class="grid">
+    <div class="panel wide"><h3>Receiver statistics <small>measured from the E22 RSSI octet, ambient-noise register, byte stream, frame sync and RS decoder. 1 min / 10 min / whole pass windows</small></h3>
+      <div style="overflow:auto"><table id="rx-stats"></table></div></div>
+    <div class="panel"><h3>RF &amp; link estimates <small>"est." = derived with stated assumptions</small></h3><table id="rx-rf"></table></div>
+    <div class="panel wide"><h3>Link budget <small>design (free-space prediction for the configured distance) vs measured; FSPL = 32.44 + 20·log10(f MHz) + 20·log10(d km)</small></h3><table id="rx-budget"></table></div>
+    <div class="panel"><h3>RSSI detail <small>the E22 reports integer dBm (1 dB steps); means over many packets resolve finer, ± = standard error of the mean</small></h3><table id="rx-rssi"></table></div>
+    <div class="panel"><h3>Two-way link <small>downlink (ground E22) vs uplink (spacecraft E22)</small></h3><table id="rx-2way"></table></div>
+    <div class="panel"><h3>Frame synchronizer <small>CCSDS ASM 1ACFFC1D, search/lock/flywheel</small></h3><table id="rx-sync"></table></div>
+    <div class="panel"><h3>Reed–Solomon (255,223) decoder <small>E=16, I=1, dual basis, shortened (200+32)</small></h3><table id="rx-dec"></table></div>
+    <div class="panel"><h3>Frames &amp; throughput</h3><table id="rx-frames"></table></div>
+    <div class="panel"><h3>RSSI / noise / SNR time series</h3><canvas id="rx-chart"></canvas>
+      <div class="legend"><span style="color:#4fb3ff">■ RSSI</span><span style="color:#ff8c42">■ noise</span><span style="color:#2ecc71">■ SNR est</span><span style="color:#c792ea">■ margin est</span></div></div>
+    <div class="panel"><h3>RSSI distribution <small>5 dB bins, whole session</small></h3><canvas id="rx-rssih"></canvas></div>
+    <div class="panel"><h3>SNR est distribution <small>2 dB bins</small></h3><canvas id="rx-snrh"></canvas></div>
+    <div class="panel"><h3>RS corrections per codeblock <small>0..16 symbols</small></h3><canvas id="rx-rsh"></canvas></div>
+    <div class="panel"><h3>ASM bit errors per frame <small>0..4 (tolerance)</small></h3><canvas id="rx-asmh"></canvas></div>
+    <div class="panel"><h3>Ground radio (RCU) &amp; link manager</h3><table id="rx-radio"></table></div>
+    <div class="panel"><h3>RF spectrum survey <small>ambient noise per E22 channel — ground (GSCAN) and spacecraft (RFSCAN)</small></h3><canvas id="rx-scan"></canvas>
+      <div class="legend"><span style="color:#4fb3ff">■ ground</span><span style="color:#ff8c42">■ spacecraft</span><span style="color:#2ecc71">▲ allowed channel</span></div></div>
+  </div>
+</section>
+<!-- ============================== FRAMES & PACKETS ============================== -->
+<section data-tab="FRAMES & PACKETS" class="hidden">
+  <div class="grid">
+    <div class="panel wide"><h3>Virtual channels <small>CCSDS 132.0-B-3 packet extraction per VC</small></h3><table id="fp-vc"></table></div>
+    <div class="panel wide"><h3>Packets by APID <small>CCSDS 133.0-B-2; latency = ERT − SCET (needs time correlation)</small></h3><table id="fp-apid"></table></div>
+    <div class="panel"><h3>Time correlation <small>SCLK → SCET (UTC), CCSDS 301.0-B-4 CUC</small></h3><table id="fp-time"></table></div>
+    <div class="panel"><h3>CLCW / COP-1 <small>from the OCF of every TM frame</small></h3><table id="fp-clcw"></table></div>
+  </div>
+</section>
+<!-- ============================== SPACECRAFT ============================== -->
+<section data-tab="SPACECRAFT" class="hidden">
+  <div class="grid">
+    <div class="panel"><h3>Housekeeping (APID 0x010)</h3><div class="scroll"><table id="sc-hk"></table></div></div>
+    <div class="panel"><h3>Telecom (APID 0x011)</h3><div class="scroll"><table id="sc-rf"></table></div></div>
+    <div class="panel"><h3>Fault protection &amp; sensors</h3><table id="sc-fdir"></table></div>
+    <div class="panel"><h3>Anomaly detector <small>EWMA, |z| &gt; 6</small></h3><div class="log scroll" id="sc-anom"></div></div>
+  </div>
+</section>
+<!-- ============================== SCIENCE ============================== -->
+<section data-tab="SCIENCE" class="hidden">
+  <div class="grid">
+    <div class="panel"><h3>Magnetometers <small>RM3100 boom (outboard, optional inboard) + BMM150 body; dual-sensor separation of the spacecraft field (1/r³)</small></h3><table id="sci-mag"></table></div>
+    <div class="panel"><h3>Attitude <small>Nicla Sense ME: BHI260 fusion vs independent TRIAD (gravity + BMM150 field); Euler ZYX</small></h3><table id="sci-att"></table></div>
+    <div class="panel"><h3>Environment <small>Nicla Sense Env (HS4001, ZMOD4410, ZMOD4510) + Nicla Sense ME (BMP390, BME688/BSEC)</small></h3><div class="scroll"><table id="sci-env"></table></div></div>
+    <div class="panel"><h3>AS7265X calibrated spectrum <small>µW/cm², 18 bands 410–940 nm</small></h3><canvas id="sci-spec"></canvas></div>
+    <div class="panel"><h3>AS7265X raw counts &amp; instrument state</h3><canvas id="sci-spec2"></canvas><table id="sci-specinfo"></table></div>
+  </div>
+</section>
+<!-- ============================== COMMANDING ============================== -->
+<section data-tab="COMMANDING" class="hidden">
+  <div class="grid">
+    <div class="panel wide"><h3>Command entry <small>validated against the command dictionary; hazardous commands need confirmation (and 2nd-operator AUTH if enabled)</small></h3>
+      <input type="text" id="cmd-in" placeholder="e.g. NOOP · MODE ENCOUNTER · PING 42 · RFSCAN 20 29 · LINKRATE 0 · GSCAN · HELP" autocomplete="off">
+      <div id="cmd-msg" class="note" style="margin-top:6px"></div>
+      <div id="cmd-pending" style="margin-top:6px"></div></div>
+    <div class="panel wide"><h3>Command history <small>QUEUED → RADIATED → ACCEPTED (CLCW) → EXECUTED (CMDVER)</small></h3><table id="cmd-hist"></table></div>
+    <div class="panel"><h3>COP-1 / SDLS</h3><table id="cmd-cop"></table></div>
+    <div class="panel"><h3>Station I/O <small>VENTUNO Q MCU: CardKB keyboards, annunciator LEDs, Radio Control Unit</small></h3><table id="cmd-io"></table></div>
+    <div class="panel"><h3>Console</h3><div class="log scroll" id="cmd-console"></div></div>
+    <div class="panel"><h3>Dictionary</h3><div class="scroll"><table id="cmd-dict"></table></div></div>
+  </div>
+</section>
+<!-- ============================== EVENTS ============================== -->
+<section data-tab="EVENTS" class="hidden">
+  <div class="grid">
+    <div class="panel wide"><h3>Event log</h3><div class="log scroll" style="max-height:520px" id="ev-log"></div></div>
+    <div class="panel wide"><h3>Spacecraft EVRs</h3><div class="log scroll" id="ev-evr"></div></div>
+  </div>
+</section>
+</main>
+<script>
+"use strict";
+const TABS=["OVERVIEW","RECEIVER","FRAMES & PACKETS","SPACECRAFT","SCIENCE","COMMANDING","EVENTS"];
+let tab=localStorage.getItem("dssq-tab")||"OVERVIEW", S=null, DICT=null;
+const $=id=>document.getElementById(id);
+const nav=$("tabs");
+TABS.forEach(t=>{const b=document.createElement("button");b.textContent=t;b.onclick=()=>{tab=t;try{localStorage.setItem("dssq-tab",t)}catch(e){};showTab()};nav.appendChild(b)});
+function showTab(){[...nav.children].forEach(b=>b.classList.toggle("active",b.textContent===tab));
+  document.querySelectorAll("section").forEach(s=>s.classList.toggle("hidden",s.dataset.tab!==tab));if(S)render();}
+showTab();
+// ---------- formatting ----------
+const N=v=>v===null||v===undefined||(typeof v==="number"&&!isFinite(v));
+function f(v,d=1,u=""){if(N(v))return "—";if(typeof v!=="number")return String(v)+(u?" "+u:"");return v.toFixed(d)+(u?" "+u:"");}
+function fi(v,u=""){return N(v)?"—":Math.round(v).toLocaleString()+(u?" "+u:"")}
+function pct(v,d=2){return N(v)?"—":(100*v).toFixed(d)+" %"}
+function dur(s){if(N(s))return "—";s=Math.max(0,s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=Math.floor(s%60);return (h?h+"h ":"")+(h||m?m+"m ":"")+x+"s"}
+function utc(t){return N(t)?"—":new Date(t*1000).toISOString().replace("T"," ").slice(0,19)}
+function sci(v,d=2){return N(v)?"—":v.toExponential(d)}
+function cls(state){return state==="RED"?"bad":state==="YELLOW"?"warn":""}
+function rows(id,data,head){const el=$(id);let h=head?"<tr>"+head.map(x=>"<th>"+x+"</th>").join("")+"</tr>":"";
+  for(const r of data){h+="<tr>"+r.map((c,i)=>{if(c&&typeof c==="object")return `<td class="${c.c||""}" ${c.t?'title="'+c.t+'"':""}>${c.v}</td>`;return "<td>"+(c===undefined?"—":c)+"</td>"}).join("")+"</tr>";}
+  el.innerHTML=h;}
+// ---------- charts ----------
+function cv(id){const c=$(id),r=c.getBoundingClientRect(),dpr=window.devicePixelRatio||1;c.width=r.width*dpr;c.height=r.height*dpr;const x=c.getContext("2d");x.scale(dpr,dpr);x.clearRect(0,0,r.width,r.height);return [x,r.width,r.height];}
+function axes(x,w,h,lo,hi,unit){x.strokeStyle="#1b2a40";x.fillStyle="#6f86a3";x.font="10px monospace";x.lineWidth=1;
+  for(let i=0;i<=4;i++){const y=8+(h-24)*i/4;x.beginPath();x.moveTo(36,y);x.lineTo(w-4,y);x.stroke();x.fillText((hi-(hi-lo)*i/4).toFixed(0),2,y+3);}if(unit)x.fillText(unit,2,h-4);}
+function line(x,w,h,vals,lo,hi,color,xoff=36){const n=vals.length;if(n<2)return;x.strokeStyle=color;x.lineWidth=1.4;x.beginPath();let pen=false;
+  vals.forEach((v,i)=>{if(N(v)){pen=false;return}const px=xoff+(w-xoff-4)*i/(n-1),py=8+(h-24)*(1-(v-lo)/(hi-lo));pen?x.lineTo(px,py):x.moveTo(px,py);pen=true});x.stroke();}
+function series(id,sets){const [x,w,h]=cv(id);const all=sets.flatMap(s=>s.v.filter(v=>!N(v)));if(!all.length){x.fillStyle="#6f86a3";x.fillText("no data",w/2-20,h/2);return}
+  let lo=Math.min(...all),hi=Math.max(...all);if(hi-lo<6){lo-=3;hi+=3}lo=Math.floor(lo/5)*5;hi=Math.ceil(hi/5)*5;axes(x,w,h,lo,hi,"dB");sets.forEach(s=>line(x,w,h,s.v,lo,hi,s.c));}
+function bars(id,vals,labels,color,opts={}){const [x,w,h]=cv(id);const v=vals.map(a=>N(a)?null:a);const valid=v.filter(a=>a!==null);
+  if(!valid.length){x.fillStyle="#6f86a3";x.fillText("no data",w/2-20,h/2);return}
+  let lo=opts.lo!==undefined?opts.lo:Math.min(0,...valid),hi=opts.hi!==undefined?opts.hi:Math.max(...valid);if(hi===lo)hi=lo+1;axes(x,w,h,lo,hi,opts.unit||"");
+  const bw=(w-40)/v.length;v.forEach((a,i)=>{if(a===null)return;const y0=8+(h-24)*(1-(Math.max(lo,a)-lo)/(hi-lo));x.fillStyle=(opts.colors&&opts.colors[i])||color;
+    x.fillRect(36+i*bw+1,y0,Math.max(1,bw-2),(h-16)-y0);});
+  x.fillStyle="#6f86a3";x.font="9px monospace";const step=Math.ceil(labels.length/14);labels.forEach((l,i)=>{if(i%step===0)x.fillText(l,36+i*bw,h-3)});
+  if(opts.marks)opts.marks.forEach(i=>{x.fillStyle="#2ecc71";x.fillText("▲",36+i*bw+bw/2-3,h-12)});}
+// ---------- render ----------
+function header(){const rx=S.rx,rf=rx.rf;
+  $("h-station").textContent=S.station+" GROUND STATION";$("h-sc").textContent=S.spacecraft;$("h-mode").textContent=S.decoded.mode||"—";
+  const los=$("h-los");los.textContent=rx.state.los?"LOS":"AOS";los.className="pill "+(rx.state.los?"bg-bad":"bg-ok");
+  const sy=$("h-sync");sy.textContent=S.sync.state;sy.className="pill "+(S.sync.state==="LOCK"?"bg-ok":S.sync.state==="FLYWHEEL"?"bg-warn":"bg-bad");
+  const al=$("h-alarm");al.textContent="ALARM "+S.alarm;al.className="pill "+(S.alarm==="RED"?"bg-bad":S.alarm==="YELLOW"?"bg-warn":"bg-ok");
+  $("h-utc").textContent=utc(S.utc);$("h-rssi").textContent=f(rf.rssi_dbm,0,"dBm");$("h-snr").textContent=f(rf.snr_est_db,1,"dB");
+  $("h-margin").textContent=f(rf.margin_est_db,1,"dB");$("h-fer").textContent=pct(rx.frames.fer);$("h-frames").textContent=fi(rx.frames.ok);
+  $("h-sclk").textContent=S.time.last_sclk===null?"—":S.time.partition+"/"+f(S.time.last_sclk,3);
+  const c=S.cop;$("h-cop").textContent=`V(S)=${c.vs??"—"} N(R)=${c.nr} ${c.lockout?"LOCKOUT":c.suspended?"SUSP":"OK"}${c.sdls?" SDLS":""}`;}
+function stat3(name,key,d,unit){const W=S.rx.windows;const r=[name];for(const w of ["1m","10m","pass"]){const s=W[w][key];
+  r.push(s.n?f(s.mean,d):"—",N(s.sem)?"—":f(s.sem,d),s.n?f(s.std,d):"—",s.n?f(s.min,d):"—",s.n?f(s.p10,d):"—",s.n?f(s.p50,d):"—",s.n?f(s.p90,d):"—",s.n?f(s.max,d):"—",fi(s.n||0));}
+  r.splice(1,0,N(W["1m"][key].last)?"—":f(W["1m"][key].last,d));r.push(unit);return r;}
+function receiver(){const rx=S.rx,rf=rx.rf,b=rx.budget,d=rx.decoder,fr=rx.frames,sy=S.sync;
+  const H=["metric","last"];for(const w of ["1 min","10 min","pass"])H.push(w+" mean","± SEM","σ","min","p10","p50","p90","max","n");H.push("unit");
+  rows("rx-stats",[stat3("Packet RSSI","rssi",4,"dBm"),stat3("Noise floor","noise",4,"dBm"),stat3("SNR est (RSSI−noise)","snr",4,"dB"),
+    stat3("Frame inter-arrival","iat",2,"s"),stat3("RS corrections / codeblock","rs",2,"sym"),stat3("ASM bit errors","asm",2,"bit")],H);
+  const w1=rx.windows["1m"].rssi,w10=rx.windows["10m"].rssi;
+  rows("rx-rf",[["Frequency (CH)",f(rf.freq_mhz,3,"MHz")],["Air data rate",fi(rf.air_rate_bps,"bit/s")+" (code "+rf.air_rate_code+")"],
+    ["Packet RSSI (last, 1 dB steps)",f(rf.rssi_dbm,0,"dBm")],["Noise floor",f(rf.noise_dbm,0,"dBm")+" ("+(N(rf.noise_age_s)?"—":f(rf.noise_age_s,0,"s old"))+")"],
+    ["SNR est",f(rf.snr_est_db,1,"dB")],["Pr est (noise removed)",f(rf.pr_est_dbm,1,"dBm")],["N0 est",f(rf.n0_est_dbm_hz,1,"dBm/Hz")],
+    ["C/N0 est",f(rf.cn0_est_dbhz,1,"dB-Hz")],["Eb/N0 est",f(rf.ebn0_est_db,1,"dB")],["Sensitivity est",f(rf.sensitivity_est_dbm,0,"dBm")],
+    [ "Link margin est",{v:f(rf.margin_est_db,1,"dB"),c:N(rf.margin_est_db)?"":rf.margin_est_db<3?"bad":rf.margin_est_db<6?"warn":"ok"}],
+    ["Fade depth p90−p10 (1 m / 10 m)",(w1.n?f(w1.fade_depth,1):"—")+" / "+(w10.n?f(w10.fade_depth,1):"—")+" dB"],
+    ["Assumed noise bandwidth",fi(rf.noise_bw_assumed_hz,"Hz")]]);
+  const pm=(w,k)=>{const x=rx.windows[w][k];return x.n?f(x.mean,4)+(N(x.sem)?"":" ± "+f(x.sem,4))+" dBm (n="+x.n+")":"—"};
+  rows("rx-budget",[["Spacecraft TX power (E22-400T37S, fixed 37 dBm)",f(b.sc_tx_power_dbm_nominal,2,"dBm"),""],
+    ["− Spacecraft feeder loss",f(-b.sc_line_loss_db,2,"dB"),""],["+ Spacecraft antenna gain",f(b.sc_antenna_gain_dbi,2,"dBi"),""],
+    ["= EIRP",f(b.sc_eirp_dbm_est,2,"dBm"),""],["Distance (configured) / one-way light time",f(b.distance_km,3,"km"),N(b.owlt_s)?"—":f(b.owlt_s*1e6,3,"µs")],
+    ["− Free-space path loss (FSPL)",N(b.fspl_db)?"set [spacecraft] distance_km":f(-b.fspl_db,4,"dB"),"path loss: last "+f(b.measured_path_loss_db_est,2,"dB")+", 10-min mean "+f(b.measured_path_loss_mean10m_db,4,"dB")],
+    ["+ Ground antenna gain",f(b.ground_gain_dbi,2,"dBi"),""],["− Ground feeder loss",f(-b.ground_line_loss_db,2,"dB"),""],
+    ["= Received power",f(b.predicted_pr_dbm,4,"dBm"),pm("10m","rssi")],
+    ["Excess loss (measured − free space: terrain, fading, pointing)","—",{v:f(b.excess_loss_db_est,2,"dB"),c:N(b.excess_loss_db_est)?"":b.excess_loss_db_est>20?"warn":""}],
+    ["Noise floor (E22 ambient-noise register)","—",pm("10m","noise")],["SNR",f(b.predicted_snr_db,2,"dB"),f(rf.snr_est_db,2,"dB")],
+    ["Sensitivity (2.4k: EBYTE datasheet −126 dBm typ; faster rates scaled)",f(rf.sensitivity_est_dbm,1,"dBm"),f(rf.sensitivity_est_dbm,1,"dBm")],
+    ["= Link margin",{v:f(b.predicted_margin_db,2,"dB"),c:""},{v:f(rf.margin_est_db,2,"dB"),c:N(rf.margin_est_db)?"":rf.margin_est_db<3?"bad":rf.margin_est_db<6?"warn":"ok"}],
+    ["Range at sensitivity (free space + measured excess loss)","",fi(b.range_at_sensitivity_km_est,"km")]],["item","predicted (free space)","measured"]);
+  rows("rx-rssi",[["Last packet (instantaneous)",f(rf.rssi_dbm,0,"dBm")+"  (resolution "+f(rf.rssi_resolution_db,0,"dB")+")"],
+    ["Mean 1 min ± SEM",pm("1m","rssi")],["Mean 10 min ± SEM",pm("10m","rssi")],["Mean this pass ± SEM",pm("pass","rssi")],
+    ["Received power, linear (last)",N(rf.rssi_mw)?"—":(rf.rssi_mw*1e9).toPrecision(4)+" pW"],
+    ["Noise floor mean 10 min ± SEM",pm("10m","noise")],["Calibration offset applied",f(rf.rssi_cal_offset_db,2,"dB")+" ([radio] rssi_cal_offset_db)"]]);
+  const tw=rx.two_way||{};
+  rows("rx-2way",[["RSSI",f(rf.rssi_dbm,0,"dBm"),f(tw.uplink_rssi,0,"dBm")],["Noise floor",f(rf.noise_dbm,0,"dBm"),f(tw.sc_noise_floor,0,"dBm")],
+    ["SNR est",f(rf.snr_est_db,1,"dB"),(N(tw.uplink_rssi)||N(tw.sc_noise_floor))?"—":f(tw.uplink_rssi-tw.sc_noise_floor,1,"dB")],
+    ["Margin est",f(rf.margin_est_db,1,"dB"),N(tw.uplink_rssi)?"—":f(tw.uplink_rssi-rf.sensitivity_est_dbm,1,"dB")],
+    ["Packets / CLTUs",fi(fr.ok)+" frames",fi(tw.cltu_ok)+" ok / "+fi(tw.cltu_bad)+" bad"],
+    ["Errors corrected",fi(d.symbols_corrected)+" RS sym",fi(tw.bch_corrected)+" BCH blk"],
+    ["Transmitter",fi(rx.uplink.cltus)+" CLTUs / "+fi(rx.uplink.octets)+" B",f(tw.tx_duty,1,"% duty")+", "+fi(tw.frames_sent)+" frames"],
+    ["Frame period / air time","",fi(tw.frame_period_ms,"ms")+" / "+f(tw.last_airtime,1,"s")],
+    ["Radio config verified",S.radio.ground_config?"yes (RCU)":"—",tw.e22_cfg_ok?"yes":(N(tw.e22_cfg_ok)?"—":"NO")]],["","DOWNLINK (ground)","UPLINK (spacecraft)"]);
+  const tot=Math.max(1,sy.cadus);
+  rows("rx-sync",[["State",{v:sy.state,c:sy.state==="LOCK"?"ok":sy.state==="FLYWHEEL"?"warn":"bad"}],["ASMs found",fi(sy.asm_found)],["ASM bit errors (total)",fi(sy.asm_bit_errors)],
+    ["Mean ASM bit errors",f(sy.asm_bit_errors/tot,3)],["Slips",fi(sy.slips)],["Flywheel frames",fi(sy.flywheel_frames)],["Lock losses",fi(sy.lock_losses)],
+    ["Discarded octets",fi(sy.discarded_octets)],["Noise replies parsed",fi(sy.noise_replies)],["Time in lock",f(rx.state.time_in_lock_pct,1,"%")],
+    ["Serial octets (rate)",fi(rx.serial.octets)+" ("+f(rx.serial.octets_per_s,1)+" B/s)"],["Noise queries / replies",fi(rx.serial.noise_queries)+" / "+fi(rx.serial.noise_replies)]]);
+  rows("rx-dec",[["Codeblocks",fi(d.codeblocks)],["Clean (0 errors)",fi(d.clean)],["Corrected",fi(d.corrected)],
+    ["Uncorrectable",{v:fi(d.uncorrectable),c:d.uncorrectable?"warn":""}],["Symbols corrected",fi(d.symbols_corrected)],["Max symbols in one codeblock",fi(d.max_corrections)+" / 16"],
+    ["Symbol error rate est",sci(d.symbol_error_rate_est)],["Pre-FEC BER est range",d.bit_error_rate_est_range?sci(d.bit_error_rate_est_range[0])+" … "+sci(d.bit_error_rate_est_range[1]):"—"],
+    ["FECF failures after RS",{v:fi(d.fecf_fail_after_rs),c:d.fecf_fail_after_rs?"bad":""}],["Foreign SCID / bad header",fi(d.foreign_or_bad_header)]]);
+  rows("rx-frames",[["Frames OK",fi(fr.ok)],["Frames lost (MCFC gaps)",fi(fr.lost_mcfc)],["Frame error rate",{v:pct(fr.fer),c:N(fr.fer)?"":fr.fer>0.1?"bad":fr.fer>0.01?"warn":"ok"}],
+    ["Idle (OID) frames",fi(fr.oid_frames)+" ("+f(fr.idle_frame_pct,1,"%")+")"],["Channel efficiency (packet data / data field)",f(fr.channel_efficiency_pct,1,"%")],
+    ["Frames per minute",f(fr.frames_per_min,2)],["Information rate (60 s)",f(fr.info_rate_bps,1,"bit/s")],["CADU rate on air (60 s)",f(fr.cadu_rate_bps,1,"bit/s")],
+    ["Passes / current pass",fi(rx.state.passes)+" / "+dur(rx.state.pass_duration_s)],["Since last frame",dur(rx.state.since_last_frame_s)]]);
+  const s=rx.series;series("rx-chart",[{v:s.rssi,c:"#4fb3ff"},{v:s.noise,c:"#ff8c42"},{v:s.snr,c:"#2ecc71"},{v:s.margin,c:"#c792ea"}]);
+  const H1=rx.hist.rssi,H2=rx.hist.snr;bars("rx-rssih",H1.bins,H1.bins.map((_,i)=>String(H1.lo+i*H1.step)),"#4fb3ff");
+  bars("rx-snrh",H2.bins,H2.bins.map((_,i)=>String(H2.lo+i*H2.step)),"#2ecc71");
+  bars("rx-rsh",rx.hist.rs_corrections,rx.hist.rs_corrections.map((_,i)=>String(i)),"#c792ea");
+  bars("rx-asmh",rx.hist.asm_bit_errors,["0","1","2","3","4"],"#ff8c42");
+  const R=S.radio,L=S.linkmgr,gc=R.ground_config,lc=R.link_change,rec=L.recommendation;
+  rows("rx-radio",[["Radio Control Unit",R.rcu?{v:"CONNECTED",c:"ok"}:{v:"absent (jumpers)",c:"warn"}],
+    ["Ground E22 (read-back)",gc?`CH${gc.channel} ${f(gc.freq_mhz,3)} MHz, ${gc.air_rate}, pwr ${gc.power_code}, LBT ${gc.lbt?"on":"off"}, RSSI byte ${gc.rssi_byte?"on":"off"}`:"—"],
+    ["Configured (station.toml)",`CH${R.configured.channel}, air code ${R.configured.air_rate}, pwr ${R.configured.power}, LBT ${R.configured.lbt}`],
+    ["Allowed channels",R.allowed_channels.join(" ")],["Coordinated change",lc?`${lc.kind} → ${lc.value}: ${lc.state}`:"none"],
+    ["Link manager",L.mode+" (target "+L.target_margin_db+" dB)"],["Recommendation",rec?`${rec.action}${rec.value!==undefined?" "+rec.value:""} — ${rec.why||""}`:"—"],
+    ["Margin p10 (10 min) / FER",rec&&rec.margin_p10_db!==undefined?f(rec.margin_p10_db,1,"dB")+" / "+pct(rec.fer):"—"],["Radio jobs pending",fi(R.jobs_pending)]]);
+  const gs=R.last_scan,scs=S.tlm.RFSCAN?S.tlm.RFSCAN.values:null;const n=84,g=new Array(n).fill(null),sc=new Array(n).fill(null);
+  if(gs)gs.noise.forEach((v,i)=>g[gs.first+i]=v);if(scs)scs.noise.forEach((v,i)=>sc[scs.first_ch+i]=v);
+  const both=[];for(let i=0;i<n;i++)both.push(g[i]!==null?g[i]:sc[i]);
+  bars("rx-scan",both,[...Array(n).keys()].map(i=>String(i)),"#4fb3ff",{lo:-130,hi:-60,unit:"dBm",marks:R.allowed_channels,colors:both.map((v,i)=>g[i]!==null?"#4fb3ff":"#ff8c42")});}
+function tlmTable(id,name){const p=S.tlm[name];if(!p){rows(id,[["no packet yet",""]]);return}
+  rows(id,Object.entries(p.values).filter(([k,v])=>!Array.isArray(v)).map(([k,v])=>[k,{v:typeof v==="number"?(Number.isInteger(v)?fi(v):f(v,3)):(v===null?"—":v),c:cls(p.limits[k])},p.units[k]||""]),["parameter","value","unit"]);}
+function framesPackets(){const vc=S.vc;rows("fp-vc",Object.entries(vc).map(([k,v])=>[k,fi(v.frames),fi(v.vcfc_gaps),fi(v.lost_frames),fi(v.packets),fi(v.idle_packets),fi(v.discarded_partials),fi(v.bad_length)]),
+    ["VC","frames","VCFC gaps","lost frames","packets","idle pkts","discarded partials","bad lengths"]);
+  rows("fp-apid",Object.entries(S.apids).map(([k,a])=>["0x"+a.apid.toString(16).padStart(3,"0")+" "+k,fi(a.count),fi(a.seq_gaps),fi(a.lost),fi(a.last_seq),dur(a.age_s),
+    a.latency.n?f(a.latency.mean,2):"—",a.latency.n?f(a.latency.min,2):"—",a.latency.n?f(a.latency.max,2):"—",fi(a.size),"VC"+a.vcid]),
+    ["APID","count","seq gaps","lost","last seq","age","latency mean s","min","max","size B","VC"]);
+  const t=S.time;rows("fp-time",[["SCLK partition (boot #)",fi(t.partition)],["Last SCLK",f(t.last_sclk,3,"s")],["SCET of last SCLK",utc(t.scet_of_last_sclk)],
+    ["Correlation samples",fi(t.corr_samples)],["Clock drift",f(t.drift_ppm,2,"ppm")],["Fit residual RMS",f(t.residual_rms_ms,2,"ms")],["OWLT (configured)",f(t.owlt_s*1e6,2,"µs")]]);
+  const c=S.cop;
+  rows("fp-clcw",[["Report value N(R)",fi(c.nr)],["Lockout",{v:c.lockout?"YES":"no",c:c.lockout?"bad":""}],["Retransmit",c.retransmit?"YES":"no"],["FARM-B counter",fi(c.farm_b)],
+    ["FOP V(S)",fi(c.vs)],["Outstanding AD frames",fi(c.outstanding)],["Queued",fi(c.queued)],["FOP suspended",{v:c.suspended?"YES":"no",c:c.suspended?"warn":""}]]);}
+function spacecraft(){tlmTable("sc-hk","HK");tlmTable("sc-rf","RF");const d=S.decoded;
+  rows("sc-fdir",[["Mode",d.mode||"—"],["Last reset cause",d.reset_cause||"—"],["FARM-1 state",d.farm_state||"—"],
+    ["E22 self-report",{v:d.radio_fault||"—",c:d.radio_fault&&d.radio_fault!=="NONE"?"bad":""}],["FDIR active",{v:d.fdir.length?d.fdir.join(", "):"none",c:d.fdir.length?"warn":"ok"}],
+    ["Sensors OK",d.sensors_ok.join(" ")||"—"],["Sensors missing",{v:d.sensors_missing.join(" ")||"none",c:d.sensors_missing.length?"warn":""}],["Downlink air rate",fi(d.air_rate_bps,"bit/s")]]);
+  $("sc-anom").innerHTML=S.anomalies.slice().reverse().map(a=>`<div>${utc(a.t)} ${a.param} = ${f(a.value,3)} (μ ${f(a.mean,3)}, σ ${f(a.sigma,3)}, z ${f(a.z,1)})</div>`).join("")||"<div class=dim>none</div>";}
+function q2e(w,x,y,z){const yaw=Math.atan2(2*(w*z+x*y),1-2*(y*y+z*z)),pitch=Math.asin(Math.max(-1,Math.min(1,2*(w*y-z*x)))),roll=Math.atan2(2*(w*x+y*z),1-2*(x*x+y*y));return [yaw,pitch,roll].map(r=>r*180/Math.PI)}
+function science(){const m=S.tlm.MAG?S.tlm.MAG.values:null,cfg=S.science_cfg||{r_outboard_m:1,r_inboard_m:.5};
+  if(m){const mag=(x,y,z)=>N(x)?null:Math.hypot(x,y,z);const k=Math.pow(cfg.r_outboard_m/cfg.r_inboard_m,3);
+    const sc=["x","y","z"].map(a=>N(m["ob_b_"+a])||N(m["ib_b_"+a])?null:(m["ib_b_"+a]-m["ob_b_"+a])/(k-1));
+    const amb=["x","y","z"].map((a,i)=>sc[i]===null?null:m["ob_b_"+a]-sc[i]);
+    rows("sci-mag",[["Outboard RM3100",f(m.ob_b_x,3),f(m.ob_b_y,3),f(m.ob_b_z,3),f(mag(m.ob_b_x,m.ob_b_y,m.ob_b_z),3),f(m.ob_rms,3)],
+      ["Inboard RM3100 (optional)",f(m.ib_b_x,3),f(m.ib_b_y,3),f(m.ib_b_z,3),f(mag(m.ib_b_x,m.ib_b_y,m.ib_b_z),3),f(m.ib_rms,3)],
+      ["Body BMM150 (Nicla Sense ME)",f(m.body_b_x,3),f(m.body_b_y,3),f(m.body_b_z,3),f(mag(m.body_b_x,m.body_b_y,m.body_b_z),3),f(m.body_rms,3)],
+      ["Gradient IB−OB",...["x","y","z"].map(a=>N(m["ib_b_"+a])||N(m["ob_b_"+a])?"—":f(m["ib_b_"+a]-m["ob_b_"+a],3)),"",""],
+      ["S/C field @ OB (est)",...sc.map(v=>f(v,3)),sc[0]===null?"—":f(Math.hypot(...sc),3),""],
+      ["Ambient field (corrected)",...amb.map(v=>f(v,3)),amb[0]===null?"—":f(Math.hypot(...amb),3),""],
+      ["Samples / PA during sampling",fi(m.nsamples),m.flags&1?"PA keyed":"PA off","RM3100 CC",fi(m.rm3100_cc),""]],["µT","Bx","By","Bz","|B|","RMS"]);}
+  else rows("sci-mag",[["no MAG packet yet",""]]);
+  const a=S.tlm.ATT?S.tlm.ATT.values:null;
+  if(a){const e1=N(a.q_triad_w)?null:q2e(a.q_triad_w,a.q_triad_x,a.q_triad_y,a.q_triad_z),e2=N(a.q_fus_w)?null:q2e(a.q_fus_w,a.q_fus_x,a.q_fus_y,a.q_fus_z);
+    let dq="—";if(e1&&e2){const d=1-2*Math.pow(a.q_triad_w*a.q_fus_w+a.q_triad_x*a.q_fus_x+a.q_triad_y*a.q_fus_y+a.q_triad_z*a.q_fus_z,2);dq=f(Math.acos(Math.max(-1,Math.min(1,1-d)))*180/Math.PI,2,"°")}
+    rows("sci-att",[["BHI260 fusion q (w x y z)",[a.q_fus_w,a.q_fus_x,a.q_fus_y,a.q_fus_z].map(v=>f(v,4)).join(" ")],["Fusion yaw / pitch / roll",e2?e2.map(v=>f(v,2)).join(" / ")+" °":"—"],
+      ["Fusion accuracy estimate",N(a.q_fus_acc)?"—":f(a.q_fus_acc,3,"rad")+" ("+f(a.q_fus_acc*180/Math.PI,2,"°")+")"],
+      ["TRIAD q (w x y z)",[a.q_triad_w,a.q_triad_x,a.q_triad_y,a.q_triad_z].map(v=>f(v,4)).join(" ")],["TRIAD yaw / pitch / roll",e1?e1.map(v=>f(v,2)).join(" / ")+" °":"—"],
+      ["Fusion vs TRIAD difference",dq],["Acceleration g",[a.acc_x,a.acc_y,a.acc_z].map(v=>f(v,3)).join(" ")+(N(a.acc_x)?"":"  |a| "+f(Math.hypot(a.acc_x,a.acc_y,a.acc_z),3))],
+      ["Rate °/s",[a.gyro_x,a.gyro_y,a.gyro_z].map(v=>f(v,1)).join(" ")],["BMM150 µT",[a.mag_x,a.mag_y,a.mag_z].map(v=>f(v,1)).join(" ")+(N(a.mag_x)?"":"  |B| "+f(Math.hypot(a.mag_x,a.mag_y,a.mag_z),1))]]);}
+  else rows("sci-att",[["no ATT packet yet",""]]);
+  tlmTable("sci-env","ENV");const sp=S.tlm.SPEC?S.tlm.SPEC.values:null;
+  if(sp){const nm=[410,435,460,485,510,535,560,585,610,645,680,705,730,760,810,860,900,940];const col=w=>w<450?"#8b5cf6":w<495?"#3b82f6":w<570?"#22c55e":w<590?"#eab308":w<620?"#f97316":w<700?"#ef4444":"#7f1d1d";
+    bars("sci-spec",nm.map(w=>sp["cal_"+w+"nm"]),nm.map(String),"#4fb3ff",{unit:"µW",colors:nm.map(col)});
+    bars("sci-spec2",nm.map(w=>sp["raw_"+w+"nm"]),nm.map(String),"#c792ea",{unit:"cts"});
+    const G=["1x","3.7x","16x","64x"],L=[sp.flags&2?"white":"",sp.flags&4?"IR":"",sp.flags&8?"UV":""].filter(x=>x).join("+")||"off (passive)";
+    rows("sci-specinfo",[["Valid",sp.flags&1?"yes":"NO"],["Gain / integration",(G[sp.gain_code]||"?")+" / "+fi(sp.int_cycles)+" cycles = "+f(sp.int_cycles*2.8,1,"ms")],["Lamps",L],
+      ["Die temperature dev 0 / 1 / 2",[sp.temp_0,sp.temp_1,sp.temp_2].map(v=>f(v,0)).join(" / ")+" °C"]]);}}
+function commanding(){const c=S.cop;rows("cmd-cop",[["SDLS authentication",{v:c.sdls?"ON (HMAC-SHA-256)":"OFF — unauthenticated",c:c.sdls?"ok":"warn"}],["SDLS sequence number",fi(c.sdls_sn)],
+    ["V(S)",fi(c.vs)],["N(R)",fi(c.nr)],["Lockout",c.lockout?"YES":"no"],["Retransmit flag",c.retransmit?"YES":"no"],["Outstanding / queued / bypass",`${c.outstanding} / ${c.queued} / ${c.pending_bypass}`]]);
+  rows("cmd-hist",c.recent.slice().reverse().map(r=>["#"+r.id,r.text,r.kind,{v:r.state,c:r.state==="EXECUTED"?"ok":["FAILED","TIMEOUT","SUSPENDED"].includes(r.state)?"bad":"warn"},
+    r.ns??"—",fi(r.tx),utc(r.t_queued).slice(11),N(r.t_radiated)?"—":utc(r.t_radiated).slice(11),N(r.t_accepted)?"—":utc(r.t_accepted).slice(11),N(r.t_done)?"—":utc(r.t_done).slice(11),f(r.rtlt_s,1,"s"),r.detail||""]),
+    ["#","command","type","state","N(S)","tx","queued","radiated","accepted","done","radiate→done","detail"]);
+  const io=S.station_io||{};
+  rows("cmd-io",[["MCU link",io.connected?{v:"CONNECTED",c:"ok"}:{v:"no hello (station I/O off or MCU not running)",c:"warn"}],["Firmware",io.fw||"—"],
+    ["CardKB #1 (command entry)",io.kb1?{v:"present",c:"ok"}:"not detected"],["CardKB #2 (2nd operator, 'Y' = AUTH)",io.kb2?{v:"present",c:"ok"}:"not detected"],
+    ["Radio Control Unit",S.radio.rcu?{v:"active",c:"ok"}:"off"],["Typing on CardKB",{v:"> "+(io.input||"")+"_",c:""}]]);
+  $("cmd-console").innerHTML=S.console.slice().reverse().map(([t,x])=>`<div>${utc(t).slice(11)} ${x}</div>`).join("");
+  $("cmd-pending").innerHTML=S.pending_confirm.map(p=>`<div style="margin:4px 0"><span class="warn">⚠ #${p.id} ${p.text}</span>
+     <button class="btn red" onclick="post('/api/confirm',{id:${p.id},role:'CONFIRM'})">CONFIRM</button>
+     <button class="btn" onclick="post('/api/confirm',{id:${p.id},role:'AUTH'})">2nd-op AUTH</button>
+     <button class="btn" onclick="post('/api/cancel',{id:${p.id}})">cancel</button>
+     <span class="note">${p.confirmed?"confirmed ":""}${p.authorized?"authorized":"awaiting AUTH"}</span></div>`).join("");
+  if(DICT&&!$("cmd-dict").dataset.done){rows("cmd-dict",Object.entries(DICT.commands).map(([k,v])=>[k,"0x"+v.opcode.toString(16).padStart(2,"0"),v.args.join(" "),{v:v.hazardous?"HAZ":"",c:v.hazardous?"bad":""},{v:v.desc,c:""}])
+      .concat(Object.entries(DICT.directives).map(([k,v])=>[k,"dir","","",v])),["mnemonic","op","args","","description"]);$("cmd-dict").dataset.done=1;}}
+function events(){const lv=l=>l==="ERROR"?"bad":l==="WARN"?"warn":"";
+  $("ev-log").innerHTML=S.events.slice().reverse().map(e=>`<div class="${lv(e.level)}">${utc(e.t)} ${e.level.padEnd(5)} ${e.source.padEnd(8)} ${e.text}</div>`).join("");
+  $("ev-evr").innerHTML=S.evrs.slice().reverse().map(e=>`<div>${utc(e.ert)} SCLK ${f(e.sclk,3)} [${e.severity}] 0x${e.event_id.toString(16).padStart(4,"0")} ${e.text}</div>`).join("");}
+function overview(){const rx=S.rx,rf=rx.rf,fr=rx.frames,hk=S.tlm.HK?S.tlm.HK.values:{};
+  const T=[["Signal",rx.state.los?"LOS":"AOS",rx.state.los?"bad":"ok","pass "+dur(rx.state.pass_duration_s)],["RSSI",f(rf.rssi_dbm,0),"","dBm, noise "+f(rf.noise_dbm,0)],
+    ["SNR est",f(rf.snr_est_db,1),"","dB"],["Margin est",f(rf.margin_est_db,1),N(rf.margin_est_db)?"":rf.margin_est_db<3?"bad":rf.margin_est_db<6?"warn":"ok","dB vs "+f(rf.sensitivity_est_dbm,0)+" dBm"],
+    ["Frames",fi(fr.ok),"","lost "+fi(fr.lost_mcfc)+" · FER "+pct(fr.fer)],["Info rate",f(fr.info_rate_bps,0),"","bit/s (60 s)"],
+    ["RS corrected",fi(rx.decoder.symbols_corrected),"","sym · uncorr "+fi(rx.decoder.uncorrectable)],["S/C mode",S.decoded.mode||"—","","FDIR "+(S.decoded.fdir.length||0)],
+    ["Bus temp",f(hk.bus_temp,1),"","°C (Nicla Sense ME)"],["S/C radio health",hk.radio_fault?["","UNDER-V","OVER-V","OVER-TEMP","OV+OT"][hk.radio_fault]||"?":(N(hk.radio_fault)?"—":"OK"),hk.radio_fault?"bad":"ok","E22 self-report"],["Uplink RSSI",f((rx.two_way||{}).uplink_rssi,0),"","dBm at S/C"],
+    ["Commands",fi(hk.cmd_accepted),"","acc · rej "+fi(hk.cmd_rejected)]];
+  $("ov-tiles").innerHTML=T.map(([l,v,c,s])=>`<div class="tile"><div class="l">${l}</div><div class="v ${c}">${v}</div><div class="s">${s}</div></div>`).join("");
+  const s=rx.series;series("ov-chart",[{v:s.rssi,c:"#4fb3ff"},{v:s.noise,c:"#ff8c42"},{v:s.snr,c:"#2ecc71"}]);
+  const ok=n=>S.tlm[n]?dur(S.utc-S.tlm[n].ert)+" ago":"—";
+  rows("ov-sc",[["Mode / uptime",(S.decoded.mode||"—")+" / "+dur(hk.uptime_s)],["SCLK partition",fi(hk.sclk_partition)],["FDIR",S.decoded.fdir.join(", ")||"none"],
+    ["Bus temp / E22 fault reports",f(hk.bus_temp,1)+" °C / "+fi(hk.radio_fault_reports)],["SSR capacity",fi(hk.ssr_kib,"KiB")],["SSR fill",f(hk.ssr_fill,1,"%")],["Last HK / RF / MAG",ok("HK")+" / "+ok("RF")+" / "+ok("MAG")],
+    ["SDLS auth failures",fi(hk.sdls_auth_fail)],["Sensors missing",S.decoded.sensors_missing.join(" ")||"none"]]);
+  $("ov-events").innerHTML=S.events.slice(-14).reverse().map(e=>`<div class="${e.level==="ERROR"?"bad":e.level==="WARN"?"warn":""}">${utc(e.t).slice(11)} ${e.source} ${e.text}</div>`).join("");
+  rows("ov-cmds",S.cop.recent.slice(-8).reverse().map(r=>["#"+r.id,r.text,{v:r.state,c:r.state==="EXECUTED"?"ok":["FAILED","TIMEOUT","SUSPENDED"].includes(r.state)?"bad":"warn"},f(r.rtlt_s,1,"s")]));}
+function render(){header();({"OVERVIEW":overview,"RECEIVER":receiver,"FRAMES & PACKETS":framesPackets,"SPACECRAFT":spacecraft,"SCIENCE":science,"COMMANDING":commanding,"EVENTS":events})[tab]();}
+async function poll(){try{const r=await fetch("/api/state");S=await r.json();render();}catch(e){$("h-alarm").textContent="GDS LINK DOWN";$("h-alarm").className="pill bg-bad";}setTimeout(poll,1000);}
+function getTok(){try{return localStorage.getItem("dssq-token");}catch(e){return null;}}
+function setTok(t){try{localStorage.setItem("dssq-token",t);}catch(e){}}
+async function post(url,body,retry=true){const h={"Content-Type":"application/json"};const tok=getTok();if(tok)h["X-DSSQ-Token"]=tok;
+  const r=await fetch(url,{method:"POST",headers:h,body:JSON.stringify(body)});
+  if(r.status===403&&retry){const t=prompt("This station requires the commanding token ([gds] http_token in station.toml):");if(t){setTok(t.trim());return post(url,body,false);}}
+  const j=await r.json();$("cmd-msg").textContent=(j.status||"")+" "+(j.message||j.text||(j.lines||[]).join(" | ")||j.error||"");return j;}
+$("cmd-in").addEventListener("keydown",async e=>{if(e.key==="Enter"){const t=e.target.value.trim();if(!t)return;await post("/api/cmd",{text:t});e.target.value="";}});
+fetch("/api/dictionary").then(r=>r.json()).then(d=>DICT=d);
+window.addEventListener("resize",()=>S&&render());
+poll();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# VENTUNO Q MCU (STM32H5F5, Arduino core on Zephyr). FQBN: arduino:zephyr:ventunoq
+# Station I/O: CardKB keyboards, annunciator LEDs/buzzer, Radio Control Unit.
+# No third-party libraries: Wire and Arduino_RouterBridge ship with arduino:zephyr.
+profiles:
+  default:
+    fqbn: arduino:zephyr:ventunoq
+    platforms:
+      - platform: arduino:zephyr
+default_profile: default

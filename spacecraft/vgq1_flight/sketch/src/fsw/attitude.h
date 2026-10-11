@@ -1,0 +1,47 @@
+// =============================================================================
+//  Attitude determination helpers (AACS analogue). Pure C++ (host-testable).
+//
+//  * TRIAD (Black, 1964): body attitude w.r.t. local NED from two vector pairs -
+//    gravity (accelerometer, more accurate -> primary) and the geomagnetic field,
+//    both measured by the Nicla Sense ME. It is an attitude solution independent
+//    of the BHI260's own fusion filter, so the two can be compared on the ground.
+//    The NED field reference comes from inclination/declination for your site
+//    (NOAA/BGS World Magnetic Model calculator), set in config.h.
+//  * Running magnetometer statistics (mean vector, RMS of |B| fluctuation),
+//    Welford's single-pass algorithm in SINGLE precision: the STM32U585 FPU is
+//    FP32-only (FP64 is software-emulated, ~17x slower), and the textbook
+//    E[x^2]-E[x]^2 form would cancel catastrophically in float (|B|^2 ~ 2500 uT^2
+//    vs. a 10 nT fluctuation variance of 1e-4 uT^2).
+// =============================================================================
+#pragma once
+#include <stdint.h>
+
+namespace vgq {
+
+struct Vec3 { float x, y, z; };
+struct Quat { float w, x, y, z; };
+
+Vec3 v_cross(const Vec3& a, const Vec3& b);
+float v_dot(const Vec3& a, const Vec3& b);
+float v_norm(const Vec3& a);
+Vec3 v_unit(const Vec3& a);
+
+// accel_b: specific force in body frame (at rest it points UP); mag_b: field in body.
+// incl_deg / decl_deg: local geomagnetic inclination (+down) and declination (+east).
+// Produces q = rotation from NED to body (scalar first). Returns false if degenerate.
+bool triad_ned(const Vec3& accel_b, const Vec3& mag_b, float incl_deg, float decl_deg, Quat& q);
+
+class MagStats {
+ public:
+  void reset() { n_ = 0; mx_ = my_ = mz_ = mm_ = m2_ = 0.0f; }
+  void add(float bx, float by, float bz);
+  uint8_t count() const { return (uint8_t)(n_ > 255 ? 255 : n_); }
+  void mean(float& bx, float& by, float& bz) const;
+  float rms_fluct() const;   // sqrt(E[|B|^2] - E[|B|]^2)
+ private:
+  uint32_t n_ = 0;
+  float mx_ = 0, my_ = 0, mz_ = 0;    // running mean vector
+  float mm_ = 0, m2_ = 0;             // running mean of |B| and sum of squared deviations
+};
+
+}  // namespace vgq
