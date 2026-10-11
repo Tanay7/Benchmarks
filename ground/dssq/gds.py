@@ -330,7 +330,8 @@ class GroundStation:
         if self._fwd_frames or self._fwd_packets:
             self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.event("INFO", "GDS", f"DSS-Q ground station {__version__} started ({mode}), radio "
-                   f"{self.settings.model.name} CH{self.settings.channel} code {self.settings.rate_code}; SDLS TC "
+                   f"{self.settings.model.name}{' (auto: follows the spacecraft)' if self.settings.model_auto else ''} "
+                   f"CH{self.settings.channel} code {self.settings.rate_code}; SDLS TC "
                    f"{self.sdls_tc.service_name} / TM {SERVICE_NAMES[self.sdls_tm.service]}; tc_framing "
                    f"{self.fop.framing}, tm_framing {cfg['link']['tm_framing']}")
         if self.key_error and (self.sdls_tc_configured or self.sdls_tm_configured):
@@ -715,6 +716,9 @@ class GroundStation:
         seen = RADIO_MODELS.get(mid) if mid is not None else None
         if seen is None:
             return
+        if self.settings.model_auto and seen != self.settings.model.name and seen in link.MODELS \
+                and not link.MODELS[seen].packet_mode:
+            self._follow_sc_model(link.MODELS[seen], now)
         mismatch = seen != self.settings.model.name
         if seen != self.model_seen or mismatch != self.model_mismatch:
             if mismatch:
@@ -724,6 +728,23 @@ class GroundStation:
             elif self.model_mismatch:
                 self.event("INFO", "RADIO", f"spacecraft radio model {seen} matches the station again", now)
         self.model_seen, self.model_mismatch = seen, mismatch
+
+    def _follow_sc_model(self, model: link.RadioModel, now: float) -> None:
+        """[radio] model = "auto" / absent (contract 33): the two E22 modules share one
+        register protocol and the flight software selects between them with a strap at
+        boot, so the station follows the model the spacecraft reports. It drives the
+        link-budget, sensitivity, power and busy-time figures (settings, receiver
+        statistics, link manager). The station module's own register writes stay with
+        the RadioManager built at start-up (T33D rules: the T37S abnormal-status bit is
+        never written to a module whose model is not configured explicitly). An SX126x
+        report never switches an E22 station: that is a wiring difference, flagged by
+        the mismatch check."""
+        old = self.settings.model.name
+        self.settings = self.settings.with_(model=model)
+        self.rx.set_settings(self.settings)
+        self.link_mgr.model = model
+        self.event("INFO", "RADIO", f"[radio] model = auto: following the spacecraft's radio model {model.name} "
+                   f"(was {old}) for the link budget, sensitivity and power figures", now)
 
     def _on_cmdver(self, v: dict[str, Any], now: float) -> None:
         if v.get("tc_seq") == CMDVER_SEQ_STORED:
@@ -1981,8 +2002,8 @@ class Runner:
 
     def _stage_afc(self) -> None:
         """Sends AFC corrections with the backend's rf_foff(hz) -> 1 | -1 | -2 | None (contract
-        24.8); the committed Sx126xBridge names the same call set_freq_offset (used when the
-        backend has no rf_foff). No backend / no answer confirms as AFC_RPC_NO_ANSWER."""
+        24.8; Sx126xBridge.rf_foff, an alias of its set_freq_offset, which is used for a
+        backend without rf_foff). No backend / no answer confirms as AFC_RPC_NO_ANSWER."""
         for corr in self.gs.take_afc_out():
             result: int | None = None
             radio = self.radio

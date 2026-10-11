@@ -31,6 +31,11 @@
 //  it stops transmitting and prints FF FF FF 01 / 02 / 03 / 04 every 500 ms. The
 //  E22-400T33D has no such log; this driver never sets that bit on it.
 //
+//  Both models share this register protocol, so one binary serves both: begin()
+//  reads the model strap (contract 33; config.h PIN_RADIO_MODEL_STRAP) and every
+//  model-dependent detail - REG1 image, power-code meaning, fault-log decoding,
+//  sensitivity - follows the model found there.
+//
 //  The receive byte stream is framed by vgq::E22StreamParser and the AUX-based
 //  transmission tracking is vgq::E22TxTracker (both pure, in radio.h/.cpp).
 // =============================================================================
@@ -46,8 +51,11 @@ class E22Radio : public Radio {
   enum Mode : uint8_t { NORMAL = 0, WOR = 1, CONFIG = 2, SLEEP = 3 };   // M1:M0
 
   // model: VGQ_RADIO_E22_T33D or VGQ_RADIO_E22_T37S (begin() fails for anything
-  // else). Stores references only; touches no hardware until begin().
-  E22Radio(HardwareSerial& serial, int pin_m0, int pin_m1, int pin_aux, uint8_t model);
+  // else) - the build default. pin_strap (contract 33): the model strap read by
+  // begin() before anything else (jumper to GND = E22-400T37S, open = `model`; see
+  // e22_strap_model()), -1 = none. Stores references only; touches no hardware
+  // until begin().
+  E22Radio(HardwareSerial& serial, int pin_m0, int pin_m1, int pin_aux, uint8_t model, int pin_strap = -1);
 
   const char* name() const override;
   bool begin() override;
@@ -64,6 +72,11 @@ class E22Radio : public Radio {
   bool read_product_info(uint8_t info[7]);       // PID 80H..86H (returns in the previous mode)
   Mode mode() const { return mode_; }
   uint16_t command_rejects() const { return parser_.command_rejects(); }   // FF FF FF replies
+  // Model strap as read by begin(): fitted (a pin is configured), and how many of the
+  // kStrapSamples reads were LOW (jumper to GND). The model chosen is model().
+  bool strap_fitted() const { return strap_ >= 0; }
+  uint8_t strap_low_reads() const { return strap_low_; }
+  uint8_t build_model() const { return build_model_; }
 
  private:
   bool aux_ready() const;
@@ -73,10 +86,18 @@ class E22Radio : public Radio {
   bool command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len, uint32_t timeout_ms);
 
   HardwareSerial& serial_;
-  const int m0_, m1_, aux_;
+  const int m0_, m1_, aux_, strap_;
+  const uint8_t build_model_;
+  uint8_t strap_low_ = 0;
   Mode mode_ = SLEEP;
   E22StreamParser parser_;
   E22TxTracker tx_;
 };
+
+#if VGQ_RADIO != VGQ_RADIO_SX126X
+// The flight instance - the same object as flight_radio() - with its model-strap
+// state for the boot EVR, so the executive needs no downcast. E22 builds only.
+E22Radio& flight_e22();
+#endif
 
 }  // namespace vgq

@@ -12,7 +12,8 @@
 #                   test tools and the optional independent references.
 #    arduino-build  The real Arduino build (official arduino:zephyr platform via
 #                   arduino-cli, the same compiler App Lab uses) of the
-#                   VENTUNO Q station sketch.
+#                   VENTUNO Q station sketch and of the UNO Q flight sketch
+#                   (default E22 radio build), each with its default profile.
 #
 #  Actions are pinned to full commit hashes (version in the comment).
 # =============================================================================
@@ -107,3 +108,9 @@ jobs:
 
       - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
         run: arduino-cli compile --profile default --warnings all ground/station_io/sketch
+
+      # Default E22 build (E22-400T33D; the T37S is selected by a strap at boot, so the
+      # same binary covers it). The profile names the FQBN (arduino:zephyr:unoq) and the
+      # bundled RadioLib, which the E22 build stages but never compiles.
+      - name: UNO Q flight sketch (default radio, E22-400T33D / T37S by strap)
+        run: arduino-cli compile --profile default --warnings all spacecraft/vgq1_flight/sketch

@@ -41,6 +41,9 @@
 #define VGQ_RADIO_SX126X 3
 #endif
 // Radio fitted to this build (config.h selects it; the E22-400T33D is the default).
+// For the E22 builds this is the default model only: the boot strap (contract 33,
+// e22_strap_model()) may select the other E22 model at run time - Radio::model()
+// is the model in use.
 #ifndef VGQ_RADIO
 #define VGQ_RADIO VGQ_RADIO_E22_T33D
 #endif
@@ -164,11 +167,20 @@ int16_t e22_sensitivity_ddbm(uint8_t model, uint8_t rate_code, SensSource* src);
 // frame periods are unchanged before the first AUX measurement). 0 if the code is invalid.
 uint32_t e22_airtime_ms(uint8_t rate_code, size_t n);
 // Configuration registers 00H..08H for one model (CRYPT left 0). REG1 bit 2
-// (abnormal-status log) is set for the E22-400T37S only: the T33D reserves it.
+// (abnormal-status log) is set for the E22-400T37S only: the T33D reserves it. The
+// T37S has no power levels, so its REG1 power field is always written 00 (REG1 =
+// 0x24 with the settings used here, contract 33) whatever the power code.
 void e22_build_regs(uint8_t model, const RadioSettings& s, uint8_t regs[9]);
 // Compares the 7 read-back registers 00H..06H with what was written. The T33D's
 // reserved REG1 bits 4..2 are ignored.
 bool e22_regs_match(uint8_t model, const uint8_t written[7], const uint8_t read_back[7]);
+// E22 model strap (contract 33): the model an E22 build runs with, from `n` reads of
+// the strap pin (internal pull-up) of which `low` read LOW. A strict majority LOW
+// (jumper to GND) selects the E22-400T37S; otherwise - pin open, no samples, an
+// inconsistent count - the build default `build_model` stays. A build_model that is
+// not an E22 model (the SX126x option) is returned unchanged: the strap never turns
+// a SPI build into a UART one.
+uint8_t e22_strap_model(uint8_t build_model, uint8_t low, uint8_t n);
 
 // ---- SX126x LoRa profiles and maths (contract 2.2, 14) ---------------------------
 struct LoraProfile {
@@ -240,6 +252,9 @@ uint8_t radio_boot_power_code(bool brownout_reset, uint8_t nominal_code, uint8_t
 class E22StreamParser {
  public:
   explicit E22StreamParser(uint8_t model) : model_(model) {}
+  // The model whose reports are decoded (FF FF FF 0x: E22-400T37S only); set by
+  // E22Radio::begin() from the boot strap, before any octet arrives.
+  void set_model(uint8_t model) { model_ = model; }
   void on_byte(uint8_t b, uint32_t now);
   void noise_requested(uint32_t now);
   bool noise_pending() const { return awaiting_noise_; }
@@ -299,7 +314,7 @@ class Radio {
   Radio(const Radio&) = delete;
   Radio& operator=(const Radio&) = delete;
 
-  uint8_t model() const { return model_; }           // VGQ_RADIO_* code
+  uint8_t model() const { return model_; }           // VGQ_RADIO_* code of the model in use
   virtual const char* name() const = 0;              // e.g. "E22-400T33D", "SX1268"
 
   // Hardware bring-up (pins, bus, module self-test). false: module absent/unresponsive.
@@ -355,7 +370,9 @@ class Radio {
   ~Radio() = default;                                // never deleted through the interface
   static void inc16(uint16_t& c) { if (c < UINT16_MAX) ++c; }
 
-  const uint8_t model_;
+  // Fixed for the SX126x; an E22 driver may change it in begin() only (boot strap,
+  // contract 33) - it never changes once the radio is running.
+  uint8_t model_;
   const int8_t pa_gain_db_;
   RadioSettings settings_;
   bool cfg_ok_ = false;

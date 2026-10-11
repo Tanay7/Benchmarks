@@ -1076,3 +1076,247 @@ def test_config_validation_rules():
                 {"science": {"field_ut": -3.0}}, {"radio": {"model": "E22-400T30D"}}):
         with pytest.raises(ValueError):
             validate(merge(bad))
+
+
+# ---- Phase B (WS6b) ----
+from dssq.config import merge, validate  # noqa: E402
+
+STATUS20 = "S|DSSQ-IO 3.1 SX126x|SX1268|{state}|23|1|0|{flags}|150|12|1|0|4|0|2|0|0|1|0|{up}|{foff}"
+
+
+def _status(state=1, flags=7, up=100, foff=0):
+    return STATUS20.format(state=state, flags=flags, up=up, foff=foff)
+
+
+# ------------------------------------------------- 20-field status line, flags b3..b5
+def test_status_line_with_frequency_offset_and_flags(sxb):
+    radio, b, _clk = sxb
+    assert len(_status().split("|")) == 1 + len(sx.STATUS_FIELDS) == 21
+    b.handlers["rf_evt"](_status(flags=7 | 8 | 16 | 32, foff=-1234))
+    st = radio.mcu
+    assert st["freq_offset_hz"] == -1234 and st["state_name"] == "RX" and st["uptime_s"] == 100
+    assert st["tcxo_fallback"] and st["cfg_pending"] and st["calib_error"]          # b3, b4, b5
+    assert st["cad_before_tx"] and st["rx_boost"] and st["rx_boost_verified"]       # b0, b1, b2
+    cfg = radio.get_config()
+    assert (cfg["freq_offset_hz"], cfg["tcxo_fallback"], cfg["cfg_pending"], cfg["calib_error"]) == \
+        (-1234, True, True, True)
+    b.handlers["rf_evt"](_status(flags=7, foff=50_000))
+    assert not (radio.mcu["tcxo_fallback"] or radio.mcu["cfg_pending"] or radio.mcu["calib_error"])
+    b.handlers["rf_evt"](STATUS.format(up=101))                       # 19 fields: an older sketch
+    assert radio.mcu["freq_offset_hz"] is None and radio.mcu["uptime_s"] == 101
+    n = radio.stats["evt_rejected"]
+    for bad in (_status(flags=64), _status(foff=50_001), _status(foff=-50_001), _status(foff="1.5"),
+                _status(foff="+5"), _status() + "|7"):
+        b.handlers["rf_evt"](bad)
+    assert radio.stats["evt_rejected"] == n + 6
+
+
+# ---------------------------------------------- set_freq_offset / rf_foff (post-G1 check)
+def test_rf_foff_returns_the_mcu_result_and_none_on_a_link_failure(sxb):
+    radio, b, _clk = sxb
+    assert radio.rf_foff.__doc__ and callable(radio.rf_foff)          # contract name (24.8)
+    b.replies["rf_foff"] = [1, -1, -2, TimeoutError("router"), ConnectionError("down"), "x", True, 1]
+    assert radio.rf_foff(1500) == sx.FOFF_APPLIED and radio.freq_offset_hz == 1500
+    assert radio.rf_foff(-60) == sx.FOFF_RANGE and radio.freq_offset_hz == 1500    # not applied
+    assert radio.set_freq_offset(700) == sx.FOFF_RADIO_DOWN and radio.freq_offset_hz == 1500
+    for _ in range(4):                                                 # exceptions / odd replies
+        assert radio.rf_foff(700) is None and radio.freq_offset_hz == 1500
+    assert radio.set_freq_offset(-50_000) == 1 and radio.freq_offset_hz == -50_000
+    assert [c for c in b.calls if c[0] == "rf_foff"] == [("rf_foff", (h,)) for h in
+                                                          (1500, -60, 700, 700, 700, 700, 700, -50_000)]
+    st = radio.stats
+    assert (st["foff_set"], st["foff_failed"], st["call_errors"]) == (2, 2, 4)
+    for bad in (50_001, -50_001, 1.0, True, "5"):
+        with pytest.raises(ValueError):
+            radio.rf_foff(bad)
+    assert len([c for c in b.calls if c[0] == "rf_foff"]) == 8        # nothing sent for a bad value
+
+
+# ------------------------------------------------- offset re-sync gating (Sx126xBridge)
+def _foff_calls(b):
+    return [c[1][0] for c in b.calls if c[0] == "rf_foff"]
+
+
+def test_offset_resync_is_gated_on_a_fresh_idle_receiving_status():
+    clk = Clock()
+    b = FakeBridge()
+    radio = sx.Sx126xBridge(b, {"air_rate": 1}, clock=clk, poll_s=0.0, freq_offset_hz=800)
+    radio.attach()
+    radio.read()
+    assert _foff_calls(b) == [] and b.calls == []                      # MCU not heard yet
+    b.handlers["rf_evt"](_status(foff=800))                            # station already tuned
+    radio.read()
+    assert _foff_calls(b) == [] and b.calls[-1][0] == "rf_cfg"         # config push only
+    clk.t += 1
+    b.handlers["rf_evt"](_status(foff=0, up=101))                      # e.g. MCU lost the value
+    radio.read()
+    assert _foff_calls(b) == [800] and radio.stats["foff_resyncs"] == 1
+    clk.t += 1
+    b.handlers["rf_evt"](_status(foff=0, up=102))
+    radio.read()
+    assert _foff_calls(b) == [800]                                     # paced: PUSH_RETRY_S
+    for state, flags in ((3, 7), (2, 7), (4, 7), (0, 7), (1, 7 | 16)):  # TX, CAD, RESET, OFF, change pending
+        clk.t += sx.PUSH_RETRY_S + 0.1
+        b.handlers["rf_evt"](_status(state=state, flags=flags, foff=0, up=int(clk.t - 999_000)))
+        radio.read()
+    assert _foff_calls(b) == [800]
+    clk.t += sx.PUSH_RETRY_S + 0.1
+    b.handlers["rf_evt"](STATUS.format(up=int(clk.t - 999_000)))       # 19-field status: offset unknown
+    radio.read()
+    assert _foff_calls(b) == [800]
+    b.handlers["rf_evt"](_status(foff=0, up=int(clk.t - 999_000) + 1))
+    clk.t += sx.STATUS_STALE_S                                         # that status is now stale
+    radio.read()
+    assert _foff_calls(b) == [800]
+    b.replies["rf_foff"] = 1
+    assert radio.set_freq_offset(900) == 1 and _foff_calls(b) == [800, 900]
+    clk.t += 1.0                                                       # within FOFF_SETTLE_S of the reply
+    b.handlers["rf_evt"](_status(foff=800, up=int(clk.t - 999_000)))   # may predate the change
+    radio.read()
+    assert _foff_calls(b) == [800, 900]
+    clk.t += sx.PUSH_RETRY_S
+    b.handlers["rf_evt"](_status(foff=800, up=int(clk.t - 999_000)))   # settled and still wrong
+    radio.read()
+    assert _foff_calls(b) == [800, 900, 900] and radio.stats["foff_resyncs"] == 2
+
+
+# ------------------------------------------- RS rescue: CRC-failed CADU-length payloads (F-40)
+def test_parse_rf_rx_keeps_only_cadu_length_payloads_with_a_crc_error():
+    cadu = _cadu(9)
+    p = sx.parse_rf_rx((cadu.hex(), -1200, -1500, 300, 0), 5.0)
+    assert p is not None and p.data == cadu and p.crc_ok is False
+    short = sx.parse_rf_rx((cadu[:100].hex(), -1200, -1500, 300, 0), 5.0)
+    assert short is not None and short.data == b"" and short.crc_ok is False        # not a frame: dropped
+    longer = sx.parse_rf_rx(((cadu + b"\x00").hex(), -1200, -1500, 300, 0), 5.0)
+    assert longer is not None and longer.data == b""
+    ok = sx.parse_rf_rx((cadu[:100].hex(), -1200, -1500, 300, 1), 5.0)
+    assert ok is not None and ok.data == cadu[:100] and ok.crc_ok                  # good packets: any length
+
+
+def _corrupt(cadu: bytes, n: int) -> bytes:
+    b = bytearray(cadu)
+    for i in range(n):
+        b[4 + 7 * i] ^= 0x5A                                           # codeblock octets, ASM intact
+    return bytes(b)
+
+
+def test_gds_rs_rescue_through_the_real_bridge(sx_runner):
+    runner, clk = sx_runner
+    gs = runner.gs
+    b = FakeBridge()
+    radio = sx.Sx126xBridge(b, {"model": "SX126x", "air_rate": 1}, clock=clk, poll_s=0.0)
+    radio.attach()
+    good, fixable, broken = _cadu(1), _corrupt(_cadu(2), 6), _corrupt(_cadu(3), 30)
+    b.handlers["rf_rx"](good.hex(), -1100, 500, 100, 1)
+    b.handlers["rf_rx"](fixable.hex(), -1250, -1700, 100, 0)          # LoRa CRC failed, RS corrects 6
+    b.handlers["rf_rx"](broken.hex(), -1260, -1800, 100, 0)           # beyond RS t = 16: dropped
+    b.handlers["rf_rx"]("", -1270, -1900, 100, 0)                     # non-CADU CRC failure (MCU sent "")
+    pk = radio.packets()
+    assert [len(p.data) for p in pk] == [236, 236, 236, 0] and [p.crc_ok for p in pk] == [True, False, False, False]
+    before, afc_invalid = gs.rx.codeblocks, gs.afc.counters["rejected_invalid"]
+    for p in pk:
+        clk.t += 20.0
+        gs.ingest_packet(p)
+    dec = gs.snapshot()["rx"]["decoder"]
+    assert (dec["rs_rescued"], dec["rs_rescue_failed"]) == (1, 1)
+    assert gs.rx.codeblocks == before + 3                             # the empty payload never reaches RS
+    assert gs.rx.packets_crc_fail == 3 and gs.rx.packets_ok >= 1
+    assert gs.afc.counters["rejected_invalid"] == afc_invalid + 3     # CRC-failed packets never steer the AFC
+
+
+# --------------------------- post-G1 rf_foff check: the WS4 AFC glue with the real class
+def test_gds_afc_glue_with_the_real_sx126x_bridge(sx_runner):
+    runner, clk = sx_runner
+    gs = runner.gs
+    b = FakeBridge()
+    b.replies["rf_foff"] = [-1, -2, TimeoutError("router"), "garbage", 1]
+    radio = sx.Sx126xBridge(b, {"model": "SX126x", "air_rate": 1}, clock=clk, poll_s=0.0)
+    runner.radio = radio
+    for text in ("out of range", "radio down", "no answer (bridge)", "no answer (bridge)"):
+        assert _afc_wants(runner, clk) == [3906]
+        runner._stage_afc()
+        assert gs.afc.correction_hz == 0 and f"rf_foff(3906) failed: {text}" in _afc_events(gs)[-1]
+    assert gs.afc.counters["rpc_failures"] == 4
+    _afc_wants(runner, clk)
+    runner._stage_afc()
+    assert gs.afc.correction_hz == 3906 and radio.freq_offset_hz == 3906
+    assert _foff_calls(b) == [3906] * 5 and radio.stats["foff_set"] == 1
+
+
+# ---------------------------------------- radio model without code edits (contract 33)
+def test_absent_or_auto_model_follows_the_spacecraft_and_explicit_stays():
+    assert merge({})["radio"]["model"] == link.MODEL_AUTO and validate(merge({})) == []
+    for name in ("auto", "AUTO", " Auto "):
+        assert validate(merge({"radio": {"model": name}})) == []
+    for bad in ("", "E22-400T30D", 3):
+        with pytest.raises(ValueError):
+            validate(merge({"radio": {"model": bad}}))
+    s = link.RadioSettings.from_config(merge({})["radio"])
+    assert s.model_auto and s.model.name == E22_T33D and link.describe(s)["model_auto"] is True
+    assert not link.RadioSettings.from_config(load_config()["radio"]).model_auto     # station.toml: explicit
+    assert link.is_auto_model(None) and link.is_auto_model("auto") and not link.is_auto_model(E22_T37S)
+    assert link.get_model("auto") is link.get_model(None) is link.MODELS[E22_T33D]
+    # The station's own E22 registers in auto mode: T33D rules (REG1 b2 never written).
+    assert regs_from_cfg({**merge({})["radio"], "fault_log": True})[4] & 0x04 == 0
+
+
+def _gds(monkeypatch, tmp_path, model):
+    from dssq.gds import Runner
+    clk = Clock()
+    clk.t = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", clk)
+    cfg = load_config()
+    if model is None:
+        del cfg["radio"]["model"]
+        cfg = merge(cfg)                                               # absent key -> default "auto"
+    else:
+        cfg["radio"]["model"] = model
+    cfg["gds"]["archive_dir"] = str(tmp_path / "archive")
+    cfg["sdls"]["key_file"] = str(tmp_path / "no_key.hex")
+    return Runner(cfg, sim=True, web=False, archive=False), clk
+
+
+def _radio_events(gs):
+    return [(e["level"], e["text"]) for e in gs.events if e["source"] == "RADIO"]
+
+
+@pytest.mark.parametrize("model", [None, "auto"])
+def test_gds_follows_the_reported_e22_model_in_auto_mode(monkeypatch, tmp_path, model):
+    runner, clk = _gds(monkeypatch, tmp_path, model)
+    try:
+        gs = runner.gs
+        assert gs.settings.model_auto and gs.settings.model.name == E22_T33D
+        gs._on_rf({"radio_model": 1, "air_rate_code": 2}, clk.t)     # same model: nothing to do
+        assert gs.settings.model.name == E22_T33D and not _radio_events(gs)
+        gs._on_rf({"radio_model": 2, "air_rate_code": 2}, clk.t)     # spacecraft strapped to the T37S
+        assert gs.settings.model.name == E22_T37S and gs.rx.settings.model.name == E22_T37S
+        assert gs.link_mgr.model.name == E22_T37S and not gs.model_mismatch
+        ev = _radio_events(gs)
+        assert len(ev) == 1 and ev[0][0] == "INFO" and "following the spacecraft's radio model E22-400T37S" in ev[0][1]
+        snap = gs.snapshot()["radio"]
+        assert (snap["model"], snap["model_auto"], snap["power_dbm"], snap["sensitivity_dbm"]) == \
+            (E22_T37S, True, 37.0, -126.0)
+        gs._on_rf({"radio_model": 2, "air_rate_code": 2}, clk.t)
+        assert len(_radio_events(gs)) == 1                            # no repeat while unchanged
+        gs._on_rf({"radio_model": 3, "air_rate_code": 1}, clk.t)     # an SX126x spacecraft: not followed
+        assert gs.settings.model.name == E22_T37S and gs.model_mismatch
+        assert _radio_events(gs)[-1][0] == "WARN" and "SX126x" in _radio_events(gs)[-1][1]
+        gs._on_rf({"radio_model": 1, "air_rate_code": 2}, clk.t)     # strap removed again
+        assert gs.settings.model.name == E22_T33D and not gs.model_mismatch
+        assert gs.snapshot()["radio"]["power_dbm"] == 33.0
+    finally:
+        runner.close()
+
+
+def test_gds_with_an_explicit_model_never_follows(monkeypatch, tmp_path):
+    runner, clk = _gds(monkeypatch, tmp_path, E22_T33D)
+    try:
+        gs = runner.gs
+        assert not gs.settings.model_auto
+        gs._on_rf({"radio_model": 2, "air_rate_code": 2}, clk.t)
+        assert gs.settings.model.name == E22_T33D and gs.model_mismatch
+        lvl, text = _radio_events(gs)[-1]
+        assert lvl == "WARN" and "E22-400T37S" in text and "[radio] model" in text
+        assert gs.snapshot()["radio"]["model_auto"] is False
+    finally:
+        runner.close()

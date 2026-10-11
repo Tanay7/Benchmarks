@@ -29,6 +29,11 @@ tx_line_loss_db = 0.5
 # "E22-400T37S" (5 W module on the E22-400TBH-02 board, preserved option) or "SX126x"
 # (SX1268 / SX1262 over SPI on the VENTUNO Q MCU, via RadioLib; build switch
 # DSSQ_RADIO_SX126X = 1 of the station sketch). Both ends must use the same model.
+# "auto" (or no model line at all): an E22 station that follows the E22 model the
+# spacecraft reports in its RF packet - the flight software reads the T33D / T37S
+# choice from a jumper at boot (contract 33), so neither end needs an edit. The
+# station's own module registers then follow the T33D rules (the T37S abnormal-status
+# log is enabled only with model = "E22-400T37S" here).
 model = "E22-400T33D"
 port = "/dev/ttyUSB0"       # E22 models only: the USB-UART (check with: ls /dev/serial/by-id/)
 address = 0

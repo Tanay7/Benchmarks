@@ -7,8 +7,13 @@
 //  (docs/08 test plan). Source of every item: Phase B specification PB-3.1.
 //
 //  Pure C++ (no Arduino types): the host tests compile it (fsw/datalink.cpp).
-//  Build-time selections are #ifndef-guarded so that a build may override them
-//  (-D on the command line, or a sketch.yaml build property).
+//  Build-time selections are #ifndef-guarded so that a command-line build may
+//  override them with -D (arduino-cli --build-property
+//  "compiler.cpp.extra_flags=-D..."). Arduino App Lab always compiles the sketch's
+//  default profile, and a sketch.yaml profile cannot carry build flags (arduino-cli
+//  profiles have no build-properties entry, contract 25.1): for an App Lab build,
+//  edit the #define here. The E22 model needs no edit at all: it is read from a
+//  strap pin at boot (PIN_RADIO_MODEL_STRAP below, contract 33).
 // =============================================================================
 #pragma once
 #include <stddef.h>
@@ -27,6 +32,9 @@
 #ifndef VGQ_RADIO_SX126X
 #define VGQ_RADIO_SX126X 3            // SX1268 / SX1262 module on SPI through RadioLib 7.8.1
 #endif
+// Build-time radio. VGQ_RADIO_SX126X is a different wiring and selects other drivers.
+// For the E22 builds it is only the DEFAULT model: the strap pin below switches an
+// E22 build to the E22-400T37S at boot without any source edit (contract 33).
 #ifndef VGQ_RADIO
 #define VGQ_RADIO VGQ_RADIO_E22_T33D
 #endif
@@ -66,6 +74,23 @@
 static const int PIN_E22_M0  = 2;     // D2 (PB3)
 static const int PIN_E22_M1  = 3;     // D3 (PB0)
 static const int PIN_E22_AUX = 7;     // D7 (PB2)  input, module busy = LOW
+
+// ---- E22 model strap (contract 33): one binary for both E22 modules ----------------------
+// Read once at boot with the MCU's internal pull-up: a jumper from this pin to GND
+// selects the E22-400T37S, an open pin keeps the build's VGQ_RADIO (E22-400T33D by
+// default). It decides every model-dependent behaviour (power-code meaning, REG1
+// image, T37S abnormal-status log, sensitivity) and the RF packet radio_model; EVR
+// 0x0308 reports it. The SX126x option is a different wiring and stays a build switch.
+// Pin: header A0 = D14 = PA4 (digital-pin-gpios index 14 of the ArduinoCore-zephyr
+// variant arduino_uno_q_stm32u585xx), used by nothing else in this build. The board
+// DTS gives PA4 to DAC1 (dac1_out1_pa4, status okay), but the Zephyr DAC driver only
+// applies that pin mux at init; it enables the output in dac_channel_setup()
+// (drivers/dac/dac_stm32.c), i.e. on analogWrite(), which this software never calls.
+// pinMode() then makes PA4 a GPIO input. ABX00162 9.7: A0 is NOT 5 V tolerant - a
+// plain jumper to GND only, never a pull-up to 5 V. -1 = no strap (VGQ_RADIO decides).
+static const int      PIN_RADIO_MODEL_STRAP = 14;   // A0 / D14 (PA4)
+static const uint8_t  kStrapSamples         = 5;    // majority of 5 reads, kStrapSettleUs apart
+static const uint32_t kStrapSettleUs        = 1000; // lets the internal pull-up charge a jumper lead first
 
 // ---- SX126x module on SPI (VGQ_RADIO_SX126X) ------------------------------------------
 // UNO Q variant overlay digital-pin-gpios: D4 PA12, D5 PA11, D6 PB1, D8 PB4, D9 PB8,

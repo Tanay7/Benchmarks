@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 ground/archive/
 spacecraft/vgq1_flight/python/egse_data/
+# App Lab persistent data of the two Apps (<App>/data: EGSE archive and SCLK/SDLS state,
+# station archive, keys and tokens) - never committed
+spacecraft/vgq1_flight/data/
+ground/station_io/data/
 ground/config/sdls_key.hex
 spacecraft/vgq1_flight/sketch/src/sdls_key.h
 ground/.venv/

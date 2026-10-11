@@ -21,8 +21,12 @@
 //     sends the line, an empty Enter CONFIRMs the pending hazardous command, KEYTEST
 //     toggles raw key-code echo. With the two-person rule enabled the second operator
 //     authorises in the web dashboard (there is no second keyboard and no AUTH key).
-//   * AOS / ALARM / UPLINK LEDs and a buzzer (alarm escalation, LOS). If the GDS falls
-//     silent for 5 s, AOS goes dark and ALARM flashes fast ("GDS link down").
+//   * AOS / ALARM / UPLINK LEDs and a buzzer (alarm escalation, LOS, spacecraft beacon
+//     level). ALARM LED: RED alarm 4 Hz blink > beacon INTERESTING / IMPORTANT / URGENT
+//     1 / 2 / 3 Hz blink > YELLOW alarm steady > off; buzzer: a 400 ms tone on entering
+//     RED or at LOS, 2 / 3 short chirps when the beacon rises to IMPORTANT / URGENT
+//     (Phase B specification PB-6.4, contract 24.4). If the GDS falls silent for 5 s,
+//     AOS goes dark and ALARM flashes fast ("GDS link down").
 //   * Radio Control Unit for the UART E22 (default build): drives the station module's
 //     M0/M1 and reads AUX so the GDS can switch NORMAL / WOR / CONFIG / SLEEP.
 //   * Optional SX126x LoRa ground radio over SPI (build switch DSSQ_RADIO_SX126X, see
@@ -33,7 +37,8 @@
 //     (contract v3 sections 2.2, 14, 24.8 and 25; Semtech SX1261/2 datasheet rev 2.2).
 //
 //  Bridge services (Python side: ground/dssq/display/frontpanel.py, radio/sx126x.py)
-//   provide_safe "fp_line" (String)   S|aos|alarm|uplink   Q|<confirm id or -1>
+//   provide_safe "fp_line" (String)   S|aos|alarm|uplink|beacon   Q|<confirm id or -1>
+//                                     (beacon -1..3; a 4-field S line = beacon unknown)
 //   provide_safe "rcu_mode" (int)     set E22 mode 0..3, returns AUX (1 = ready)
 //   notify       "fp_in"   (String)   K|<typed text>  CMD|<text>  CONFIRM|<id>
 //                                     H|<fw>|<rcu>|<kb>  (hello, every 5 s)
@@ -48,7 +53,9 @@
 //   provide_safe "rf_cad"  () -> 1 started, 0 busy, -2 radio down
 //   provide_safe "rf_wake" (String hex) -> as rf_tx, sent with the 32-symbol wake-up
 //                                     preamble the hibernating spacecraft listens for
-//   notify       "rf_rx"   (hex, rssi 0.1 dBm, snr 0.01 dB, freq error Hz, crc_ok)
+//   notify       "rf_rx"   (hex, rssi 0.1 dBm, snr 0.01 dB, freq error Hz, crc_ok); with
+//                                     crc_ok 0 the hex is the payload only when it is
+//                                     one 236-octet CADU (RS rescue), else ""
 //   notify       "rf_evt"  (String)   S|status...  C|cad  T|tx done  E|code|text
 //
 //  CardKB key codes vary between firmware revisions: type KEYTEST + Enter to have
@@ -116,6 +123,11 @@ static const uint32_t kHelloMs = 5000;
 static const uint32_t kGdsSilentMs = 5000;           // no status line from Linux: link down
 static const uint32_t kRcuAuxTimeoutMs = 1000;       // E22: AUX high after a mode change
 static const uint32_t kBuzzMs = 400;
+// Annunciator patterns (Phase B specification PB-6.4, contract 24.4).
+static const uint32_t kAlarmRedHalfMs = 125;         // RED: 4 Hz blink (v2: 2 Hz, now the IMPORTANT rate)
+static const uint32_t kLinkDownHalfMs = 100;         // GDS link down: 5 Hz blink (unchanged)
+static const uint32_t kChirpMs = 100;                // beacon chirp: 100 ms on / 100 ms off
+static const int8_t kBeaconImportant = 2, kBeaconUrgent = 3;
 
 // ---------------------------------------------------------------- CardKB
 static const uint8_t CARDKB_ADDR = 0x5F;
@@ -129,8 +141,12 @@ static int g_pending_confirm = -1;
 static bool g_keytest = false;
 static bool g_aos = false, g_uplink = false;
 static uint8_t g_alarm = 0, g_prev_alarm = 0;
-static uint32_t g_last_rx_ms = 0, g_last_hello_ms = 0, g_buzz_t0 = 0;
+// Spacecraft beacon level (contract 24.4: 0 NOMINAL, 1 INTERESTING, 2 IMPORTANT,
+// 3 URGENT), -1 = unknown (no HK yet, or an older GDS sending a 4-field S line).
+static int8_t g_beacon = -1;
+static uint32_t g_last_rx_ms = 0, g_last_hello_ms = 0, g_buzz_t0 = 0, g_chirp_t0 = 0;
 static bool g_buzz = false, g_kb = false;
+static uint8_t g_chirps = 0;                        // chirps of the running beacon pattern
 // All timing is elapsed time (now - t0 >= duration): unsigned arithmetic that stays
 // correct across the 49.7-day millis() wrap.
 
@@ -154,7 +170,7 @@ static void handle_line(char* line) {
   g_last_rx_ms = millis();
   char* f[6];
   const int n = split(line, f, 6);
-  if (f[0][0] == 'S' && n >= 4) {                   // S|aos|alarm|uplink
+  if (f[0][0] == 'S' && n >= 4) {                   // S|aos|alarm|uplink[|beacon]
     const bool aos = atoi(f[1]) != 0;
     const int alarm = atoi(f[2]);
     g_alarm = (uint8_t)((alarm >= 0 && alarm <= 2) ? alarm : 2);   // unknown level: worst case
@@ -165,6 +181,16 @@ static void handle_line(char* line) {
     }
     g_prev_alarm = g_alarm;
     g_aos = aos;
+    // 5th field (PB-6.4): beacon level of the latest real-time HK, -1 before any HK.
+    // A 4-field line (older GDS) or a value outside -1..3 means "unknown": no beacon
+    // pattern - the alarm field above already carries the worst case.
+    const int b = n >= 5 ? atoi(f[4]) : -1;
+    const int8_t beacon = (int8_t)((b >= 0 && b <= kBeaconUrgent) ? b : -1);
+    if (beacon >= kBeaconImportant && beacon > g_beacon) {   // rise to IMPORTANT / URGENT only
+      g_chirps = (uint8_t)beacon;                            // 2 or 3 chirps
+      g_chirp_t0 = millis();
+    }
+    g_beacon = beacon;
   } else if (f[0][0] == 'Q' && n >= 2) {            // Q|id : hazardous command awaiting CONFIRM
     const int id = atoi(f[1]);
     g_pending_confirm = id >= 0 ? id : -1;
@@ -244,20 +270,45 @@ static void on_key(uint8_t c) {
   }
 }
 
+// ALARM LED, highest priority first (PB-6.4): RED alarm -> 4 Hz blink; spacecraft
+// beacon INTERESTING / IMPORTANT / URGENT -> blink at 1 / 2 / 3 Hz; YELLOW alarm ->
+// steady on; otherwise off. Blink phases are derived from millis(): f Hz = 2 f level
+// changes per second, counted within the current second (an even number, so the
+// pattern is seamless across seconds and no product of millis() can overflow).
+static bool alarm_led(uint32_t now) {
+  if (g_alarm == 2) return ((now / kAlarmRedHalfMs) & 1) != 0;
+  if (g_beacon >= 1) return ((((now % 1000UL) * 2UL * (uint32_t)g_beacon) / 1000UL) & 1) != 0;
+  return g_alarm == 1;
+}
+
+// Buzzer: the 400 ms tone on entering RED or at LOS (unchanged), plus the beacon
+// chirps queued by handle_line(): n x (100 ms on, 100 ms off), once per rise.
+static bool buzzer(uint32_t now) {
+  if (g_buzz && now - g_buzz_t0 >= kBuzzMs) g_buzz = false;
+  bool chirp = false;
+  if (g_chirps) {
+    const uint32_t slot = (now - g_chirp_t0) / kChirpMs;    // even slots on, odd slots off
+    if (slot >= 2UL * g_chirps) g_chirps = 0;
+    else chirp = (slot & 1) == 0;
+  }
+  return g_buzz || chirp;
+}
+
 static void annunciators() {
   const uint32_t now = millis();
   if (now - g_last_rx_ms > kGdsSilentMs) {           // GDS link down: no status from Linux
     digitalWrite(PIN_LED_AOS, LOW);
-    digitalWrite(PIN_LED_ALARM, ((now / 100) & 1) ? HIGH : LOW);
+    digitalWrite(PIN_LED_ALARM, ((now / kLinkDownHalfMs) & 1) ? HIGH : LOW);
     digitalWrite(PIN_LED_UPLINK, LOW);
     digitalWrite(PIN_BUZZER, LOW);
+    g_buzz = false;                                  // nothing stale sounds when the link returns
+    g_chirps = 0;
     return;
   }
   digitalWrite(PIN_LED_AOS, g_aos ? HIGH : LOW);
-  digitalWrite(PIN_LED_ALARM, g_alarm == 2 ? (((now / 250) & 1) ? HIGH : LOW) : (g_alarm == 1 ? HIGH : LOW));
+  digitalWrite(PIN_LED_ALARM, alarm_led(now) ? HIGH : LOW);
   digitalWrite(PIN_LED_UPLINK, g_uplink ? HIGH : LOW);
-  if (g_buzz && now - g_buzz_t0 >= kBuzzMs) g_buzz = false;
-  digitalWrite(PIN_BUZZER, g_buzz ? HIGH : LOW);
+  digitalWrite(PIN_BUZZER, buzzer(now) ? HIGH : LOW);
 }
 
 #if DSSQ_RADIO_SX126X
@@ -305,7 +356,9 @@ static void annunciators() {
 //  * RadioLib's begin() silently falls back to the crystal when the TCXO does not
 //    start; that is detected and reported (E|12, status flag b3).
 //  Packet status (RSSI = RssiPkt, SNR) and the frequency-error register are read right
-//  after RxDone, before the payload; a payload with a bad CRC is discarded and reported.
+//  after RxDone, before the payload; a payload with a bad CRC is reported with crc_ok 0
+//  and forwarded only when it is one 236-octet CADU, for the GDS's RS decoder ("RS
+//  rescue", contract 20); any other CRC-failed payload is discarded.
 //  Known limitations (DS ch. 15) as covered by RadioLib 7.8.1 in the calls used here:
 //  15.1 BW500 modulation quality - fixSensitivity() in stageMode(TX); 15.2 PA
 //  clamping - fixPaClamping() in begin(); 15.3 implicit-header timeout - not
@@ -340,6 +393,7 @@ static const uint32_t kRetryMinMs = 1000, kRetryMaxMs = 60000;
 static const uint8_t kNoiseSamples = 8;
 static const int kNoiseNa = -32768;
 static const size_t kRfTxMaxOctets = 112;            // hex request fits the 256-octet RPC buffer
+static const uint8_t kCaduOctets = 236;              // ASM 4 + RS(255,223) codeblock 232: one downlink frame
 static const uint8_t kTxSlots = 4;
 static const int32_t kFoffMaxHz = 50000;             // rf_foff range (contract 24.8)
 static_assert(sizeof(int) >= 4, "rf_foff / rf_cfg take their arguments as int (int32 on the wire)");
@@ -849,8 +903,8 @@ static void sx_on_rx_irq() {
   if (!sx_ok(g_radio.packetStatus(ps), kEvSpiError, "GetPacketStatus")) return;
   uint8_t fe[3] = {0, 0, 0};
   if (!sx_ok(g_radio.readReg(kRegFreqError, fe, 3), kEvSpiError, "read 0x076B")) return;
-  const bool crc_ok = !(irq & RADIOLIB_SX126X_IRQ_CRC_ERR) &&
-                      !((irq & RADIOLIB_SX126X_IRQ_HEADER_ERR) && !(irq & RADIOLIB_SX126X_IRQ_HEADER_VALID));
+  const bool header_bad = (irq & RADIOLIB_SX126X_IRQ_HEADER_ERR) && !(irq & RADIOLIB_SX126X_IRQ_HEADER_VALID);
+  const bool crc_ok = !(irq & RADIOLIB_SX126X_IRQ_CRC_ERR) && !header_bad;
   // Frequency error: 20-bit two's complement, Hz = efe x 1.55 x BW[kHz] / 1600 (register
   // 0x076B and scale as used by RadioLib getFrequencyError(); not in DS Table 12-1 - VERIFY).
   uint32_t efe = (((uint32_t)fe[0] << 16) | ((uint32_t)fe[1] << 8) | fe[2]) & 0x0FFFFFUL;
@@ -859,26 +913,32 @@ static void sx_on_rx_irq() {
   const int rssi_ddbm = -5 * (int)ps[0];              // RssiPkt / 2 dBm
   const int snr_raw = ps[1] < 128 ? (int)ps[1] : (int)ps[1] - 256;   // two's complement octet
   const int snr_cdb = 25 * snr_raw;                   // SnrPkt / 4 dB
+  // Payload: always for a good packet; for a CRC failure only when it is exactly one
+  // CADU (contract 20, "RS rescue"): the chip leaves the payload in the buffer with
+  // CrcErr (RadioLib readData() reads it before returning RADIOLIB_ERR_CRC_MISMATCH)
+  // and the GDS runs the ASM check and the RS(255,223) decode on it, which accept or
+  // drop it - nothing bypasses RS, the FECF or SDLS. Any other length is not a frame
+  // and is discarded. A header error leaves no length to read.
   uint8_t len = 0;
-  bool good = crc_ok;
-  if (good) {
+  bool good = crc_ok, keep = false;
+  if (!header_bad) {
     uint8_t off = 0;
     if (!sx_ok(g_radio.rxBuffer(&len, &off), kEvSpiError, "GetRxBufferStatus")) return;
-    if (len == 0) {
+    keep = crc_ok ? len > 0 : len == kCaduOctets;
+    if (crc_ok && len == 0) {
       good = false;
       sx_event(kEvRxError, "RxDone with an empty payload");
-    } else if (!sx_ok(g_radio.readPayload(g_rx_buf, len, off), kEvSpiError, "ReadBuffer")) {
-      return;
     }
+    if (keep && !sx_ok(g_radio.readPayload(g_rx_buf, len, off), kEvSpiError, "ReadBuffer")) return;
   }
   if (!sx_ok(g_radio.clearIrq(RADIOLIB_SX126X_IRQ_ALL), kEvSpiError, "ClearIrqStatus")) return;
   g_sx.holding = false;
-  if (good) {
-    ++g_sx.rx_ok;
+  if (good) ++g_sx.rx_ok;
+  else ++g_sx.rx_crc;
+  if (keep) {
     sx_hex(g_rx_buf, len);
   } else {
-    ++g_sx.rx_crc;
-    g_hex[0] = 0;                                     // payload discarded (contract 14)
+    g_hex[0] = 0;                                     // payload discarded
   }
   Bridge.notify("rf_rx", String(g_hex), rssi_ddbm, snr_cdb, (int32_t)lrintf(ferr), good ? 1 : 0);
 }

@@ -15,6 +15,11 @@
 #include "flight.h"
 #include "../ccsds/reed_solomon.h"
 #include "../ccsds/rice.h"
+#if VGQ_RADIO == VGQ_RADIO_SX126X
+#include "../drivers/sx126x.h"    // flight_sx126x(): TCXO fall-back diagnostic (EVR 0x0309)
+#else
+#include "../drivers/e22.h"       // flight_e22(): model strap read at boot (EVR 0x0308)
+#endif
 #include <Arduino_RouterBridge.h>
 #include <math.h>
 #include <stdarg.h>
@@ -341,6 +346,8 @@ uint8_t Flight::read_reset_cause() {
 
 void Flight::init_radio() {
   const bool up = radio_.begin();
+  report_radio_model();
+  report_tcxo();
   rcfg_ = RadioSettings();
   rcfg_.channel = kRadioChannel;
   rcfg_.rate_code = kRadioRateCode;
@@ -376,6 +383,40 @@ void Flight::report_radio(bool boot) {
         sens_source_name(src));
   }
   LOGF("INFO", "radio configuration %s (%s)", radio_cfg_ok_ ? "verified" : "FAILED", boot ? "boot" : "change");
+}
+
+// Contract 33: the E22 model in use and how the boot strap selected it (the RF packet
+// radio_model carries the same model). A split reading (some reads LOW, some HIGH: a
+// loose jumper or a long lead picking up noise) is decided by majority and reported
+// as a WARN so the wiring gets checked.
+void Flight::report_radio_model() {
+#if VGQ_RADIO != VGQ_RADIO_SX126X
+  const E22Radio& e = flight_e22();
+  if (!e.strap_fitted()) {
+    evr(1, 0x0308, "radio model %s (no strap; build %s)", radio_model_name(e.model()),
+        radio_model_name(e.build_model()));
+    return;
+  }
+  const unsigned low = e.strap_low_reads(), n = kStrapSamples;
+  const char* level = low == 0 ? "open" : low == n ? "to GND" : "SPLIT";
+  if (low == 0 || low == n) {
+    evr(1, 0x0308, "radio model %s (strap %s, %u/%u low; build %s)", radio_model_name(e.model()), level, low, n,
+        radio_model_name(e.build_model()));
+  } else {
+    evr(2, 0x0308, "radio model %s (strap %s, %u/%u low; build %s)", radio_model_name(e.model()), level, low, n,
+        radio_model_name(e.build_model()));
+  }
+#endif
+}
+
+// SX126x (audit DS-09): RadioLib falls back to the crystal silently when the TCXO does
+// not start (DS 13.3.6, XOSC_START_ERR); the driver detects it and keeps config_ok()
+// false. Reported after begin() and after every recovery (each re-runs begin()).
+void Flight::report_tcxo() {
+#if VGQ_RADIO == VGQ_RADIO_SX126X
+  if (flight_sx126x().tcxo_fallback())
+    evr(2, 0x0309, "SX126x TCXO did not start: running on the crystal (VERIFY kSxTcxoV)");
+#endif
 }
 
 void Flight::init_sensors() {
@@ -618,6 +659,7 @@ void Flight::on_radio_fault(uint32_t now, int32_t code) {
     if (radio_cfg_ok_) fdir_flags_ &= (uint16_t)~FDIR_RADIO_CFG;
     if (radio_fault_code_ >= kRadioFaultBusyStuck) radio_fault_code_ = 0;
     evr(1, 0x0305, "radio recovered (%u recoveries)", (unsigned)radio_.recoveries());
+    report_tcxo();
     return;
   }
   if (code >= kRadioFaultBusyStuck && code <= kRadioFaultNoIrq) {

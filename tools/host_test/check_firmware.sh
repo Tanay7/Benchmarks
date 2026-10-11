@@ -25,7 +25,11 @@
 #   * flight drivers/sx126x.cpp with VGQ_RADIO=3 for the SX1268 and the SX1262;
 #     while config.h does not define the SX126x wiring yet, the contract 1.1 pins
 #     and the default module constants are supplied by a prelude;
-#   * the station sketch with DSSQ_RADIO_SX126X=1, VENTUNO Q, both chips.
+#   * the station sketch with DSSQ_RADIO_SX126X=1, VENTUNO Q, both chips;
+#   * the flight build matrix below with VGQ_RADIO=3 (SX1268, SX1262).
+# Flight build matrix (PB-8.5): sketch.ino and fsw/flight.cpp for every build switch
+# (VGQ_RADIO 2 / 3, USLP downlink, SDLS TC AUTH, SDLS off, a generated key header,
+# the debug monitor); the keyed build uses a temporary key, never the tree.
 # Negative control: the stock 7.8.1 tag (fetched with --unpatched, or
 # $LIBS_DIR/RadioLib when that is the stock tag) must FAIL to compile its
 # ArduinoHal.cpp for the VENTUNO Q with the core's PinMode / PinStatus errors -
@@ -173,6 +177,57 @@ EOF
   done
   check_library "$RADIOLIB" "UNO Q" "${UNOQ[@]}"
   check_library "$RADIOLIB" "VENTUNO Q" "${VENTUNOQ[@]}"
+fi
+
+# ---- Flight build matrix (Phase B specification PB-8.5, "WS2 extra") ------------------------
+# sketch.ino and fsw/flight.cpp - the two units whose code paths the build switches
+# select - for every switch value. The keyed build never touches the tree: a
+# generated-format key header in a temporary directory is found through -iquote
+# ($KEYDIR/x is searched for "../sdls_key.h" after flight.cpp's own directory), and
+# the macro check below proves that the keyed build saw it and the plain build did not.
+KEYDIR="$TMP/key"
+mkdir -p "$KEYDIR/x"
+{
+  echo "#pragma once"
+  echo "#include <stdint.h>"
+  echo "#define VGQ_SDLS_SPI 1"
+  printf 'static const uint8_t kVgqSdlsKey[32] = {'
+  for i in $(seq 0 31); do printf '0x%02X%s' "$i" "$([[ $i -lt 31 ]] && echo ', ')"; done
+  echo '};'
+} >"$KEYDIR/sdls_key.h"
+matrix() {   # $1 = label, rest = extra flags
+  local label="$1"; shift
+  check "$SK/sketch.ino" " [$label]" "${UNOQ[@]}" "$@"
+  check "$SK/src/fsw/flight.cpp" " [$label]" "${UNOQ[@]}" "$@"
+}
+matrix "VGQ_RADIO=2" -DVGQ_RADIO=2
+if [[ -n "$RADIOLIB" ]]; then
+  matrix "VGQ_RADIO=3, SX1268" -DVGQ_RADIO=3 -isystem "$RADIOLIB"
+  matrix "VGQ_RADIO=3, SX1262" -DVGQ_RADIO=3 -DVGQ_SX126X_CHIP=1262 -isystem "$RADIOLIB"
+else
+  echo "skip flight matrix VGQ_RADIO=3: no verified RadioLib copy"
+fi
+matrix "VGQ_DOWNLINK_FRAMING=1" -DVGQ_DOWNLINK_FRAMING=1
+matrix "VGQ_SDLS_TC=1" -DVGQ_SDLS_TC=1
+matrix "VGQ_SDLS_TC=0 VGQ_SDLS_TM=0" -DVGQ_SDLS_TC=0 -DVGQ_SDLS_TM=0
+matrix "keyed (sdls_key.h via -iquote)" -iquote "$KEYDIR/x"
+matrix "keyed + USLP + AUTH" -iquote "$KEYDIR/x" -DVGQ_DOWNLINK_FRAMING=1 -DVGQ_SDLS_TC=1
+matrix "VGQ_DEBUG_MONITOR=1" -DVGQ_DEBUG_MONITOR=1
+# (captured first: grep -q closing the pipe early would fail the pipeline under pipefail)
+macros() { "$CXX" -std=gnu++17 "${UNOQ[@]}" "${INC[@]}" "$@" -dM -E -x c++ "$SK/src/fsw/flight.cpp" 2>/dev/null || true; }
+keyed_macros="$(macros -iquote "$KEYDIR/x")"
+plain_macros="$(macros)"
+if grep -q "define VGQ_HAVE_SDLS_KEY 1" <<<"$keyed_macros"; then
+  echo "ok   keyed build resolves ../sdls_key.h to the temporary key header"
+else
+  echo "FAIL keyed build did not pick up the temporary key header"; fail=1
+fi
+if [[ -f "$SK/src/sdls_key.h" ]]; then
+  echo "note $SK/src/sdls_key.h exists (generated, never committed): the default build is keyed"
+elif grep -q "define VGQ_HAVE_SDLS_KEY" <<<"$plain_macros"; then
+  echo "FAIL unkeyed build sees a key header without src/sdls_key.h"; fail=1
+else
+  echo "ok   unkeyed build has no key header"
 fi
 
 # ---- Station I/O sketch (VENTUNO Q) ---------------------------------------------------

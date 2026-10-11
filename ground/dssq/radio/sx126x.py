@@ -10,8 +10,10 @@ frequency offset of the ground AFC (contract 24.8, link.AfcLoop).
 
 MCU -> Linux notifications (handlers registered by attach()):
   rf_rx(hex: str, rssi_ddbm: int, snr_cdb: int, freq_err_hz: int, crc_ok: int)
-      one received packet: hex = payload (one 236-octet CADU), "" when crc_ok = 0
-      (the MCU discards a payload whose CRC failed); rssi_ddbm = RssiPkt in 0.1 dBm
+      one received packet: hex = payload (one 236-octet CADU). With crc_ok = 0 (LoRa
+      payload CRC failed) the MCU forwards the payload only when it is exactly one
+      CADU, for the GDS's ASM check + RS(255,223) decode ("RS rescue", contract 20),
+      else ""; rssi_ddbm = RssiPkt in 0.1 dBm
       (-1275..0); snr_cdb = SNR in 0.01 dB (SnrPkt / 4: -3200..3175); freq_err_hz =
       raw frequency-error estimate in Hz (signed, no calibration applied).
   rf_evt(line: str), '|'-separated:
@@ -72,8 +74,8 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from ..link import (AFC_RPC_MAX_HZ, CHANNEL_MAX, SX126X, RadioBackend, RadioSettings, RxPacket, channel_freq_mhz,
-                    rate_label)
+from ..link import (AFC_RPC_MAX_HZ, CADU_OCTETS, CHANNEL_MAX, SX126X, RadioBackend, RadioSettings, RxPacket,
+                    channel_freq_mhz, rate_label)
 
 log = logging.getLogger("dssq.sx126x")
 
@@ -124,7 +126,10 @@ def _dec(txt: str, lo: int, hi: int, signed: bool = False) -> int | None:
 
 
 def parse_rf_rx(args: tuple, ert: float) -> RxPacket | None:
-    """Validates one rf_rx notification; None if any argument is malformed."""
+    """Validates one rf_rx notification; None if any argument is malformed. A payload
+    with crc_ok = 0 is kept only when it is one CADU (CADU_OCTETS): the GDS runs the
+    ASM check and the RS decode on it ("RS rescue", contract 20); any other CRC-failed
+    payload is dropped (data = b"") - it cannot be a frame."""
     if len(args) != 5:
         return None
     hex_txt, rssi, snr, ferr, crc = args
@@ -142,7 +147,8 @@ def parse_rf_rx(args: tuple, ert: float) -> RxPacket | None:
         return None
     if crc_i and not data:
         return None                                    # a good packet always has a payload
-    return RxPacket(data if crc_i else b"", ert, rssi_i / 10.0, snr_i / 100.0, float(ferr_i), bool(crc_i))
+    keep = bool(crc_i) or len(data) == CADU_OCTETS
+    return RxPacket(data if keep else b"", ert, rssi_i / 10.0, snr_i / 100.0, float(ferr_i), bool(crc_i))
 
 
 def parse_status(fields: list[str]) -> dict | None:
@@ -151,7 +157,7 @@ def parse_status(fields: list[str]) -> dict | None:
     if len(fields) not in (len(STATUS_FIELDS), len(STATUS_FIELDS) - 1):
         return None
     out: dict[str, Any] = {"freq_offset_hz": None}
-    for name, txt in zip(STATUS_FIELDS, fields):              # shorter list: legacy line
+    for name, txt in zip(STATUS_FIELDS, fields, strict=False):   # shorter list: legacy line
         if name in ("fw", "chip"):
             if not 0 < len(txt) <= 32:
                 return None
@@ -213,11 +219,11 @@ class Sx126xBridge(RadioBackend):
         self.last_cad: dict | None = None
         self.last_tx: dict | None = None
         self.events: deque[dict] = deque(maxlen=50)
-        self.stats = {k: 0 for k in ("rx_packets", "rx_crc_fail", "rx_rejected", "rx_overflow",
-                                     "evt_rejected", "tx_sent", "tx_busy", "tx_rejected", "tx_dropped",
-                                     "tx_done", "tx_failed", "call_errors", "e22_queries_ignored",
-                                     "mcu_reboots", "config_pushes", "foff_set", "foff_failed",
-                                     "foff_resyncs")}
+        self.stats = dict.fromkeys(("rx_packets", "rx_crc_fail", "rx_rejected", "rx_overflow",
+                                    "evt_rejected", "tx_sent", "tx_busy", "tx_rejected", "tx_dropped",
+                                    "tx_done", "tx_failed", "call_errors", "e22_queries_ignored",
+                                    "mcu_reboots", "config_pushes", "foff_set", "foff_failed",
+                                    "foff_resyncs"), 0)
 
     # ----------------------------------------------------------- wiring
     def attach(self) -> None:
@@ -234,7 +240,7 @@ class Sx126xBridge(RadioBackend):
         arduino.router_bridge ships with Arduino App Lab's Python image (package
         arduino-router-bridge, a dependency of app-bricks-py; contract 23): nothing is
         downloaded at run time. Imported here so the tests run without it."""
-        from arduino.router_bridge import DEFAULT_ADDRESS, Bridge
+        from arduino.router_bridge import DEFAULT_ADDRESS, Bridge  # type: ignore[import-not-found]
         obj = cls(Bridge(address or DEFAULT_ADDRESS), radio_cfg, freq_offset_hz=freq_offset_hz)
         obj._own_bridge = True
         obj.attach()
@@ -416,9 +422,14 @@ class Sx126xBridge(RadioBackend):
         FOFF_RADIO_DOWN (-2: not applied, the previous offset stays in use) or None (no
         or an unexpected reply: unknown whether it was applied; the next MCU status
         line resolves it). ValueError for a value outside +-FOFF_MAX_HZ or not an int.
-        For link.AfcLoop: pass an int result to confirm(); on None do not confirm, the
-        loop's confirmation time-out then counts the failure."""
+        For link.AfcLoop: the GDS confirms an int result as is and None as
+        link.AFC_RPC_NO_ANSWER (-3, "no answer (bridge)")."""
         return self._send_foff(_check_foff(hz))
+
+    def rf_foff(self, hz: int) -> int | None:
+        """The contract name of set_freq_offset() (contract 24.8, PB-8.1): the station
+        RPC rf_foff(hz) -> 1 applied | -1 range | -2 radio down, None on a link failure."""
+        return self.set_freq_offset(hz)
 
     def _send_foff(self, hz: int) -> int | None:
         rc = self._call("rf_foff", hz)

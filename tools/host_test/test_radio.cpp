@@ -2,7 +2,8 @@
 //  Radio abstraction (src/drivers/radio.*): E22 tables and register images, the
 //  E22 UART framing and AUX tracking moved out of the v2 flight executive, the
 //  SX126x LoRa profile table, Semtech time on air, FERR_L limits, TX timeouts
-//  and the model-generic vgq::Radio figures.
+//  and the model-generic vgq::Radio figures; at the end of the file, the E22
+//  model strap of contract 33 (one binary for the T33D and the T37S).
 //
 //  Reference values are derived by hand in the comments (contract v3 sections 2
 //  and 14; Semtech DS SX1261/2 Table 3-8). Writes <out>/radio_tables.csv, one row
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <string>
 
+#include "config.h"          // model strap pin plan (contract 33); pure C++, no Arduino types
 #include "drivers/radio.h"
 #include "host_test.h"
 
@@ -416,4 +418,85 @@ HOST_TEST(radio_interface_figures) {
     }
   }
   std::fclose(f);
+}
+
+// =============================================================================
+//  E22 model selection without a source edit (contract 33, Phase B WS6b): the
+//  boot strap -> model mapping (e22_strap_model), the model-dependent behaviour
+//  that follows the model chosen at run time (REG1 image, power-code meaning,
+//  abnormal-status decoding, sensitivity) and the strap pin's place in the UNO Q
+//  pin plan of config.h.
+// =============================================================================
+HOST_TEST(radio_model_strap_mapping) {
+  const uint8_t n = kStrapSamples;
+  CHECK(n == 5 && n % 2 == 1, "strap: an odd number of reads (5), so a majority always exists");
+  // Default build (E22-400T33D): open = T33D, jumper to GND = T37S.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 0, n) == VGQ_RADIO_E22_T33D, "strap open -> E22-400T33D");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, n, n) == VGQ_RADIO_E22_T37S, "strap to GND -> E22-400T37S");
+  // Majority rule on a split reading.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 3, n) == VGQ_RADIO_E22_T37S, "3 of 5 reads low -> E22-400T37S");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 2, n) == VGQ_RADIO_E22_T33D, "2 of 5 reads low -> build default");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 1, 2) == VGQ_RADIO_E22_T33D, "a tie is not a majority");
+  // No strap / inconsistent input: the build default stays.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 0, 0) == VGQ_RADIO_E22_T33D, "no samples (no strap) -> build default");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 6, n) == VGQ_RADIO_E22_T33D, "more low reads than reads -> build default");
+  // A T37S build stays a T37S build whatever the strap says.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T37S, 0, n) == VGQ_RADIO_E22_T37S, "VGQ_RADIO=2 build, strap open -> T37S");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T37S, n, n) == VGQ_RADIO_E22_T37S, "VGQ_RADIO=2 build, strap to GND -> T37S");
+  // The SX126x option is a build switch (other wiring): the strap never changes it.
+  CHECK(e22_strap_model(VGQ_RADIO_SX126X, n, n) == VGQ_RADIO_SX126X, "SX126x build: strap ignored");
+  CHECK(e22_strap_model(VGQ_RADIO_SX126X, 0, n) == VGQ_RADIO_SX126X, "SX126x build: strap ignored (open)");
+  CHECK(e22_strap_model(0, n, n) == 0 && e22_strap_model(9, n, n) == 9, "invalid build model passed through");
+}
+
+HOST_TEST(radio_model_follows_the_strap) {
+  // Every model-dependent table takes the model chosen at boot (Radio::model()).
+  const uint8_t jumper = e22_strap_model(VGQ_RADIO_E22_T33D, kStrapSamples, kStrapSamples);
+  const uint8_t open = e22_strap_model(VGQ_RADIO_E22_T33D, 0, kStrapSamples);
+  RadioSettings s;   // CH23, code 2, power 0
+  uint8_t r[9];
+  e22_build_regs(jumper, s, r);
+  CHECK(r[4] == 0x24, "T37S (strap): REG1 = 0x24 (noise RSSI | abnormal-status log)");
+  bool all24 = true;
+  for (uint8_t c = 0; c <= kRadioMaxPowerCode; ++c) {
+    s.power_code = c;
+    e22_build_regs(jumper, s, r);
+    all24 = all24 && r[4] == 0x24;
+  }
+  CHECK(all24, "T37S: REG1 = 0x24 for every power code (no power levels, contract 33)");
+  s.power_code = 2;
+  e22_build_regs(open, s, r);
+  CHECK(r[4] == 0x22, "T33D (strap open): REG1 = 0x22 at power code 2, bit 2 reserved");
+  CHECK(radio_tx_power_dbm(jumper, 3, 0) == 37 && radio_tx_power_dbm(open, 3, 0) == 24,
+        "power code 3: 37 dBm on the T37S, 24 dBm on the T33D");
+  SensSource src = SensSource::COMPUTED;
+  CHECK(radio_sensitivity_ddbm(jumper, 2, true, &src) == -1260 && radio_sensitivity_ddbm(open, 2, true, &src) == -1280,
+        "2.4k sensitivity follows the model: T37S -126.0, T33D -128.0 dBm");
+  CHECK(std::strcmp(radio_model_name(jumper), "E22-400T37S") == 0, "RF radio_model / EVR name: E22-400T37S");
+
+  // Abnormal-status decoding follows the model set at begin().
+  E22StreamParser p(VGQ_RADIO_E22_T33D);
+  RxPacket rx;
+  int32_t v = 0;
+  const uint8_t report[4] = {0xFF, 0xFF, 0xFF, 0x03};
+  for (uint8_t b : report) p.on_byte(b, 100);
+  CHECK(p.poll(200, rx, v) == RadioEvent::PACKET, "T33D: FF FF FF 03 is not a fault report (no such log)");
+  p.set_model(jumper);
+  for (uint8_t b : report) p.on_byte(b, 300);
+  CHECK(p.poll(400, rx, v) == RadioEvent::FAULT && v == kRadioFaultOverTemp,
+        "after set_model(T37S): FF FF FF 03 -> FAULT over-temperature");
+}
+
+HOST_TEST(radio_model_strap_pin_is_free) {
+  // UNO Q digital-pin-gpios indices used by config.h (contract 1.1): the strap must
+  // not share a pin with the E22 control lines, the SX126x option (incl. SPI2
+  // D10..D13), the sensor bus A4/A5 (18/19) or the D0/D1 console UART.
+  const int used[] = {0,  1,  PIN_E22_M0, PIN_E22_M1, PIN_E22_AUX, PIN_SX_NSS, PIN_SX_BUSY, PIN_SX_DIO1,
+                      PIN_SX_NRST, PIN_SX_RXEN, PIN_SX_TXEN, 11, 12, 13, kPinSensorSda, kPinSensorScl};
+  bool free_pin = true;
+  for (int u : used) free_pin = free_pin && u != PIN_RADIO_MODEL_STRAP;
+  CHECK(free_pin, "model strap pin (A0 = 14) is used by nothing else in config.h");
+  CHECK(PIN_RADIO_MODEL_STRAP == 14, "model strap on header A0 / D14 (PA4)");
+  CHECK(kStrapSettleUs >= 100 && kStrapSettleUs * kStrapSamples <= 20000,
+        "strap read bounded: >= 0.1 ms settle per read, <= 20 ms in total at boot");
 }

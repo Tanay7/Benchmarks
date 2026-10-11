@@ -49,6 +49,10 @@ POWER_CODES = range(4)
 
 E22_T33D, E22_T37S, SX126X = "E22-400T33D", "E22-400T37S", "SX126x"
 DEFAULT_MODEL = E22_T33D
+# station.toml [radio] model = "auto" (also the meaning of an absent key, contract 33):
+# the station runs an E22 UART module and the GDS follows the E22 model the spacecraft
+# reports in its RF packet (radio_model); DEFAULT_MODEL until the first RF packet.
+MODEL_AUTO = "auto"
 MODEL_IDS = {1: E22_T33D, 2: E22_T37S, 3: SX126X}      # RF packet radio_model (contract 3.2)
 
 SOURCE_MEASURED, SOURCE_DATASHEET = "measured", "datasheet"
@@ -184,18 +188,24 @@ def channel_freq_mhz(channel: int) -> float:
     return CHANNEL_BASE_MHZ + CHANNEL_STEP_MHZ * _int_in(channel, 0, CHANNEL_MAX, "channel")
 
 
+def is_auto_model(name: object) -> bool:
+    """True for a [radio] model that follows the spacecraft: None, "" or "auto" (contract 33)."""
+    return name is None or (isinstance(name, str) and name.strip().lower() in ("", MODEL_AUTO))
+
+
 def get_model(name: str | RadioModel | None = None) -> RadioModel:
-    """Model by name (case-insensitive); None or "" selects DEFAULT_MODEL."""
+    """Model by name (case-insensitive); None, "" or "auto" selects DEFAULT_MODEL (the
+    E22 model assumed until the spacecraft reports its own, contract 33)."""
     if isinstance(name, RadioModel):
         return name
-    if name is None or name == "":
+    if is_auto_model(name):
         return MODELS[DEFAULT_MODEL]
     if not isinstance(name, str):
         raise ValueError(f"radio model must be a string, got {name!r}")
     for key, model in MODELS.items():
         if key.lower() == name.strip().lower():
             return model
-    raise ValueError(f"unknown radio model {name!r}; valid: {', '.join(MODELS)}")
+    raise ValueError(f"unknown radio model {name!r}; valid: {', '.join(MODELS)} or {MODEL_AUTO}")
 
 
 def model_from_id(model_id: int) -> RadioModel:
@@ -408,7 +418,9 @@ def sensitivity(model: str | RadioModel, code: int,
 # --------------------------------------------------------- station settings
 @dataclass(frozen=True)
 class RadioSettings:
-    """The station's radio configuration (station.toml [radio]) in validated form."""
+    """The station's radio configuration (station.toml [radio]) in validated form.
+    model_auto: [radio] model is "auto" / absent - `model` then follows the E22 model the
+    spacecraft reports (GroundStation._on_rf, contract 33)."""
     model: RadioModel
     rate_code: int
     power_code: int
@@ -419,6 +431,7 @@ class RadioSettings:
     pa_gain_db: float = SX126X_PA_GAIN_DB
     freq_offset_cal_hz: float = 0.0
     measured: Mapping[tuple[str, int], float] = field(default_factory=dict)
+    model_auto: bool = False
 
     @classmethod
     def from_config(cls, radio_cfg: Mapping[str, object]) -> RadioSettings:
@@ -437,7 +450,8 @@ class RadioSettings:
                    pa_gain_db=_float(sx.get("pa_gain_db", SX126X_PA_GAIN_DB), "[radio.sx126x] pa_gain_db"),
                    freq_offset_cal_hz=_float(radio_cfg.get("freq_offset_cal_hz", 0.0),
                                              "[radio] freq_offset_cal_hz"),
-                   measured=parse_measured(radio_cfg.get("sensitivity_measured")))  # type: ignore[arg-type]
+                   measured=parse_measured(radio_cfg.get("sensitivity_measured")),  # type: ignore[arg-type]
+                   model_auto=is_auto_model(radio_cfg.get("model")))
 
     def with_(self, **changes: object) -> RadioSettings:
         return replace(self, **changes)                     # type: ignore[arg-type]
@@ -466,7 +480,8 @@ def describe(radio: Mapping[str, object] | RadioSettings) -> dict:
     sens, src = s.sensitivity
     air, air_src = airtime_s(m, s.rate_code)
     return {
-        "model": m.name, "model_id": m.model_id, "interface": m.interface, "packet_mode": m.packet_mode,
+        "model": m.name, "model_id": m.model_id, "model_auto": s.model_auto, "interface": m.interface,
+        "packet_mode": m.packet_mode,
         "rate_code": s.rate_code, "rate_label": rate_label(m, s.rate_code),
         "bps": round(rate_bps(m, s.rate_code), 3),
         "sf": prof.sf if prof else None, "bw_khz": prof.bw_hz / 1000.0 if prof else None,
@@ -487,8 +502,9 @@ def describe(radio: Mapping[str, object] | RadioSettings) -> dict:
 # ------------------------------------------------------------ radio backends
 @dataclass(frozen=True)
 class RxPacket:
-    """One packet from a packet-mode ground radio (SX126x backend).
-    data is empty when the radio's payload CRC failed (the payload is discarded)."""
+    """One packet from a packet-mode ground radio (SX126x backend). With crc_ok False
+    (the radio's payload CRC failed) data is one CADU kept for the RS decoder ("RS
+    rescue", contract 20) or empty (any other length is discarded by the station)."""
     data: bytes
     ert: float                          # UNIX time the packet reached the GDS
     rssi_dbm: float | None              # packet RSSI (SX126x RssiPkt)

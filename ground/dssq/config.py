@@ -7,7 +7,9 @@ package is needed (contract section 23 rule 2).
 Merge rule (Phase B specification PB-3.2): the user file is laid over DEFAULTS table by
 table and key by key, and the nested tables ([radio.sx126x], [radio.sensitivity_measured],
 [spectral.classifier]) are merged the same way one level down, so a partial table keeps
-every default it does not mention. DEFAULTS mirrors config/station.toml exactly.
+every default it does not mention. DEFAULTS mirrors config/station.toml except [radio]
+model: the file names the station's model explicitly, while an ABSENT key means "auto"
+(contract 33: an E22 station that follows the radio model the spacecraft reports).
 
 load_config() then calls validate(), which raises ValueError naming the offending key: a
 typo or an out-of-range value stops the station at start-up instead of being silently
@@ -57,7 +59,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
                 "antenna": "433 MHz Yagi", "antenna_gain_dbi": 12.0, "rx_line_loss_db": 1.0},
     "spacecraft": {"name": "VGQ-1", "scid": SCID, "distance_km": 0.0, "antenna_gain_dbi": 2.15,
                    "tx_line_loss_db": 0.5},
-    "radio": {"model": "E22-400T33D", "port": "/dev/ttyUSB0", "address": 0, "netid": 0,
+    "radio": {"model": link.MODEL_AUTO, "port": "/dev/ttyUSB0", "address": 0, "netid": 0,
               "uart_code": E22_UART_CODE_9600, "parity": 0, "air_rate": 2, "subpacket": 0,
               "rssi_noise": True, "fault_log": False, "power": 0, "channel": 23, "rssi_byte": True,
               "fixed": False, "relay": False, "lbt": False, "wor_role": False, "wor_cycle": 0,
@@ -182,7 +184,8 @@ def _validate_radio(cfg: dict[str, Any]) -> None:
             raise ValueError("empty")
         model = link.get_model(r["model"])
     except ValueError:
-        raise ValueError(f"[radio] model = {r['model']!r} must be one of {', '.join(link.MODELS)}") from None
+        raise ValueError(f"[radio] model = {r['model']!r} must be one of {', '.join(link.MODELS)} or "
+                         f"\"{link.MODEL_AUTO}\"") from None
     _str(cfg, "radio", "port", 512)
     for key, hi in (("address", 0xFFFF), ("netid", 0xFF), ("parity", 3), ("subpacket", 3), ("wor_cycle", 7),
                     ("uart_code", 7), ("air_rate", 7), ("power", 3), ("channel", link.CHANNEL_MAX)):

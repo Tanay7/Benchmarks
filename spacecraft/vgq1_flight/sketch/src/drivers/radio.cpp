@@ -134,9 +134,12 @@ void e22_build_regs(uint8_t model, const RadioSettings& s, uint8_t regs[9]) {
   // 03H REG0: UART 9600 (011) | 8N1 (00) | air-rate code
   regs[3] = (uint8_t)((0x3u << 5) | (0x0u << 3) | (s.rate_code & 0x7u));
   // 04H REG1: sub-packet 240 (00) | ambient-noise RSSI on (b5) | abnormal-status log
-  // (b2, E22-400T37S only - reserved on the T33D) | power code
-  const uint8_t fault_log = model == VGQ_RADIO_E22_T37S ? (uint8_t)(1u << 2) : (uint8_t)0;
-  regs[4] = (uint8_t)((0x0u << 6) | (1u << 5) | fault_log | (s.power_code & 0x3u));
+  // (b2, E22-400T37S only - reserved on the T33D) | power code. The T37S "has no power
+  // levels" (v1.5 7.2): its power field is written 00, so REG1 = 0x24 (contract 33).
+  const bool t37s = model == VGQ_RADIO_E22_T37S;
+  const uint8_t fault_log = t37s ? (uint8_t)(1u << 2) : (uint8_t)0;
+  const uint8_t power = t37s ? (uint8_t)0 : (uint8_t)(s.power_code & 0x3u);
+  regs[4] = (uint8_t)((0x0u << 6) | (1u << 5) | fault_log | power);
   regs[5] = s.channel;                                       // 05H REG2 channel
   // 06H REG3: RSSI byte appended (b7) | transparent (b6 = 0) | no relay (b5 = 0) |
   // LBT (b4) | WOR receiver role (b3 = 0) | WOR cycle
@@ -152,6 +155,12 @@ bool e22_regs_match(uint8_t model, const uint8_t written[7], const uint8_t read_
     if ((uint8_t)((written[i] ^ read_back[i]) & mask) != 0) return false;
   }
   return true;
+}
+
+uint8_t e22_strap_model(uint8_t build_model, uint8_t low, uint8_t n) {
+  if (!is_e22(build_model)) return build_model;            // SX126x: a build switch, not a strap
+  const bool jumpered = n > 0 && low <= n && 2u * low > (unsigned)n;   // strict majority LOW
+  return jumpered ? (uint8_t)VGQ_RADIO_E22_T37S : build_model;
 }
 
 // =============================================================================

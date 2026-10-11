@@ -658,7 +658,14 @@ RadioEvent Sx126xRadio::on_rx_irq(uint32_t now, uint32_t t_irq, RxPacket& rx, in
   rx_active_ = false;
   const bool in_standby = cycling;          // RxDone ends the duty-cycle loop in STDBY_RC (DS 13.1.7)
   const bool header_bad = (irq & RADIOLIB_SX126X_IRQ_HEADER_ERR) && !(irq & RADIOLIB_SX126X_IRQ_HEADER_VALID);
-  bool deliver = !(irq & RADIOLIB_SX126X_IRQ_CRC_ERR) && !header_bad;   // as RadioLib readData(), DS 14.3
+  // Contract 20 ("RS rescue", F-40): a payload whose LoRa CRC failed is still delivered,
+  // flagged crc_ok = false - the chip raises CrcErr together with RxDone and leaves the
+  // payload in the buffer (DS 13.3, Table 13-29; RadioLib readData() reads it before
+  // returning RADIOLIB_ERR_CRC_MISMATCH). The uplink CLTU decoder then decides alone:
+  // BCH per codeblock, the FECF and SDLS (flight.cpp process_tc), so nothing bypasses
+  // them. Only a packet without a valid header (no length to read) is dropped.
+  const bool crc_bad = (irq & RADIOLIB_SX126X_IRQ_CRC_ERR) != 0;
+  bool deliver = !header_bad;
   // THIS packet's status right after RxDone, before any other command (contract 14):
   // RssiPkt / SnrPkt (DS 13.5.3), the frequency-error estimate, then the buffer status
   // and the payload from its start pointer (continuous RX, DS 7.2). Each read is
@@ -680,8 +687,8 @@ RadioEvent Sx126xRadio::on_rx_irq(uint32_t now, uint32_t t_irq, RxPacket& rx, in
     fail(bus_fault(), now);
     return RadioEvent::NONE;
   }
+  if (crc_bad || !deliver) inc16(crc_errors_);
   if (!deliver) {
-    inc16(crc_errors_);
     if (hibernating_ && !relisten(in_standby, fault)) fail(fault, now);
     return RadioEvent::NONE;
   }
@@ -698,9 +705,9 @@ RadioEvent Sx126xRadio::on_rx_irq(uint32_t now, uint32_t t_irq, RxPacket& rx, in
   rx.rssi_dbm = (int16_t)lroundf(-0.5f * (float)ps[0]);   // 0 .. -128 dBm
   rx.snr_cdb = (int16_t)(25 * snr_q);                       // 0.01 dB
   rx.freq_err_hz = (bw_hz > 0.0f && fabsf(ferr) <= bw_hz) ? (int32_t)lroundf(ferr) : kRadioNaI32;
-  rx.crc_ok = true;                         // CRC-failed payloads are not delivered (counted above)
+  rx.crc_ok = !crc_bad;                     // counted in crc_errors() above when false
   rx.t_ms = t_irq;
-  rx_payload_bytes_ += (uint32_t)len;
+  if (!crc_bad) rx_payload_bytes_ += (uint32_t)len;   // rx_bytes(): payload octets of good packets
   // In duty-cycled RX the chip is now in standby: listen again (a failure is reported
   // by the queued FAULT after this packet).
   if (hibernating_ && !relisten(in_standby, fault)) fail(fault, now);

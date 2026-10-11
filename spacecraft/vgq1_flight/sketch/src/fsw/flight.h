@@ -84,6 +84,8 @@ class Flight {
   void init_radio();
   void init_sensors();
   void report_radio(bool boot);                         // EVR 0x0306
+  void report_radio_model();                            // EVR 0x0308 (E22 model strap, contract 33)
+  void report_tcxo();                                   // EVR 0x0309 (SX126x TCXO fall-back, DS-09)
   void report_spec_identity();                          // EVR 0x0706
   void run_boot_bist();
 

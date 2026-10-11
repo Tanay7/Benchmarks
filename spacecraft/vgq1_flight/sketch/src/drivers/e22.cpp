@@ -26,13 +26,27 @@ const uint8_t kNoiseQuery[6] = {0xC0, 0xC1, 0xC2, 0xC3, 0x00, 0x02};
 
 }  // namespace
 
-E22Radio::E22Radio(HardwareSerial& serial, int pin_m0, int pin_m1, int pin_aux, uint8_t model)
-    : Radio(model, 0), serial_(serial), m0_(pin_m0), m1_(pin_m1), aux_(pin_aux), parser_(model) {}
+E22Radio::E22Radio(HardwareSerial& serial, int pin_m0, int pin_m1, int pin_aux, uint8_t model, int pin_strap)
+    : Radio(model, 0), serial_(serial), m0_(pin_m0), m1_(pin_m1), aux_(pin_aux), strap_(pin_strap),
+      build_model_(model), parser_(model) {}
 
 const char* E22Radio::name() const { return radio_model_name(model_); }
 
 bool E22Radio::begin() {
-  if (model_ != VGQ_RADIO_E22_T33D && model_ != VGQ_RADIO_E22_T37S) return false;
+  if (build_model_ != VGQ_RADIO_E22_T33D && build_model_ != VGQ_RADIO_E22_T37S) return false;
+  // Model strap (contract 33), before the first register access: kStrapSamples reads
+  // with the internal pull-up, kStrapSettleUs apart (the first after one settle time),
+  // so a bouncing or picked-up level cannot select the 5 W module by itself.
+  strap_low_ = 0;
+  if (strap_ >= 0) {
+    pinMode(strap_, INPUT_PULLUP);
+    for (uint8_t i = 0; i < kStrapSamples; ++i) {
+      delayMicroseconds(kStrapSettleUs);
+      if (digitalRead(strap_) == LOW) ++strap_low_;
+    }
+  }
+  model_ = e22_strap_model(build_model_, strap_low_, strap_ >= 0 ? kStrapSamples : (uint8_t)0);
+  parser_.set_model(model_);
   pinMode(aux_, INPUT_PULLUP);
   // Drive deep sleep first (as the external 10 kOhm pull-ups do while the MCU boots).
   pinMode(m0_, OUTPUT);
@@ -183,11 +197,13 @@ bool E22Radio::set_hibernation(bool on, uint32_t now) {
 }
 
 // ---- Flight instance (E22 builds) ----------------------------------------------------
+// VGQ_RADIO is the build default; the strap may select the other E22 model at boot.
 #if VGQ_RADIO == VGQ_RADIO_E22_T33D || VGQ_RADIO == VGQ_RADIO_E22_T37S
 namespace {
-E22Radio g_flight_radio(RADIO_SERIAL, PIN_E22_M0, PIN_E22_M1, PIN_E22_AUX, VGQ_RADIO);
+E22Radio g_flight_radio(RADIO_SERIAL, PIN_E22_M0, PIN_E22_M1, PIN_E22_AUX, VGQ_RADIO, PIN_RADIO_MODEL_STRAP);
 }  // namespace
 Radio& flight_radio() { return g_flight_radio; }
+E22Radio& flight_e22() { return g_flight_radio; }
 #endif
 
 }  // namespace vgq

@@ -54,8 +54,10 @@
 //      while an RX interrupt is pending waits until poll() has serviced it.
 //    * RX: continuous; per packet the status (RssiPkt, SnrPkt) and the frequency
 //      error are read right after RxDone, before the payload, each read
-//      status-checked (13.5.2, 13.5.3); CRC / header errors are counted and the
-//      payload discarded.
+//      status-checked (13.5.2, 13.5.3). A payload that fails the LoRa CRC is
+//      counted and still delivered with RxPacket::crc_ok = false (contract 20, "RS
+//      rescue"): the CLTU decoder's BCH, the FECF and SDLS decide whether it is
+//      accepted. A header error (no length) is counted and nothing is delivered.
 //    * Hibernation (13.1.7): duty-cycled RX whose periods satisfy
 //      Tpreamble + Theader <= 2 * rxPeriod + sleepPeriod for the kSxWakePreambleSym
 //      WAKE preamble, with the RF switch on its RX path. In the SLEEP phases BUSY is
