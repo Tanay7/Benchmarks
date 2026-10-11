@@ -33,6 +33,7 @@ Pure Python, standard library only: imported by the GDS and tools/link_budget.py
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
@@ -470,6 +471,314 @@ class RadioBackend:
 
     def close(self) -> None:
         return None
+
+
+# ------------------------------------------- automatic frequency control (24.8)
+# SX126x option only. The station receiver is tuned to f_channel + c (c = correction, set
+# through the station MCU RPC rf_foff). For every packet the chip reports a frequency error
+# e = s (f_rx - f_LO), where the sign convention s of the LoRa frequency-error register is a
+# VERIFY item (docs/08: offset a signal generator by +1 kHz). With the believed sign b the
+# total received offset is estimated as c + b e for each packet; the median of the last
+# AFC_WINDOW such estimates (robust to an outlier packet) is the loop estimate. The loop
+# steps the correction toward it, limited in slew and magnitude by FERR_L (DS rev 2.2
+# Table 3-8: +-25 % of BW, and +-50/100/200 ppm at SF12/11/10, the tighter applying).
+# Sign self-check: after a correct step the residual shrinks by the step; with the wrong
+# belief it grows by the step. Growth by more than half the step flips b once (event); a
+# second divergence puts the loop in FAULT and returns to the static offset.
+AFC_SNR_MARGIN_DB = 3.0                # accept SNR >= typical demodulator SNR (DS Table 6-1) + 3 dB
+AFC_WINDOW = 8                         # median of the last 8 accepted packets
+AFC_MIN_SAMPLES = 3                    # first step needs a median of >= 3 packets (engineering choice)
+AFC_DEADBAND_MIN_HZ = 50.0             # step only when |estimate - correction| > max(50 Hz, 2 % BW)
+AFC_DEADBAND_BW_FRACTION = 0.02
+AFC_SLEW_FERR_FRACTION = 0.25          # one step <= 25 % of FERR_L
+AFC_BOUND_FERR_FRACTION = 0.8          # |correction| <= 80 % of FERR_L
+AFC_LOS_HOLD_S = 600.0                 # hold the correction through LOS, then back to the static offset
+AFC_CHECK_SAMPLES = 3                  # post-step packets for the sign self-check (engineering choice)
+AFC_SETTLE_MARGIN_S = 0.5              # a packet counts after a change only if it ended >= one air
+                                       # time + this margin after the change was confirmed
+AFC_CONFIRM_TIMEOUT_S = 10.0           # rf_foff result expected within this (engineering choice)
+AFC_RETRY_S = 5.0                      # pause after a failed rf_foff (engineering choice)
+AFC_RPC_MAX_HZ = 50_000                # station rf_foff(int32 hz) accepts |hz| <= 50000
+AFC_EVENTS_MAX = 64
+AFC_RPC_RESULTS = {1: "applied", -1: "out of range", -2: "radio down"}
+
+
+class AfcLoop:
+    """Ground automatic frequency control for the SX126x packet radio (contract 24.8).
+
+    Call order (GDS radio thread, one clock for every t):
+        corr = afc.on_packet(t, freq_err_hz, snr_db, crc_ok)   # per received packet
+        corr = afc.tick(t, los)                                 # periodically (>= 1 Hz)
+        if corr is not None:                                    # int Hz for the station
+            afc.confirm(corr, station.rf_foff(corr), t_now)     # 1 / -1 / -2
+    While a command awaits confirm() no other command is issued and packets are not used
+    (their local-oscillator frequency is uncertain). pop_events() returns
+    (t, level, text) tuples for the GDS event log. Pure: no I/O, no threads."""
+
+    def __init__(self, sf: int, bw_hz: float, freq_hz: float, static_offset_hz: float = 0.0,
+                 enabled: bool = True, sign: int = 1, airtime_s: float | None = None):
+        if sign not in (1, -1) or isinstance(sign, bool):
+            raise ValueError("sign must be +1 or -1")
+        self.enabled = bool(enabled)
+        self.sign = sign
+        self.events: deque[tuple[float, str, str]] = deque(maxlen=AFC_EVENTS_MAX)
+        self.static_hz = 0
+        self.correction_hz = 0
+        self.counters = {"accepted": 0, "rejected_snr": 0, "rejected_invalid": 0, "skipped_settling": 0,
+                         "steps": 0, "sign_flips": 0, "rpc_failures": 0}
+        self._configure(sf, bw_hz, freq_hz, airtime_s)
+        cal = _float(static_offset_hz, "static offset")
+        self.static_hz = round(max(-self.bound_hz, min(self.bound_hz, cal)))
+        if abs(cal) > self.bound_hz:
+            self._event(0.0, "WARN", f"AFC: static offset {cal:.0f} Hz clipped to +-{self.bound_hz:.0f} Hz "
+                                     "(80 % of FERR_L)")
+        self.correction_hz = self.static_hz
+        self.state = "STATIC" if self.enabled else "DISABLED"
+        self._flipped = False
+        self._hist: deque[tuple[int, float]] = deque(maxlen=AFC_WINDOW)     # (correction, raw error)
+        self._check: list[float] = []
+        self._step: tuple[float, float] | None = None                       # (residual before, step)
+        self._pending: tuple[int, float, bool, float] | None = None          # (hz, t, is_step, residual)
+        self._goal_static = False
+        self._t_applied = -math.inf
+        self._t_retry = -math.inf
+        self._t_los: float | None = None
+        self._limited = False
+
+    @classmethod
+    def from_settings(cls, s: RadioSettings, enabled: bool = True, sign: int = 1) -> AfcLoop:
+        """Loop for the configured SX126x profile and channel; disabled for the E22 models."""
+        p = SX126X_PROFILES[s.rate_code]
+        return cls(p.sf, p.bw_hz, s.freq_hz, s.freq_offset_cal_hz, enabled and s.model.packet_mode, sign,
+                   profile_airtime_s(s.rate_code))
+
+    def _configure(self, sf: int, bw_hz: float, freq_hz: float, airtime_s: float | None) -> None:
+        if isinstance(sf, bool) or sf not in LORA_SNR_MIN_DB:
+            raise ValueError(f"spreading factor must be one of {sorted(LORA_SNR_MIN_DB)}")
+        bw = _float(bw_hz, "bandwidth")
+        f = _float(freq_hz, "frequency")
+        if bw <= 0 or f <= 0:
+            raise ValueError("bandwidth and frequency must be positive")
+        self.sf, self.bw_hz, self.freq_hz = sf, bw, f
+        self.limit_hz = lora_max_freq_offset_hz(sf, bw, f)
+        self.snr_min_db = LORA_SNR_MIN_DB[sf] + AFC_SNR_MARGIN_DB
+        self.deadband_hz = max(AFC_DEADBAND_MIN_HZ, AFC_DEADBAND_BW_FRACTION * bw)
+        self.slew_hz = AFC_SLEW_FERR_FRACTION * self.limit_hz
+        self.bound_hz = min(AFC_BOUND_FERR_FRACTION * self.limit_hz, float(AFC_RPC_MAX_HZ))
+        air = lora_airtime_s(CADU_OCTETS, sf, bw) if airtime_s is None else _float(airtime_s, "air time")
+        if not 0.0 <= air <= 60.0:
+            raise ValueError("air time must be 0..60 s")
+        self.settle_s = air + AFC_SETTLE_MARGIN_S
+
+    # ------------------------------------------------------------- helpers
+    def _event(self, t: float, level: str, text: str) -> None:
+        self.events.append((t, level, text))
+
+    def pop_events(self) -> list[tuple[float, str, str]]:
+        out = list(self.events)
+        self.events.clear()
+        return out
+
+    def residual_hz(self, freq_err_hz: float) -> float:
+        """Received minus tuned frequency (Hz, positive = above) for a raw chip value, with the
+        loop's current sign belief (TdmRecord.freq_offset_hz)."""
+        return self.sign * _float(freq_err_hz, "frequency error")
+
+    @property
+    def estimate_hz(self) -> float | None:
+        """Median total received offset (Hz) relative to the nominal channel frequency."""
+        if not self._hist:
+            return None
+        v = sorted(c + self.sign * e for c, e in self._hist)
+        n = len(v)
+        return v[n // 2] if n % 2 else 0.5 * (v[n // 2 - 1] + v[n // 2])
+
+    def _clamp(self, hz: float) -> int:
+        b = math.floor(self.bound_hz)
+        return max(-b, min(b, round(hz)))
+
+    def _command(self, hz: int, t: float, is_step: bool, residual: float) -> int:
+        self._pending = (hz, t, is_step, residual)
+        return hz
+
+    def _expire_pending(self, t: float) -> None:
+        if self._pending is not None and t - self._pending[1] > AFC_CONFIRM_TIMEOUT_S:
+            self._event(t, "WARN", f"AFC: no rf_foff confirmation for {self._pending[0]} Hz within "
+                                   f"{AFC_CONFIRM_TIMEOUT_S:g} s - correction unchanged")
+            self.counters["rpc_failures"] += 1
+            self._pending = None
+            self._t_retry = t + AFC_RETRY_S
+
+    # ------------------------------------------------------------- inputs
+    def on_packet(self, t: float, freq_err_hz: float | None, snr_db: float | None,
+                  crc_ok: bool = True) -> int | None:
+        """One received packet (raw chip frequency error, Hz; SNR, dB). Returns a new
+        correction (int Hz) to send with rf_foff, else None."""
+        t = _float(t, "time")
+        self._expire_pending(t)
+        if self.state in ("DISABLED", "FAULT"):
+            return None
+        valid = crc_ok is True and isinstance(freq_err_hz, (int, float)) and not isinstance(freq_err_hz, bool) \
+            and math.isfinite(freq_err_hz) and abs(freq_err_hz) <= 0.5 * self.bw_hz
+        if not valid:
+            self.counters["rejected_invalid"] += 1
+            return None
+        if isinstance(snr_db, bool) or not isinstance(snr_db, (int, float)) or not math.isfinite(snr_db) \
+                or snr_db < self.snr_min_db:
+            self.counters["rejected_snr"] += 1
+            return None
+        if self._pending is not None or t < self._t_applied + self.settle_s:
+            self.counters["skipped_settling"] += 1
+            return None
+        e = float(freq_err_hz)                                        # type: ignore[arg-type]
+        self._hist.append((self.correction_hz, e))
+        self.counters["accepted"] += 1
+        if self.state == "HOLD":
+            self._resume(t)
+        if self.state == "CHECK" and self._step is not None:
+            self._check.append(self.sign * e)
+            if len(self._check) < AFC_CHECK_SAMPLES:
+                return None
+            pre, step = self._step
+            post = sorted(self._check)[len(self._check) // 2]
+            self._check, self._step = [], None
+            if abs(post) - abs(pre) > 0.5 * abs(step):
+                if self._flipped:
+                    self.state = "FAULT"
+                    self._hist.clear()
+                    self._event(t, "ERROR", f"AFC: residual grew again after the sign inversion ({pre:.0f} -> "
+                                            f"{post:.0f} Hz) - AFC stopped, back to the static offset; check the "
+                                            "station frequency reference and reset the AFC")
+                    return self._return_static(t)
+                self.sign = -self.sign
+                self._flipped = True
+                self.counters["sign_flips"] += 1
+                self._event(t, "WARN", f"AFC: residual grew after a {step:.0f} Hz step ({pre:.0f} -> {post:.0f} "
+                                       f"Hz) - frequency-error sign convention inverted to {self.sign:+d} (VERIFY)")
+            self.state = "TRACK"
+        return self._evaluate(t)
+
+    def _evaluate(self, t: float) -> int | None:
+        est = self.estimate_hz
+        if est is None or len(self._hist) < AFC_MIN_SAMPLES:
+            self.state = "STATIC"
+            return None
+        self.state = "TRACK"
+        if self._pending is not None or t < self._t_retry:
+            return None
+        diff = est - self.correction_hz
+        if abs(diff) <= self.deadband_hz:
+            self._limited = False
+            return None
+        step = max(-self.slew_hz, min(self.slew_hz, diff))
+        target = self._clamp(self.correction_hz + step)
+        if target == self.correction_hz:
+            if not self._limited:
+                self._limited = True
+                self._event(t, "WARN", f"AFC: estimate {est:.0f} Hz beyond the correction bound "
+                                       f"+-{self.bound_hz:.0f} Hz (80 % of FERR_L) - correction held at the bound")
+            return None
+        return self._command(target, t, True, diff)
+
+    def _return_static(self, t: float) -> int | None:
+        self._goal_static = self.correction_hz != self.static_hz
+        if not self._goal_static or self._pending is not None or t < self._t_retry:
+            return None
+        return self._command(self.static_hz, t, False, 0.0)
+
+    def _resume(self, t: float) -> None:
+        self._t_los = None
+        self.state = "TRACK" if len(self._hist) >= AFC_MIN_SAMPLES else "STATIC"
+        self._event(t, "INFO", f"AFC: signal back, tracking resumes from {self.correction_hz} Hz")
+
+    def tick(self, t: float, los: bool) -> int | None:
+        """Periodic service: LOS hold (AFC_LOS_HOLD_S, then the static offset), confirmation
+        time-outs and retries. Returns a correction to send, else None."""
+        t = _float(t, "time")
+        self._expire_pending(t)
+        if self.state == "DISABLED":
+            return None
+        if self._goal_static:
+            return self._return_static(t)
+        if self.state == "FAULT":
+            return None
+        if los and self.state in ("TRACK", "CHECK", "STATIC") and (self._hist or self.correction_hz != self.static_hz):
+            self.state, self._t_los = "HOLD", t
+            self._check, self._step = [], None
+            self._event(t, "INFO", f"AFC: LOS - holding {self.correction_hz} Hz for {AFC_LOS_HOLD_S:g} s")
+        elif los and self.state == "HOLD" and self._t_los is not None and t - self._t_los >= AFC_LOS_HOLD_S:
+            self._hist.clear()
+            self._t_los = None
+            self.state = "STATIC"
+            self._event(t, "INFO", f"AFC: no signal for {AFC_LOS_HOLD_S:g} s - back to the static offset "
+                                   f"{self.static_hz} Hz")
+            return self._return_static(t)
+        elif not los and self.state == "HOLD":
+            self._resume(t)
+        return None
+
+    def confirm(self, hz: int, result: int, t: float) -> None:
+        """Result of the station RPC rf_foff(hz): 1 applied, -1 out of range, -2 radio down."""
+        t = _float(t, "time")
+        p = self._pending
+        if p is None or p[0] != hz:
+            self._event(t, "WARN", f"AFC: unexpected rf_foff confirmation for {hz} Hz ignored")
+            return
+        self._pending = None
+        if result != 1:
+            self.counters["rpc_failures"] += 1
+            self._t_retry = t + AFC_RETRY_S
+            self._event(t, "WARN", f"AFC: rf_foff({hz}) failed: {AFC_RPC_RESULTS.get(result, f'result {result}')}")
+            return
+        step = hz - self.correction_hz
+        self.correction_hz = hz
+        self._t_applied = t
+        if hz == self.static_hz:
+            self._goal_static = False
+        if p[2]:
+            self.counters["steps"] += 1
+            self._step = (p[3], float(step))
+            self._check = []
+            self.state = "CHECK"
+
+    def reconfigure(self, t: float, sf: int, bw_hz: float, freq_hz: float,
+                    airtime_s: float | None = None) -> int | None:
+        """New LoRa profile or channel at time t: limits recomputed, history cleared; returns
+        a correction when the current one exceeds the new bound."""
+        t = _float(t, "time")
+        self._configure(sf, bw_hz, freq_hz, airtime_s)
+        self._hist.clear()
+        self._check, self._step = [], None
+        self.static_hz = self._clamp(self.static_hz)
+        if self.state not in ("DISABLED", "FAULT"):
+            self.state = "STATIC"
+        target = self._clamp(self.correction_hz)
+        if target != self.correction_hz and self.state != "DISABLED" and self._pending is None:
+            return self._command(target, t, False, 0.0)
+        return None
+
+    def reset(self) -> None:
+        """Operator reset (e.g. after FAULT): history cleared, sign check re-armed; the
+        correction returns to the static offset at the next tick()."""
+        if self.state == "DISABLED":
+            return
+        self._hist.clear()
+        self._check, self._step = [], None
+        self._flipped = False
+        self.state = "STATIC"
+        self._goal_static = self.correction_hz != self.static_hz
+
+    def snapshot(self) -> dict:
+        """Snapshot block rf.afc (contract 24.8) plus diagnostics."""
+        est = self.estimate_hz
+        return {"enabled": self.enabled, "state": self.state, "correction_hz": self.correction_hz,
+                "estimate_hz": est, "residual_hz": None if est is None else est - self.correction_hz,
+                "sign": self.sign, "static_hz": self.static_hz,
+                "doppler_hz": None if est is None else est - self.static_hz,
+                "pending_hz": None if self._pending is None else self._pending[0],
+                "samples": len(self._hist), "limit_hz": self.limit_hz, "bound_hz": self.bound_hz,
+                "slew_hz": self.slew_hz, "deadband_hz": self.deadband_hz, "snr_min_db": self.snr_min_db,
+                **self.counters}
 
 
 # ------------------------------------------- legacy names (default model, T33D)

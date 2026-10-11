@@ -578,3 +578,201 @@ def test_link_manager_never_changes_power_and_stops_at_2k4():
     good = {"windows": {"10m": {"rssi": {"n": 50, "p10": -90.0}}}, "frames": {"fer": 0.0}}
     rec = lm.evaluate(3000.0, good, rate_code=4, power_code=0)
     assert rec is None or rec["action"] != "TXPWR"
+
+
+# ================================================== automatic frequency control (24.8)
+# Limits recomputed here from the documents: SX1261/2 DS rev 2.2 Table 3-8 FERR_L = +-25 % of
+# BW, at SF12 also +-50 ppm, the tighter applying; Table 6-1 SF12 demodulator SNR -20 dB.
+FERR_SF12_62K5 = min(0.25 * 62_500.0, 50e-6 * F433)              # 15625 Hz
+FERR_SF12_31K25 = min(0.25 * 31_250.0, 50e-6 * F433)             # 7812.5 Hz
+
+
+class AfcSim:
+    """Spacecraft carrier at nominal + delta Hz; the chip reports chip_sign x (received - LO)
+    plus +-15 Hz deterministic jitter; a station stub answers rf_foff with `result`."""
+
+    def __init__(self, afc, delta, chip_sign=1, result=1, code=1):
+        self.afc, self.delta, self.chip_sign, self.result = afc, delta, chip_sign, result
+        self.period = link.profile_airtime_s(code) + 1.0
+        self.t, self.i = 1000.0, 0
+        self.commands = []
+
+    def packet(self, snr=0.0, crc_ok=True, err=None):
+        self.t += self.period
+        self.i += 1
+        if err is None:
+            err = self.chip_sign * (self.delta - self.afc.correction_hz) + 15.0 * math.sin(1.7 * self.i)
+        self.apply(self.afc.on_packet(self.t, err, snr, crc_ok))
+        self.apply(self.afc.tick(self.t + 0.1, False))
+
+    def apply(self, cmd):
+        if cmd is not None:
+            assert isinstance(cmd, int) and abs(cmd) <= link.AFC_RPC_MAX_HZ
+            self.commands.append(cmd)
+            self.afc.confirm(cmd, self.result, self.t + 0.2)
+
+
+def _steps(sim, start=0):
+    seq = [start] + sim.commands
+    return [b - a for a, b in zip(seq, seq[1:], strict=False)]
+
+
+def test_afc_limits_follow_the_datasheet():
+    afc = link.AfcLoop(12, 62_500.0, F433)
+    assert afc.limit_hz == pytest.approx(FERR_SF12_62K5) == pytest.approx(15_625.0)
+    assert afc.bound_hz == pytest.approx(0.8 * 15_625.0) and afc.slew_hz == pytest.approx(0.25 * 15_625.0)
+    assert afc.deadband_hz == pytest.approx(max(50.0, 0.02 * 62_500.0)) and afc.snr_min_db == -17.0
+    narrow = link.AfcLoop(12, 31_250.0, F433)
+    assert narrow.limit_hz == pytest.approx(FERR_SF12_31K25) and narrow.deadband_hz == pytest.approx(625.0)
+    assert link.AfcLoop(7, 125_000.0, F433).limit_hz == pytest.approx(31_250.0)    # SF7: BW rule only
+    for bad in (dict(sf=6), dict(sign=0), dict(bw_hz=-1.0), dict(sign=True)):
+        with pytest.raises(ValueError):
+            link.AfcLoop(**{**dict(sf=12, bw_hz=62_500.0, freq_hz=F433), **bad})
+
+
+@pytest.mark.parametrize("delta", [7000.0, -7000.0])
+def test_afc_converges_from_7_khz_within_slew_and_bound(delta):
+    afc = link.AfcLoop(12, 62_500.0, F433)
+    sim = AfcSim(afc, delta)
+    for _ in range(30):
+        sim.packet()
+    assert afc.state == "TRACK" and abs(afc.correction_hz - delta) <= afc.deadband_hz
+    assert sim.commands[0] == round(math.copysign(0.25 * FERR_SF12_62K5, delta))    # first step slew-limited
+    assert len(sim.commands) == 2                                                    # then straight to the target
+    assert all(abs(s) <= afc.slew_hz + 0.5 for s in _steps(sim))
+    assert afc.counters["steps"] == 2 and afc.counters["sign_flips"] == 0 and not afc.pop_events()
+    snap = afc.snapshot()
+    assert {"enabled", "correction_hz", "estimate_hz", "residual_hz", "sign", "state"} <= set(snap)
+    assert snap["estimate_hz"] == pytest.approx(delta, abs=20) and snap["sign"] == 1
+    assert snap["doppler_hz"] == pytest.approx(delta, abs=20)                         # static offset 0
+
+
+def test_afc_hysteresis_deadband():
+    afc = link.AfcLoop(12, 62_500.0, F433)
+    sim = AfcSim(afc, 1000.0)                                                        # inside 1250 Hz
+    for _ in range(30):
+        sim.packet()
+    assert sim.commands == [] and afc.state == "TRACK" and afc.correction_hz == 0
+    sim.delta = 1400.0                                                               # just outside
+    for _ in range(20):
+        sim.packet()
+    assert len(sim.commands) == 1 and abs(sim.commands[0] - 1400) < 30
+    for _ in range(40):                                                              # jitter never chatters
+        sim.packet()
+    assert len(sim.commands) == 1
+
+
+def test_afc_bound_holds_at_80_percent_of_ferr():
+    afc = link.AfcLoop(12, 31_250.0, F433, airtime_s=link.profile_airtime_s(0))
+    sim = AfcSim(afc, 7000.0, code=0)
+    for _ in range(40):
+        sim.packet()
+    assert afc.correction_hz == int(0.8 * FERR_SF12_31K25) == 6250
+    assert all(abs(s) <= 0.25 * FERR_SF12_31K25 + 0.5 for s in _steps(sim))
+    events = afc.pop_events()
+    assert sum("bound" in text for _, _, text in events) == 1                        # reported once
+
+
+def test_afc_rejects_low_snr_and_invalid_packets():
+    afc = link.AfcLoop(12, 62_500.0, F433)
+    sim = AfcSim(afc, 7000.0)
+    for snr in (-17.5, None, float("nan"), True):
+        sim.packet(snr=snr)
+    for err, crc in ((float("nan"), True), (31_251.0, True), (7000.0, False), (True, True)):
+        sim.packet(err=err, crc_ok=crc)
+    assert afc.on_packet(sim.t + 30.0, None, 0.0) is None                            # no estimate
+    assert sim.commands == [] and afc.counters["accepted"] == 0
+    assert afc.counters["rejected_snr"] == 4 and afc.counters["rejected_invalid"] == 5
+    for _ in range(3):
+        sim.packet(snr=-17.0)                                                        # exactly SNRmin + 3 dB
+    assert sim.commands and afc.counters["accepted"] == 3
+
+
+def test_afc_holds_through_los_then_returns_to_the_static_offset():
+    afc = link.AfcLoop(12, 62_500.0, F433, static_offset_hz=200.0)
+    assert afc.correction_hz == 200 and afc.state == "STATIC"
+    sim = AfcSim(afc, 7000.0)
+    for _ in range(30):
+        sim.packet()
+    held = afc.correction_hz
+    t = sim.t + 10.0
+    assert afc.tick(t, True) is None and afc.state == "HOLD"
+    assert afc.tick(t + 599.0, True) is None and afc.correction_hz == held
+    assert afc.tick(t + 300.0, False) is None and afc.state == "TRACK"               # signal back early
+    assert afc.tick(t + 400.0, True) is None and afc.state == "HOLD"
+    cmd = afc.tick(t + 400.0 + link.AFC_LOS_HOLD_S, True)
+    assert cmd == 200 and afc.state == "STATIC"
+    afc.confirm(cmd, 1, t + 1001.0)
+    assert afc.correction_hz == 200 and afc.estimate_hz is None
+    assert [lvl for _, lvl, _ in afc.pop_events()] == ["INFO"] * 4
+
+
+def test_afc_wrong_sign_is_detected_once_and_corrected():
+    afc = link.AfcLoop(12, 62_500.0, F433)
+    sim = AfcSim(afc, 7000.0, chip_sign=-1)                     # chip convention opposite to the belief
+    for _ in range(40):
+        sim.packet()
+    assert sim.commands[0] == -3906                             # the wrong-way step ...
+    assert afc.sign == -1 and afc.counters["sign_flips"] == 1   # ... is detected and the sign inverted
+    assert abs(afc.correction_hz - 7000) <= afc.deadband_hz and afc.state == "TRACK"
+    (event,) = afc.pop_events()
+    assert event[1] == "WARN" and "inverted" in event[2]
+    assert afc.residual_hz(25.0) == -25.0
+
+
+def test_afc_second_divergence_faults_back_to_static():
+    afc = link.AfcLoop(12, 62_500.0, F433, static_offset_hz=-100.0)
+    sim = AfcSim(afc, 7000.0, chip_sign=-1)
+    for _ in range(40):
+        if afc.counters["sign_flips"] == 1:
+            sim.chip_sign = 1                                   # adversarial: the convention changes again
+        sim.packet()
+    assert afc.state == "FAULT" and afc.correction_hz == -100 and sim.commands[-1] == -100
+    assert [lvl for _, lvl, _ in afc.pop_events()] == ["WARN", "ERROR"]
+    n = len(sim.commands)
+    for _ in range(5):
+        sim.packet()
+    assert len(sim.commands) == n                               # stopped until an operator reset
+    afc.reset()
+    assert afc.state == "STATIC" and afc.tick(sim.t + 1, False) is None
+
+
+def test_afc_rpc_failures_timeouts_and_settling():
+    afc = link.AfcLoop(12, 62_500.0, F433)
+    sim = AfcSim(afc, 7000.0, result=-2)
+    for _ in range(3):
+        sim.packet()
+    assert sim.commands == [3906] and afc.correction_hz == 0 and afc.counters["rpc_failures"] == 1
+    assert "radio down" in afc.pop_events()[0][2]
+    sim.result = 1
+    sim.packet()                                                # retried after AFC_RETRY_S
+    assert sim.commands == [3906, 3906] and afc.correction_hz == 3906
+    cmd = afc.on_packet(sim.t + 1.0, 50.0, 0.0)                 # inside the settling time: ignored
+    assert cmd is None and afc.counters["skipped_settling"] == 1
+    lone = link.AfcLoop(12, 62_500.0, F433)
+    cmds = [lone.on_packet(100.0 + 20 * i, 5000.0, 0.0) for i in range(3)]
+    assert cmds[:2] == [None, None] and cmds[2] == 3906         # never confirmed ...
+    assert lone.on_packet(125.0, 5000.0, 0.0) is None and lone.counters["skipped_settling"] == 1
+    assert lone.tick(141.0 + link.AFC_CONFIRM_TIMEOUT_S, False) is None and lone.counters["rpc_failures"] == 1
+    assert "no rf_foff confirmation" in lone.pop_events()[0][2]
+    lone.confirm(1234, 1, 200.0)                                # unexpected confirmation
+    assert lone.correction_hz == 0 and "unexpected" in lone.pop_events()[0][2]
+
+
+def test_afc_from_settings_reconfigure_and_disabled():
+    s = link.RadioSettings.from_config({"model": "SX126x", "air_rate": 1, "channel": 23, "freq_offset_cal_hz": 150.0})
+    afc = link.AfcLoop.from_settings(s)
+    assert afc.enabled and afc.static_hz == 150 and afc.limit_hz == pytest.approx(FERR_SF12_62K5)
+    assert afc.settle_s == pytest.approx(link.profile_airtime_s(1) + link.AFC_SETTLE_MARGIN_S)
+    sim = AfcSim(afc, 7000.0)
+    for _ in range(30):
+        sim.packet()
+    cmd = afc.reconfigure(sim.t, 12, 31_250.0, F433)            # narrower profile: clamp to its bound
+    assert cmd == 6250 and afc.state == "STATIC"
+    afc.confirm(cmd, 1, sim.t + 0.1)
+    assert afc.correction_hz == 6250 and afc.estimate_hz is None
+    e22 = link.AfcLoop.from_settings(link.RadioSettings.from_config({"model": "E22-400T33D"}))
+    assert e22.state == "DISABLED" and not e22.snapshot()["enabled"]
+    assert e22.on_packet(1.0, 5000.0, 0.0) is None and e22.tick(2.0, True) is None
+    clipped = link.AfcLoop(12, 31_250.0, F433, static_offset_hz=9000.0)
+    assert clipped.static_hz == 6250 and "clipped" in clipped.pop_events()[0][2]
