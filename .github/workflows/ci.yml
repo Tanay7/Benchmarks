@@ -50,6 +50,7 @@ jobs:
         run: |
           make -C tools/host_test host_test \
             CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -Wshadow -Wno-unused-parameter -Werror -DVGQ_HOST_BUILD -I$FLIGHT"
+          mkdir -p "$RUNNER_TEMP/vectors"
           tools/host_test/host_test "$RUNNER_TEMP/vectors"
 
       - name: Build and run under AddressSanitizer + UBSan
@@ -57,6 +58,7 @@ jobs:
           make -C tools/host_test clean
           make -C tools/host_test host_test \
             CXXFLAGS="-std=c++17 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wall -Wextra -Wno-unused-parameter -DVGQ_HOST_BUILD -I$FLIGHT"
+          mkdir -p "$RUNNER_TEMP/vectors-san"
           tools/host_test/host_test "$RUNNER_TEMP/vectors-san"
 
   ground-tests:
@@ -94,7 +96,14 @@ jobs:
             fi
           done
 
-      - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
+      # "Arduino Q Boards" = arduino:zephyr (UNO Q and VENTUNO Q; ArduinoCore-zephyr
+      # extra/artifacts/zephyr_unoq.json). A profile that names the platform without a
+      # version uses the installed one, as App Lab does, so install it first.
+      - name: Install the Arduino Q Boards platform
         run: |
           arduino-cli core update-index
-          arduino-cli compile --profile default --warnings all ground/station_io/sketch
+          arduino-cli core install arduino:zephyr
+          arduino-cli core list
+
+      - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
+        run: arduino-cli compile --profile default --warnings all ground/station_io/sketch
