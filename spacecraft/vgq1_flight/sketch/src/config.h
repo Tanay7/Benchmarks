@@ -48,11 +48,11 @@ static const int PIN_E22_AUX = 7;     // D7 (PB2)  input, module busy = LOW
 static const uint32_t kI2cClockHz    = 100000;  // 100 kHz: tolerant of a long boom cable
 static const uint8_t  kRm3100ObAddr  = 0x20;
 static const uint8_t  kRm3100IbAddr  = 0x23;
-// BHI260AP "magnetometer corrected" output (BMM150) in uT per LSB. Bosch does not
-// publish this in the Arduino library; 1/16 uT/LSB is the BMM150 convention.
-// VERIFY with test T-SC-06 (docs/08): rotate the Nicla slowly through all
-// orientations - |B| must stay constant and equal your site's WMM total field.
-static const float kAruMagUtPerLsb = 0.0625f;
+// Nicla ARU magnetometer field (BMM150 via the BHI260AP) in uT per LSB. The ARU
+// firmware scales the BHI260's "magnetometer corrected" counts by its reported
+// dynamic range (BHI260AP datasheet Table 88) and sends 0.1 uT. Test T-SC-06
+// (docs/08): rotate the Nicla slowly - |B| must stay constant at the WMM total field.
+static const float kAruMagUtPerLsb = 0.1f;
 
 // ---- Radio defaults (MUST match ground/config/station.toml [radio]) ----------------------
 static const uint8_t  kE22Channel      = 23;     // 410.125 + 23 = 433.125 MHz  (check band plan!)

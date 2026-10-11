@@ -24,7 +24,7 @@ struct AruReading {
   uint16_t quat_acc_mrad = 0xFFFF;           // BHI260 rotation-vector accuracy estimate
   int16_t acc_mg[3] = {0, 0, 0};
   int16_t gyro_ddps[3] = {0, 0, 0};          // 0.1 deg/s
-  int16_t mag_raw[3] = {0, 0, 0};            // BMM150 via BHI260, see kAruMagUtPerLsb
+  int16_t mag_raw[3] = {0, 0, 0};            // BMM150 via BHI260, 0.1 uT (kAruMagUtPerLsb)
   uint8_t env_flags = 0;        // b0 pressure, b1 BSEC, b2 temperature, b3 humidity, b4 gas
   float p_hpa = NAN, t_c = NAN, rh = NAN, bvoc_ppm = NAN;
   uint16_t iaq = 0, iaq_s = 0;
