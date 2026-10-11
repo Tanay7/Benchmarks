@@ -1,3 +1,5 @@
-name: DSS-Q Station IO
+name: DSS-Q Ground Station
 icon: 📡
-description: VENTUNO Q MCU side of the DSS-Q ground station - CardKB command keyboards, AOS/ALARM/UPLINK annunciators and the Radio Control Unit for the station E22. The ground data system itself runs on the board's Linux side (python -m dssq.gds).
+description: DSS-Q1 ground station for VGQ-1 - CCSDS ground data system and operator web dashboard (port 8080, Python standard library only) plus the station I/O sketch (CardKB, annunciators, Radio Control Unit, optional SX126x radio).
+ports:
+  - 8080

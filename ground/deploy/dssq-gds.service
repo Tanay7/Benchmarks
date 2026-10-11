@@ -1,21 +1,35 @@
-# systemd unit for the DSS-Q ground data system on the VENTUNO Q (Linux side).
+# systemd unit for the DSS-Q ground data system on the VENTUNO Q Linux side (host mode,
+# the documented fallback / always-on alternative to the App Lab App, contract 18).
 #   sudo cp ground/deploy/dssq-gds.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now dssq-gds
 #   journalctl -u dssq-gds -f
-# Adjust User / WorkingDirectory to where you cloned the repository.
+# Adjust User / WorkingDirectory to where the repository is. The GDS needs only the Python
+# standard library (>= 3.11; Ubuntu 24.04 ships 3.12): no virtual environment, no pip.
+#
+# Do NOT run this service and the "DSS-Q Ground Station" App Lab App at the same time: the
+# Router Bridge lets ONE Linux client provide a given method name (front panel, RCU, SX126x
+# radio), and both would also compete for the radio serial port and web port 8080.
+#
+# Web commanding: with [gds] http_host = "0.0.0.0" set [gds] http_token in
+# config/station.toml, otherwise every POST is refused (read-only dashboard).
 [Unit]
-Description=DSS-Q ground data system (VGQ-1 telemetry & telecommand)
+Description=DSS-Q ground data system (VGQ-1 telemetry and telecommand)
 After=network-online.target arduino-router.service
 Wants=network-online.target
 
 [Service]
 User=arduino
 WorkingDirectory=/home/arduino/Benchmarks/ground
-ExecStart=/home/arduino/Benchmarks/ground/.venv/bin/python -m dssq.gds --config config/station.toml
+ExecStart=/usr/bin/python3 -m dssq.gds --config config/station.toml
 Restart=on-failure
 RestartSec=5
-# serial port access (E22 USB-UART)
+# Runner.close() finishes within 4 s after SIGTERM (TDM, archive and SDLS state flushed).
+TimeoutStopSec=10
+# Serial port access (E22 USB-UART).
 SupplementaryGroups=dialout
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target
