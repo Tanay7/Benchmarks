@@ -313,6 +313,18 @@ input[type=number]{width:90px}
     <div class="panel"><h3>Tracking Data Messages <small>CCSDS 503.0-B-2 KVN, one per pass</small></h3>
       <div class="row"><button class="btn" data-act="tdmwrite">WRITE TDM NOW</button><a class="btn" href="/api/xtce" download="vgq1.xtce.xml">DOWNLOAD XTCE</a></div>
       <div class="tw"><table id="fi-tdm"></table></div></div>
+    <div class="panel"><h3>Receiver data logger <small>1 Hz rx_stats in gds.sqlite, raw CADUs per UTC day, retention and free-space guard</small></h3><div class="tw"><table id="fi-logger"></table></div></div>
+    <div class="panel"><h3>CSV export <small>UTF-8, ISO-8601 UTC + unix seconds, units in the header; written to &lt;archive&gt;/exports</small></h3>
+      <div class="row"><label for="lg-from">from (UTC)</label><input type="text" id="lg-from" size="22" placeholder="2026-10-11T12:00:00Z" autocomplete="off" spellcheck="false">
+        <label for="lg-to">to (UTC)</label><input type="text" id="lg-to" size="22" placeholder="2026-10-11T13:00:00Z" autocomplete="off" spellcheck="false"></div>
+      <div class="row"><button class="btn ghost" data-act="lgrange" data-s="600">LAST 10 MIN</button><button class="btn ghost" data-act="lgrange" data-s="3600">LAST HOUR</button>
+        <button class="btn ghost" data-act="lgrange" data-s="86400">LAST 24 H</button><button class="btn ghost" data-act="lgrange" data-s="0">TODAY (UTC)</button></div>
+      <div class="row" id="lg-what"><label><input type="checkbox" data-p="rf" checked> rf</label><label><input type="checkbox" data-p="params"> params</label>
+        <label><input type="checkbox" data-p="events" checked> events</label><label><input type="checkbox" data-p="frames"> frames</label>
+        <label><input type="checkbox" data-p="packets"> packets</label><label><input type="checkbox" data-p="commands"> commands</label>
+        <button class="btn" data-act="export">EXPORT</button></div>
+      <div class="msg" id="lg-msg"></div>
+      <div class="tw"><table id="fi-exports"></table></div></div>
   </div>
 </section>
 <!-- =============================== 11 COMMANDING =============================== -->
@@ -363,7 +375,7 @@ let lastOk = 0, lastSciOk = 0;
 let token = null;
 let specLog = false;
 let burstCh = null;
-let filesCache = {t: 0, files: null, tdm: null, busy: false};
+let filesCache = {t: 0, files: null, tdm: null, exports: null, busy: false};
 let seqResult = null;
 const cmdHistory = [];
 let cmdHistPos = -1;
@@ -1876,8 +1888,8 @@ async function refreshFiles() {
   if (filesCache.busy) return;
   filesCache.busy = true;
   try {
-    const [f, t] = await Promise.all([getJSON("/api/files"), getJSON("/api/tdm")]);
-    filesCache.files = f; filesCache.tdm = t; filesCache.t = Date.now();
+    const [f, t, x] = await Promise.all([getJSON("/api/files"), getJSON("/api/tdm"), getJSON("/api/exports")]);
+    filesCache.files = f; filesCache.tdm = t; filesCache.exports = x; filesCache.t = Date.now();
     if (tab === "FILES") renderFilesLists();
   } catch (e) { /* the state poll reports the link */ }
   finally { filesCache.busy = false; }
@@ -1887,6 +1899,64 @@ function renderFilesLists() {
   table("fi-files", ["file", "size", "modified (UTC)", "state"], (filesCache.files || []).map(f => [N(h("a", {href: "/api/files/" + encodeURIComponent(f.name), download: f.name, text: f.name})),
     size(f.size), iso(f.mtime), V(f.state, f.state === "COMPLETE" ? "ok" : "warn")]));
   table("fi-tdm", ["TDM file", "size", "modified (UTC)"], (filesCache.tdm || []).map(f => [N(h("a", {href: "/api/tdm/" + encodeURIComponent(f.name), download: f.name, text: f.name})), size(f.size), iso(f.mtime)]));
+  const ex = filesCache.exports || [];
+  table("fi-exports", ["CSV export", "size", "written (UTC)"], ex.length ? ex.slice(0, 50).map(f => [N(h("a", {href: "/api/exports/" + encodeURIComponent(f.name), download: f.name, text: f.name})), size(f.size), iso(f.mtime)])
+    : [["no export yet", "", ""]]);
+}
+// Receiver data logger (contract 39): S.logger from dssq.datalog.DataLogger.health()
+// SI sizes here (kB / MB / GB = 1e3 / 1e6 / 1e9 octets), as [gds] archive_max_gb / archive_min_free_mb.
+function sizeSI(n) { if (!num(n)) return NA; if (n < 1e3) return n + " B"; if (n < 1e6) return (n / 1e3).toFixed(1) + " kB"; if (n < 1e9) return (n / 1e6).toFixed(1) + " MB"; return (n / 1e9).toFixed(2) + " GB"; }
+function renderLogger() {
+  const lg = S.logger || {};
+  if (!lg.enabled) { table("fi-logger", null, [["Logger", V("archive disabled (--no-archive)", "warn")]]); return; }
+  const lp = lg.last_prune, tot = lg.totals || {};
+  const freeCls = lg.paused ? "bad" : num(lg.free_bytes) && num(lg.resume_free_bytes) && lg.free_bytes < 2 * lg.resume_free_bytes ? "warn" : "";
+  const capPct = num(lg.max_bytes) && lg.max_bytes > 0 ? 100 * lg.used_bytes / lg.max_bytes : null;
+  table("fi-logger", null, [
+    ["Logging", V(lg.paused ? "PAUSED since " + iso(lg.paused_since) + " (free space below the floor)" : "RUNNING", lg.paused ? "bad" : "ok")],
+    ["rx_stats rows written / skipped", fint(lg.rx_rows) + " / " + fint(lg.rx_rows_skipped)],
+    ["Last rx_stats row", lg.last_row_t ? iso(lg.last_row_t) + " (" + fu(lg.row_age_s, 1, "s") + " ago)" : NA],
+    ["Raw CADU records written / skipped", fint(lg.cadu_records) + " / " + fint(lg.cadu_skipped)],
+    ["Archive write errors", V(fint(lg.write_errors), lg.write_errors ? "warn" : "")],
+    {section: "space"},
+    ["Free space (archive file system)", V(lg.free_error ? "unknown: " + lg.free_error : sizeSI(lg.free_bytes) + (num(lg.total_bytes) ? " of " + sizeSI(lg.total_bytes) : ""), lg.free_error ? "warn" : freeCls)],
+    ["Free-space floor / resume above", num(lg.min_free_bytes) && lg.min_free_bytes > 0 ? sizeSI(lg.min_free_bytes) + " / " + sizeSI(lg.resume_free_bytes) : "guard off (archive_min_free_mb = 0)"],
+    ["Pauses since start", fint(lg.pauses)],
+    ["Archive used (day folders + DB pages)", N([bar(capPct), " " + sizeSI(lg.used_bytes) + (num(lg.max_bytes) ? " of " + sizeSI(lg.max_bytes) + " (" + fpct(capPct, 1) + ")" : " (no size cap)")])],
+    ["Day folders / oldest", fint(lg.days) + " / " + (lg.oldest_day || NA)],
+    ["Raw / database file / DB in use", sizeSI(lg.raw_bytes) + " / " + sizeSI(lg.db_file_bytes) + " / " + sizeSI(lg.db_used_bytes)],
+    ["Exports", fint(lg.exports) + " files, " + sizeSI(lg.exports_bytes)],
+    ["Usage scanned", iso(lg.usage_t)],
+    {section: "retention"},
+    ["Keep", (num(lg.keep_days) ? lg.keep_days + " days" : "no age limit") + " · journal " + (lg.journal_mode || NA)],
+    ["Prune", lg.prune_running ? V("RUNNING: rows older than " + iso(lg.prune_cutoff_t), "warn") : "idle, next check " + iso(lg.next_prune_check_t)],
+    ["Last prune", lp ? V(iso(lp.t) + ": " + (lp.days_deleted || []).length + " day folders, " + fint(lp.rows_deleted) + " rows older than " + iso(lp.cutoff_t) + " (" + lp.reason + ")", "l wrap") : "none since start"],
+    ["Deleted since start", fint(tot.days_deleted) + " days, " + fint(tot.rows_deleted) + " rows, " + fint(tot.exports_deleted) + " exports, " + sizeSI(tot.bytes_freed) + " raw"],
+    ["Prune errors", V(fint(lg.prune_errors), lg.prune_errors ? "warn" : "")],
+    ["Archive directory", V(lg.archive_dir || NA, "wrap")]]);
+}
+function isoInput(t) { return new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"); }
+function setExportRange(seconds) {
+  const now = S && num(S.utc) ? S.utc : Date.now() / 1000;
+  const from = seconds > 0 ? now - seconds : Math.floor(now / 86400) * 86400;
+  const f = $("lg-from"), t = $("lg-to");
+  if (f) f.value = isoInput(Math.floor(from));
+  if (t) t.value = isoInput(Math.ceil(now));
+}
+async function doExport() {
+  const what = [...document.querySelectorAll("#lg-what input[type=checkbox]")].filter(c => c.checked).map(c => c.dataset.p);
+  const m = $("lg-msg");
+  if (!what.length) { toast("select at least one product", true); return; }
+  const body = {from: (($("lg-from") || {}).value || "").trim(), to: (($("lg-to") || {}).value || "").trim(), what: what};
+  if (m) { m.textContent = "exporting " + what.join(", ") + " …"; m.className = "msg"; }
+  const r = await post("/api/export", body);
+  if (m) {
+    const files = (r && r.files) || [];
+    m.textContent = resultText(r, r && r.error ? 400 : 200) + (files.length ? "\n" + files.map(f => f.name + ": " + f.rows + " rows, " + size(f.size)).join("\n") : "");
+    m.className = "msg " + (r && r.status === "OK" ? "ok" : "bad");
+  }
+  filesCache.t = 0;
+  refreshFiles();
 }
 function renderFiles() {
   const cf = S.cfdp || {}, ob = cf.onboard || {}, cn = cf.counters || {}, td2 = S.tdm || {};
@@ -1900,6 +1970,8 @@ function renderFiles() {
     ["Files directory", V(cf.files_dir || NA, "wrap")], {section: "onboard (HK)"}, ["State", ob.state_name || NA], ["Sequence number", num(ob.seq) ? hex(ob.seq, 8) + " (" + ob.seq + ")" : NA], ["Progress", fpct(ob.progress_pct, 1)],
     {section: "TDM"}, ["Recording this pass", fyn(td2.enabled) + " · auto write at LOS " + fyn(td2.auto_write)], ["Records / dropped", fint(td2.records) + " / " + fint(td2.dropped)],
     ["Pass AOS", iso(td2.aos_t)], ["Last TDM", (td2.last_file || NA) + " at " + iso(td2.last_write_t)]]);
+  renderLogger();
+  if ($("lg-from") && !$("lg-from").value && !$("lg-to").value) setExportRange(3600);
   if (Date.now() - filesCache.t > 5000) refreshFiles();
   renderFilesLists();
 }
@@ -2035,6 +2107,8 @@ const ACT = {
   seqdel: () => sendCmd("SEQCTRL DELETE " + Math.max(0, Math.min(31, Math.round(Number(($("sq-del") || {}).value) || 0)))),
   cfdpput: el => sendCmd("CFDPPUT " + el.dataset.src + " " + Math.max(0, Math.min(65535, Math.round(Number(($("fi-kib") || {}).value) || 0)))),
   tdmwrite: () => post("/api/tdm/write", {}),
+  lgrange: el => setExportRange(Number(el.dataset.s) || 0),
+  export: () => doExport(),
 };
 document.addEventListener("click", ev => {
   const el = ev.target && ev.target.closest ? ev.target.closest("[data-act]") : null;

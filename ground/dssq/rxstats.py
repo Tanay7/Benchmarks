@@ -24,6 +24,12 @@ Frame error rate: `frames.fer` is the lifetime ratio (display); the link manager
 jump of the AOS frame (frames sent while out of view, or a spacecraft reboot, are not
 frames lost in the pass).
 
+Data logger (contract 39): interval_row() is the 1 Hz rx_stats row the GDS archives - the
+receptions of the last interval (count; mean RSSI, SNR and frequency error of those
+receptions, None without one), the current noise floor while it is fresh, the link margin of
+that mean RSSI, the 10-minute FER, the counter increments of the interval (RS symbols
+corrected, uncorrectable codeblocks, frames received / lost) and the AFC / Doppler state.
+
 Free-space path loss (exact constant): FSPL = 20 log10(4 pi d f / c), d in m, f in Hz;
 20 log10(4 pi 1e9 / c) = 32.44778 dB for d in km and f in MHz (not 32.44).
 """
@@ -56,6 +62,9 @@ E22_RSSI_RESOLUTION_DB = 1.0        # E22 manuals: dBm = -(256 - value)
 SX126X_RSSI_RESOLUTION_DB = 0.5     # SX1261/2 DS GetPacketStatus: RssiPkt / 2
 FREQ_HIST_DEFAULT_HZ = 5000.0       # +-5 kHz when no FERR_L applies
 FREQ_HIST_STEP_HZ = 100.0
+# Counters whose increment per logger interval goes into rx_stats (row key -> attribute).
+ROW_COUNTERS = {"n_rx": "receptions", "rs_symbols": "sym_corrected", "cb_uncorrectable": "cb_uncorrectable",
+                "frames_ok": "frames_ok", "frames_lost": "frames_lost"}
 
 
 def fspl_db(distance_m: float, freq_hz: float) -> float | None:
@@ -189,6 +198,8 @@ class ReceiverStats:
         self.last_rx: dict[str, Any] = {"rssi_dbm": None, "rssi_raw_dbm": None, "snr_db": None,
                                         "freq_err_hz": None, "crc_ok": None, "t": None}
         self._ferr_recent: deque[float] = deque(maxlen=FREQ_STATE_SAMPLES)
+        self.receptions = 0            # radio units received (on_reception), for the logger's n_rx
+        self._row_prev: dict[str, int] = dict.fromkeys(ROW_COUNTERS, 0)
         self.packets_ok = 0
         self.packets_crc_fail = 0
         # noise
@@ -292,6 +303,7 @@ class ReceiverStats:
                      freq_err_hz: float | None = None, crc_ok: bool = True) -> None:
         """One received radio unit (E22 CADU or SX126x packet), before decoding."""
         rssi = self.calibrated(rssi_raw)
+        self.receptions += 1
         self.last_rx = {"rssi_dbm": rssi, "rssi_raw_dbm": rssi_raw, "snr_db": snr_db,
                         "freq_err_hz": freq_err_hz, "crc_ok": crc_ok, "t": t}
         self._add("rssi", t, rssi)
@@ -457,6 +469,41 @@ class ReceiverStats:
             d = link.doppler(total, self.offset_cal_hz, self.settings.freq_hz)
             out.update(doppler_hz=d["doppler_hz"], range_rate_m_s=d["range_rate_m_s"])
         return out
+
+    def _interval_mean(self, metric: str, since: float, now: float) -> float | None:
+        """Mean of the `metric` samples with since < t <= now (the 1-minute window holds them)."""
+        vals: list[float] = []
+        for t, v in reversed(self.w["1m"][metric].d):
+            if t <= since:
+                break
+            if t <= now:
+                vals.append(v)
+        return math.fsum(vals) / len(vals) if vals else None
+
+    def interval_row(self, since: float, now: float, afc: link.AfcLoop | None = None) -> dict[str, Any]:
+        """The data logger's rx_stats row for the interval (since, now] (module docstring;
+        keys = dssq.archive.RX_STATS_COLUMNS). Counter fields are the increments since the
+        previous call, so the rows of a time range sum to its totals."""
+        row: dict[str, Any] = {"t": now, "los": int(self.los), "pass_no": self.passes}
+        for key, attr in ROW_COUNTERS.items():
+            cur = int(getattr(self, attr))
+            row[key] = max(0, cur - self._row_prev.get(key, 0))
+            self._row_prev[key] = cur
+        rssi = self._interval_mean("rssi", since, now)
+        stale = self.los_timeout_s or STALE_PAIR_DEFAULT_S
+        noise = self.noise_dbm if self.noise_t and abs(now - self.noise_t) <= stale else None
+        row.update(rssi_dbm=rssi, snr_db=self._interval_mean("snr_meas", since, now),
+                   snr_est_db=_sub(rssi, noise), noise_dbm=noise,
+                   margin_db=_sub(rssi, self.settings.sensitivity[0]),
+                   freq_err_hz=self._interval_mean("freq_err", since, now), fer_10m=self.fer_window(now),
+                   afc_hz=None, doppler_hz=None, range_rate_m_s=None)
+        if self.packet_mode:
+            if afc is not None and afc.enabled:
+                row["afc_hz"] = float(afc.correction_hz)
+            if not self.los:                              # a Doppler of the last pass is not news
+                d = self._doppler(afc)
+                row["doppler_hz"], row["range_rate_m_s"] = d["doppler_hz"], d["range_rate_m_s"]
+        return row
 
     def snapshot(self, now: float | None = None, afc: link.AfcLoop | None = None,
                  afc_events: list[dict[str, Any]] | None = None) -> dict[str, Any]:

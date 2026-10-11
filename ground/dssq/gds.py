@@ -17,6 +17,8 @@ or enqueue operator requests under `GroundStation.lock`):
   Uplink: operator / CardKB / sequence files -> dictionary checks -> FOP-1 (TC or USLP
   frames, SDLS AUTH / AE) -> CLTU -> radio, in the quiet window after every received frame.
   SX126x: ground AFC (link.AfcLoop -> rf_foff), CCSDS TDM per pass (products.TdmRecorder).
+  Receiver data logger (contract 39, dssq.datalog): a 1 Hz rx_stats row, archive retention
+  and the free-space guard from the housekeeping; CSV export (dssq.export) for the web UI.
 
 Runner (Phase B PB-8.4) drives one bounded iteration per step(): register, radio_read, ingest,
 packets, outbox, jobs, afc, tdm, housekeeping, console - each inside ONE documented
@@ -50,6 +52,7 @@ from typing import Any
 
 from . import __version__, link
 from . import config as station_config
+from . import export as csv_export
 from . import products
 from .archive import Archive
 from .ccsds import ASM, CADU_LEN, NUM_DATA_VCS, TC_MAX_FRAME_LEN, VC_NAMES
@@ -64,6 +67,7 @@ from .ccsds.timecode import SclkCorrelator
 from .ccsds.tm import TransferFrame, decode_codeblock
 from .cmdparse import (CommandError, ParsedCommand, SequenceError, help_text, pack_seqload, parse,
                        parse_sequence, seqload_commands, tc_packet)
+from .datalog import DataLogger
 from .decom import Decommutator
 from .dictionary import (APID_CFDP, APID_CMDVER, APID_EVR, APID_HK, APID_MAG, APID_RF,
                          APID_RFSCAN, APID_SPEC, APID_SPECBURST, APID_TIMECORR, BEACON_LEVELS, CFDP_STATES,
@@ -198,6 +202,10 @@ class GroundStation:
         self.archive_enabled = archive
         self.archive_dir = Path(g["archive_dir"])
         self.archive = Archive(self.archive_dir, enabled=archive)
+        self.logger = DataLogger(self.archive, g)
+        self.exports_dir = self.archive.exports_dir
+        self._logger_t: float | None = None
+        self._export_lock = threading.Lock()             # one CSV export at a time (web)
         self.files_dir = station_config.files_path(cfg)
         self.tdm_dir = self.archive_dir / "tdm"
         self.settings = link.RadioSettings.from_config(cfg["radio"])
@@ -1531,9 +1539,59 @@ class GroundStation:
             self.event("ERROR", "SDLS", "TM epoch went backwards with a valid MAC: replayed recording or EGSE "
                        "boot-counter regression (possible GCM nonce reuse) - investigate; generate a new key if the "
                        "counter regressed")
+        self._log_rx_stats(now)
         self._archive_health(now)
         self._radio_link_events(now)
         self.alarm, self.alarm_reasons, self.alarm_red_count = self._compute_alarm(now)
+
+    def _log_rx_stats(self, now: float) -> None:
+        """Data logger step (dssq.datalog): the rx_stats row of the interval since the last
+        one, the free-space guard and the retention; their events go to the log as ARCHIVE."""
+        since = self._logger_t if self._logger_t is not None and self._logger_t < now else now - 1.0
+        afc = self.afc if self.settings.model.packet_mode else None
+        for level, text in self.logger.tick(now, lambda: self.rx.interval_row(since, now, afc)):
+            self.event(level, "ARCHIVE", text)
+        self._logger_t = now
+
+    def export_csv(self, t_from: str | float, t_to: str | float, what: str | list[str],
+                   source: str = "web") -> dict[str, Any]:
+        """CSV export of [t_from, t_to) into <archive>/exports (dssq.export), file names chosen
+        here. One export at a time; the archive is committed first so the files hold every row
+        so far; the export itself reads through its own read-only connection WITHOUT the
+        station lock (the radio thread never waits for it). Refused while the free-space guard
+        pauses logging. Raises csv_export.ExportError for a bad request."""
+        t0, t1 = csv_export.parse_time(t_from), csv_export.parse_time(t_to)
+        names = csv_export.parse_products(what)
+        if not t0 < t1:
+            raise csv_export.ExportError("'from' must be earlier than 'to'")
+        if not self.archive_enabled:
+            return {"status": "REFUSED", "message": "the archive is disabled (--no-archive)"}
+        if not self._export_lock.acquire(blocking=False):
+            return {"status": "BUSY", "message": "another export is running; try again when it is done"}
+        try:
+            with self.lock:
+                if self.logger.paused:
+                    return {"status": "REFUSED", "message": "free space below [gds] archive_min_free_mb: "
+                                                            "logging is paused, no export"}
+                self.archive.commit()
+                floor = self.logger.min_free_bytes
+            try:
+                res = csv_export.export_range(self.archive.db_path, self.exports_dir, t0, t1, names, floor)
+            except (OSError, sqlite3.Error) as e:
+                with self.lock:
+                    self.event("WARN", "EXPORT", f"CSV export ({source}) failed: {type(e).__name__}: {e}"[:300])
+                return {"status": "ERROR", "message": f"export failed: {type(e).__name__}: {e}"[:300]}
+            except csv_export.ExportError as e:
+                return {"status": "REFUSED", "message": str(e)}
+            rows = sum(r.rows for r in res)
+            msg = (f"CSV export {csv_export.iso_utc(t0)} .. {csv_export.iso_utc(t1)} ({source}): "
+                   + ", ".join(f"{r.name} {r.rows} rows" for r in res))
+            with self.lock:
+                self.event("INFO", "EXPORT", msg)
+            return {"status": "OK", "message": f"{len(res)} file(s), {rows} rows", "from": t0, "to": t1,
+                    "files": [r.as_dict() for r in res]}
+        finally:
+            self._export_lock.release()
 
     def _archive_health(self, now: float) -> None:
         """Archive writes are best-effort (archive.py): a failed write (disk full) is counted
@@ -1625,6 +1683,10 @@ class GroundStation:
             yellow.append(self.key_error)
         if self.sdls_tc.blocked:
             yellow.append(f"TC uplink BLOCKED: {self.sdls_tc.blocked}")
+        if self.logger.paused:
+            free = self.logger.free_bytes
+            yellow.append(f"archive logging paused: free space {'?' if free is None else f'{free / 1e6:.0f}'} MB "
+                          f"< [gds] archive_min_free_mb {self.logger.min_free_bytes / 1e6:.0f} MB (raw CADU, rx_stats)")
         if self._archive_error_t is not None and now - self._archive_error_t < RECENT_WINDOW_S:
             yellow.append(f"archive write errors in the last 60 s ({self.archive.last_error})")
         if any(now - t < RECENT_WINDOW_S for t in self._stage_error_times):
@@ -1817,6 +1879,7 @@ class GroundStation:
                              "sclk_estimate_s": self.sclk_estimate_s(now)},
                 "magcal": self._magcal_snapshot(),
                 "health": self.health,
+                "logger": self.logger.health(now),
                 "linkmgr": self.link_mgr.state(),
                 "pending_confirm": [{"id": k, "text": v["text"], "kind": v["kind"], "confirmed": v["confirmed"],
                                      "authorized": v["authorized"], "t": v["t"],

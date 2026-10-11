@@ -80,6 +80,7 @@ class StubStation:
         self.cfg = {"gds": {"http_token": token}, "commanding": {"auth_token": auth}}
         self.files_dir = tmp / "files"
         self.tdm_dir = tmp / "tdm"
+        self.exports_dir = tmp / "exports"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.tdm_dir.mkdir(parents=True, exist_ok=True)
         self.calls: list[tuple] = []
@@ -127,6 +128,10 @@ class StubStation:
     def tdm_write(self, source="web"):
         self.calls.append(("tdm_write", source))
         return {"status": "OK", "path": None, "message": "written"}
+
+    def export_csv(self, t_from, t_to, what, source="web"):
+        self.calls.append(("export_csv", t_from, t_to, list(what), source))
+        return {"status": "OK", "files": []}
 
     def xtce_bytes(self):
         return b"<?xml version='1.0' encoding='UTF-8'?><SpaceSystem name='VGQ-1'/>"
@@ -202,7 +207,8 @@ def test_every_get_endpoint(make_server):
     assert h["content-disposition"] == 'attachment; filename="vgq1.xtce.xml"'
     st, h, body = request(port, "GET", "/metrics")
     assert st == 200 and h["content-type"].startswith("text/plain; version=0.0.4")
-    for path in ("/nope", "/api", "/api/statex", "/api/files/", "/api/tdm/"):
+    assert strict_json(request(port, "GET", "/api/exports")[2]) == []
+    for path in ("/nope", "/api", "/api/statex", "/api/files/", "/api/tdm/", "/api/exports/"):
         st, _, body = request(port, "GET", path)
         assert st == 404 and "error" in strict_json(body)
 
@@ -270,7 +276,9 @@ def test_every_post_endpoint_reaches_the_station(make_server):
              ("/api/seq/check", {"text": "T+00:00:10 NOOP\n", "first_slot": 2}, ("seq_check", "T+00:00:10 NOOP\n", 2)),
              ("/api/seq/uplink", {"text": "T+00:00:10 NOOP\n"}, ("seq_uplink", "T+00:00:10 NOOP\n", 0, "web")),
              ("/api/magcal", {"action": "FIT", "unit": 1}, ("magcal_action", "fit", 1, "web")),
-             ("/api/tdm/write", {}, ("tdm_write", "web"))]
+             ("/api/tdm/write", {}, ("tdm_write", "web")),
+             ("/api/export", {"from": "2027-01-15T08:00:00Z", "to": 1.8e9 + 60, "what": ["rf", "events"]},
+              ("export_csv", "2027-01-15T08:00:00Z", 1.8e9 + 60, ["rf", "events"], "web"))]
     for path, body, call in cases:
         st, _, out = request(port, "POST", path, body)
         assert st == 200, (path, out)
@@ -646,7 +654,7 @@ const html = fs.readFileSync(htmlPath, "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const fixtures = {"/api/state": statePath, "/api/science": sciPath, "/api/dictionary": dictPath};
 const lists = {"/api/files": [{name: "<img src=x onerror=alert(1)>", size: 1, mtime: 1.8e9, state: "COMPLETE"}],
-  "/api/tdm": []};
+  "/api/tdm": [], "/api/exports": [{name: "<img src=x onerror=alert(1)>", size: 2, mtime: 1.8e9}]};
 let innerHTMLUsed = 0;
 const byId = new Map();
 const ctx2d = () => new Proxy({}, {get(t, k) { if (k === "measureText") return s => ({width: String(s).length * 6});

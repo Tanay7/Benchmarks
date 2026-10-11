@@ -158,6 +158,22 @@ frontpanel = true           # VENTUNO Q MCU station I/O (CardKB, LEDs, buzzer) v
 rcu = true                  # VENTUNO Q MCU drives the ground E22 M0/M1/AUX (jumpers removed)
 router_address = ""         # host default unix:///var/run/arduino-router.sock; App: APP_SOCKET
 console_interval_s = 10.0
+# ---- Receiver data logger: retention and free-space guard (contract 39) ----------
+# The archive (archive_dir above) holds YYYYMMDD/ UTC day folders (cadu.bin, events.log),
+# gds.sqlite (frames, packets, params, events, commands and the 1 Hz rx_stats receiver
+# series) and exports/ (CSV from: python -m dssq.export, or the FILES tab).
+# VENTUNO Q (App Lab): <App>/data/archive = /home/arduino/ArduinoApps/<App>/data/archive on
+# the 64 GB eMMC. An ABSOLUTE archive_dir puts it elsewhere, e.g. an external M.2 2230 NVMe
+# or a USB 3.0 drive - only when that path is visible INSIDE the App container (VERIFY on
+# the hardware); the host CLI (python -m dssq.gds) has no such restriction.
+archive_keep_days = 180     # day folders and rx_stats / params / frames rows older than this many
+                            # days are deleted, oldest first (0 = no age limit); never the current
+                            # UTC day. exports/ files older than this go too
+archive_max_gb = 16.0       # size cap of day folders + database pages in use, GB = 1e9 octets
+                            # (0 = no cap): over it, the oldest day is pruned, one day per minute
+archive_min_free_mb = 2048.0  # free-space floor of the archive's file system, MB = 1e6 octets
+                            # (0 = guard off): below it, raw CADU and rx_stats logging pause
+                            # (WARN event, YELLOW alarm) and resume by themselves above it + 5 %
 
 [commanding]
 t1_s = 45.0                 # FOP-1 retransmission timer (minimum; >= 2 x the frame period is used)

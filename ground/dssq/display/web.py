@@ -15,6 +15,7 @@ Endpoints
   GET  /api/xtce          XTCE 1.2 mission database (attachment vgq1.xtce.xml)
   GET  /api/tdm           CCSDS TDM files [{name, size, mtime}];  GET /api/tdm/<name>
   GET  /api/files         CFDP received files [{name, size, mtime, state}];  GET /api/files/<name>
+  GET  /api/exports       CSV exports in <archive>/exports [{name, size, mtime}];  GET /api/exports/<name>
   POST /api/cmd           {"text"}                       telecommand, COP-1 directive, ground directive
   POST /api/confirm       {"id", "role": CONFIRM|AUTH}   two-step confirmation
   POST /api/cancel        {"id"}
@@ -22,6 +23,9 @@ Endpoints
   POST /api/seq/uplink    {"text", "first_slot"}         -> CONFIRM id; every SEQLOAD on confirm
   POST /api/magcal        {"action", "unit"}             MAGCAL collect / fit / uplink / clear
   POST /api/tdm/write     {}                             write the pass TDM now
+  POST /api/export        {"from", "to", "what"}         CSV export of the archive (dssq.export): times
+                                                         ISO-8601 or unix s, what = list of products;
+                                                         the SERVER names the files (no path input)
 
 Security model (PB-5.6, PB-5.7)
   * Commanding = every POST. With [gds] http_token set, a POST needs header X-DSSQ-Token equal
@@ -80,6 +84,7 @@ from urllib.parse import unquote, urlsplit
 
 from .. import dictionary as dic
 from .. import spectral
+from ..export import EXPORT_NAME_RE, PRODUCTS, ExportError, list_exports
 from ..cmdparse import SEQ_CMD_MAX, seq_forbidden_opcodes
 from ..config import is_loopback
 from ..gds import json_safe
@@ -165,6 +170,10 @@ class StationApi(Protocol):
     def magcal_action(self, action: str, unit: int, source: str = "web") -> dict[str, Any]: ...
     def tdm_write(self, source: str = "web") -> dict[str, Any]: ...
     def xtce_bytes(self) -> bytes: ...
+    @property
+    def exports_dir(self) -> Path: ...
+    def export_csv(self, t_from: str | float, t_to: str | float, what: str | list[str],
+                   source: str = "web") -> dict[str, Any]: ...
 
 
 class RequestError(Exception):
@@ -379,6 +388,7 @@ def prometheus(s: Mapping[str, Any]) -> str:
     for stage, n in (health.get("stage_errors") or {}).items():
         p.gauge("stage_errors", n, "Runner stage failures (error boundary)", {"stage": stage})
     p.gauge("tdm_rejected", health.get("tdm_rejected"), "TDM records refused (station clock)")
+    p.scalars("logger", s.get("logger"), "receiver data logger")
     apids = s.get("apids") or {}
     for key, help_ in (("count", "packets received"), ("lost", "packets lost (sequence gaps)"),
                        ("iat_s", "packet inter-arrival time EWMA"), ("age_s", "time since the last packet")):
@@ -838,6 +848,13 @@ class _Handler(BaseHTTPRequestHandler):
             if p is None:
                 raise RequestError(404, "no such file")
             self._send_file(p, "application/octet-stream")
+        elif path == "/api/exports":
+            self._json(200, list_exports(Path(gs.exports_dir), LIST_MAX))
+        elif path.startswith("/api/exports/"):
+            p = safe_file(Path(gs.exports_dir), unquote(path[len("/api/exports/"):]), EXPORT_NAME_RE)
+            if p is None:
+                raise RequestError(404, "no such export")
+            self._send_file(p, "text/csv; charset=utf-8")
         else:
             raise RequestError(404, "not found")
 
@@ -892,11 +909,31 @@ class _Handler(BaseHTTPRequestHandler):
     def _tdm_write(self, body: Mapping[str, Any]) -> dict[str, Any]:
         return self.server.app.gs.tdm_write("web")
 
+    def _export(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """CSV export: two times and a product list, validated here and again by dssq.export;
+        no file name or directory is accepted from the client."""
+        times = []
+        for key in ("from", "to"):
+            v = body.get(key)
+            if isinstance(v, bool) or not isinstance(v, (str, int, float)) or (isinstance(v, str) and len(v) > 40):
+                raise RequestError(400, f"'{key}' must be an ISO-8601 time or unix seconds")
+            times.append(v)
+        what = body.get("what", list(PRODUCTS))
+        if isinstance(what, str):
+            what = what.split(",")
+        if not isinstance(what, list) or not what or len(what) > len(PRODUCTS) or \
+                any(not isinstance(w, str) or len(w) > 16 for w in what):
+            raise RequestError(400, "'what' must be a list of: " + ", ".join(PRODUCTS))
+        try:
+            return self.server.app.gs.export_csv(times[0], times[1], what, "web")
+        except ExportError as e:
+            raise RequestError(400, str(e)[:200]) from None
+
 
 _POST_ROUTES: dict[str, Callable[[_Handler, Mapping[str, Any]], dict[str, Any]]] = {
     "/api/cmd": _Handler._cmd, "/api/confirm": _Handler._confirm, "/api/cancel": _Handler._cancel,
     "/api/seq/check": _Handler._seq_check, "/api/seq/uplink": _Handler._seq_uplink,
-    "/api/magcal": _Handler._magcal, "/api/tdm/write": _Handler._tdm_write}
+    "/api/magcal": _Handler._magcal, "/api/tdm/write": _Handler._tdm_write, "/api/export": _Handler._export}
 
 
 def start_web(gs: StationApi, host: str, port: int, token: str | None = None, *,

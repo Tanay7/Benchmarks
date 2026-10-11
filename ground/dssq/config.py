@@ -47,6 +47,9 @@ E22_UART_CODE_9600 = 3                 # REG0 UART code of 9600 bit/s; CONFIG mo
 SX126X_SYNC_WORD = 0x12                # flight kSxSyncWord: private-network LoRa sync word
 SX126X_PREAMBLE = 12                   # flight kSxPreambleSym
 TCXO_RANGE_V = (1.6, 3.3)              # SX126x DIO3 TCXO supply range (SetDIO3AsTCXOCtrl 1.6 .. 3.3 V)
+ARCHIVE_KEEP_DAYS_MAX = 36_500         # [gds] archive_keep_days upper bound (100 years; 0 = keep all)
+ARCHIVE_MAX_GB_MAX = 1_000_000.0       # [gds] archive_max_gb upper bound (GB = 1e9 octets; 0 = no cap)
+ARCHIVE_MIN_FREE_MB_MAX = 10_000_000.0  # [gds] archive_min_free_mb upper bound (MB = 1e6 octets; 0 = off)
 HTTP_TOKEN_FILE = "http_token"
 APP_KEY_FILE = "sdls_key.hex"
 
@@ -86,7 +89,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "gds": {"archive_dir": "archive", "http_host": "127.0.0.1", "http_port": 8080, "http_token": "",
             "http_allowed_hosts": [],
             "los_timeout_s": 90.0, "frontpanel": True, "rcu": True, "router_address": "",
-            "console_interval_s": 10.0},
+            "console_interval_s": 10.0, "archive_keep_days": 180, "archive_max_gb": 16.0,
+            "archive_min_free_mb": 2048.0},
     "commanding": {"t1_s": 45.0, "tx_limit": 3, "window": 5, "verify_timeout_s": 300.0,
                    "require_two_person_for_hazardous": False, "auth_token": ""},
 }
@@ -345,6 +349,10 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     _bool(cfg, "gds", "rcu")
     _str(cfg, "gds", "router_address", 4096)
     _num(cfg, "gds", "console_interval_s", 0.0, lo_open=True)
+    # data logger retention and free-space guard (contract 39; 0 = that limit is off)
+    _int(cfg, "gds", "archive_keep_days", 0, ARCHIVE_KEEP_DAYS_MAX)
+    _num(cfg, "gds", "archive_max_gb", 0.0, ARCHIVE_MAX_GB_MAX)
+    _num(cfg, "gds", "archive_min_free_mb", 0.0, ARCHIVE_MIN_FREE_MB_MAX)
     # [commanding]
     _num(cfg, "commanding", "t1_s", 0.0, lo_open=True)
     _int(cfg, "commanding", "tx_limit", 1, 255)
