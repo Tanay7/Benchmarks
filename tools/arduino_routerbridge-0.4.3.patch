@@ -1,0 +1,126 @@
+# =============================================================================
+#  VGQ patch for Arduino_RouterBridge 0.4.3 (contract v3 section 41)
+#
+#  Applies to: https://github.com/arduino-libraries/Arduino_RouterBridge.git, tag
+#              0.4.3, commit d681b87211864148367f2d77096ae84c5badcb2f - the release
+#              the arduino:zephyr platform installs (its libraryDependencies:
+#              Arduino_RouterBridge 0.4.3, Arduino_RPClite 0.3.1, MsgPack 0.4.2;
+#              byte-identical to the platform's copy).
+#  Paths are relative to the library root (git format, strip one level: -p1).
+#  Applied by tools/routerbridge.py (exact-match hunks, no fuzz, no offset), which
+#  also writes PROVENANCE.txt into the copy; `git apply` and `patch -p1` accept
+#  this file too (they skip this header). The patched copy is bundled with each
+#  App Lab sketch as sketch/libraries/Arduino_RouterBridge and referenced by its
+#  sketch.yaml ("- dir: libraries/Arduino_RouterBridge"); arduino-cli then uses it
+#  instead of the platform's copy. Arduino_RPClite 0.3.1 is NOT changed: both fixes
+#  use its public API (RpcDecoderManager::getDecoder, RPCServer::hasTag).
+#  Licence: MPL-2.0 (LICENSE, unchanged). The modified file is src/bridge.h; its
+#  complete source is the bundled copy and this patch.
+#
+#  Evidence was produced with the real arduino:zephyr toolchain (arduino-cli 1.5.2 as
+#  App Lab embeds it, Zephyr SDK 1.0.1 arm-zephyr-eabi-g++ 14.3, ArduinoCore-zephyr
+#  b08a650, -Os) for the UNO Q flight sketch and the VENTUNO Q station sketch.
+#
+#  Hunk 1  src/bridge.h - bridge thread stack 500 -> 1536 octets
+#    Defect:   Bridge.begin() starts the "bridge" thread (update() every millisecond,
+#              priority 5) with UPDATE_THREAD_STACK_SIZE = 500 octets, but its
+#              measured worst case is about twice that. Zephyr has no stack guard
+#              here (CONFIG_HW_STACK_PROTECTION, CONFIG_STACK_SENTINEL not set), so
+#              an overflow silently overwrites whatever lies below the stack.
+#    Evidence: GCC -fstack-usage -fcallgraph-info=su over every sketch, library and
+#              core TU, plus the frames of the core image's kernel / libc / UART
+#              driver functions (push / vpush / sub sp in zephyr.elf), indirect
+#              calls resolved to their targets (ITransport -> ZephyrSerial,
+#              RpcFunctionWrapper -> std::function -> the sketch's RPC shims):
+#                BridgeClass::update() alone            368 (stock 368; RPCRequest<256>)
+#                deepest chain from the thread entry    920 (stock 928):
+#                  z_thread_entry 8, updateEntryPoint 8, update 368, get_rpc 40,
+#                  decode 16, parse_packet 72, unpackObject 80, unpackExt 32,
+#                  object::ext 56, vector growth 40, malloc 16, k_mutex_lock /
+#                  z_pend_curr ... sys_clock_elapsed 184
+#                process_request -> RPC shim -> mailbox  488 (+ entry 16 + update 368 = 872)
+#                FP exception frame (CONFIG_FPU_SHARING, lazy stacking)   108
+#                TLS block carved from the stack top (__tdata 8 + __tbss 48)  56
+#                worst case                            1084 octets (stock: 1092)
+#              The stock 500-octet stack is exceeded as soon as get_rpc() parses a
+#              request (update 368 + entry 16 + TLS 56 = 440 before any callee).
+#              Heap-corruption error paths (LOG_ERR in immediate log mode, a
+#              1056-octet frame) are excluded: they follow memory corruption.
+#    Fix:      1536 octets = the 1084-octet worst case + 452 octets (42 %) margin.
+#              Pool limits: k_thread_stack_alloc() serves sizes up to
+#              CONFIG_DYNAMIC_THREAD_STACK_SIZE (1024, 2 slots) from its pool and
+#              larger ones, with CONFIG_DYNAMIC_THREAD_ALLOC=y, from the 32 KiB
+#              system heap (CONFIG_HEAP_MEM_POOL_SIZE, the main thread's resource
+#              pool). 1024 would not hold the worst case with any margin, so the
+#              stack now comes once, in begin() (setup), from that heap, which
+#              nothing else in the core or the sketches uses (the llext loader has
+#              its own heap); the pool slot it used to take stays free.
+#
+#  Hunk 2  src/bridge.h - update() never executes "__safe__" methods
+#    Defect:   README: "Thread-safe methods execution is granted in the main loop
+#              thread where update_safe is called". But update(), on the bridge
+#              thread, fetches requests with server->get_rpc(req) WITHOUT a tag, and
+#              RPClite 0.3.1 RPCServer::get_rpc() filters by tag only when one is
+#              given (server.h:60), so the bridge thread also takes the methods
+#              registered with provide_safe() and runs them, preempting loop()
+#              (main thread priority 14) anywhere. Only update_safe() (from
+#              __loopHook, between two loop() calls) filters on "__safe__".
+#    Evidence: host test compiled against the real bridge.h, Arduino_RPClite 0.3.1
+#              and MsgPack 0.4.2 (only Zephyr and the UART stubbed): with the stock
+#              header, update() runs all three provide_safe requests of the test on
+#              the bridge thread (4 of 12 checks fail); with this patch none, and
+#              each runs exactly once from the loop hook (12 of 12 pass, ASan+UBSan).
+#    Fix:      before get_rpc(), update() peeks at the method of the request at the
+#              head of the transport's decoder (the same decoder object get_rpc()
+#              reads, under the same read_mutex) and leaves it queued when it is
+#              bound with the "__safe__" tag; update_safe() then takes it on the loop
+#              thread. Untagged (provide) methods are served by update() as before;
+#              responses to Bridge.call() are unaffected (they are matched after the
+#              head). A safe request at the head holds the requests behind it until
+#              the next loop pass, as update_safe() already did for untagged heads.
+#
+#  Not changed: RPClite / MsgPack, the 256-octet request buffer, the thread priority.
+#  The sketches keep their RPC mailbox to the loop thread (defence in depth).
+# =============================================================================
+diff --git a/src/bridge.h b/src/bridge.h
+index 30687be..7c3b699 100644
+--- a/src/bridge.h
++++ b/src/bridge.h
+@@ -21,7 +21,11 @@
+ 
+ //#define BRIDGE_ERROR "$/bridgeLog"
+ 
+-#define UPDATE_THREAD_STACK_SIZE    500
++// VGQ patch: 500 -> 1536 octets. Measured worst case of the bridge thread 1084 octets
++// (GCC -fstack-usage call graph of update() + core image: 920, FP exception frame 108,
++// TLS 56), so 452 octets (42 %) of margin. Above CONFIG_DYNAMIC_THREAD_STACK_SIZE (1024)
++// k_thread_stack_alloc() takes it once, in begin(), from the 32 KiB system heap.
++#define UPDATE_THREAD_STACK_SIZE    1536
+ #define UPDATE_THREAD_PRIORITY      5
+ 
+ #define DEFAULT_SERIAL_BAUD         115200
+@@ -243,8 +247,23 @@ public:
+         // Lock read mutex
+         if (k_mutex_lock(&read_mutex, K_MSEC(10)) != 0 ) return;
+ 
++        // VGQ patch: this thread never executes a "__safe__" (provide_safe) method.
++        // Peek at the request at the head of the transport's decoder - the one
++        // get_rpc() reads; read_mutex is held, so the head cannot change in between -
++        // and leave a "__safe__" method queued for update_safe(), which __loopHook
++        // runs on the loop thread, as the README states.
++        bool leave_to_loop = true;
++        {
++            RpcDecoder<>* const head = RpcDecoderManager::getInstance().getDecoder(*transport);
++            if (head != nullptr) {
++                head->decode();
++                const MsgPack::str_t method = head->fetch_rpc_method();
++                leave_to_loop = method == "" || server->hasTag(method, "__safe__");
++            }
++        }
++
+         RPCRequest<BRIDGE_RPC_BUFFER_SIZE> req;
+-        if (!server->get_rpc(req)) {
++        if (leave_to_loop || !server->get_rpc(req)) {
+             k_mutex_unlock(&read_mutex);
+             k_msleep(1);
+             return;

@@ -2,8 +2,8 @@
 //  VGQ-1 Router Bridge RPC mailbox (PB-4.1; critical review finding C50, interface
 //  decision I4).
 //
-//  Why: Arduino_RouterBridge 0.4.3 does NOT confine provide_safe() handlers to the
-//  loop thread. BridgeClass::update() runs on the library's own "bridge" thread
+//  Why: the stock Arduino_RouterBridge 0.4.3 does NOT confine provide_safe() handlers
+//  to the loop thread. BridgeClass::update() runs on the library's own "bridge" thread
 //  (bridge.h:204-210: UPDATE_THREAD_PRIORITY 5, UPDATE_THREAD_STACK_SIZE 500 octets,
 //  polled every 1 ms) and calls server->get_rpc(req) with NO tag (bridge.h:247);
 //  Arduino_RPClite 0.3.1 RPCServer::get_rpc filters on the tag only when one is given
@@ -12,6 +12,11 @@
 //  update_safe(), called from __loopHook between loop() passes, filters on "__safe__".
 //  A handler that touched Flight directly would race the loop's VC queues, SDLS state
 //  and radio, on a 500-octet stack.
+//  The sketch now builds with the bundled patched copy (sketch/libraries/
+//  Arduino_RouterBridge, tools/arduino_routerbridge-0.4.3.patch, contract 41): update()
+//  leaves "__safe__" methods to update_safe() and the bridge thread has 1536 octets, so
+//  every handler reaches this mailbox on the loop thread and executes directly. The
+//  mailbox stays as defence in depth (a build against the stock library stays safe).
 //
 //  What: each RPC handler only posts its arguments into one static slot (a copy, no
 //  large locals), signals `req_`, and waits on `done_` with a bounded timeout; the loop
@@ -126,9 +131,10 @@ class RpcMailbox {
 #endif
   }
 
-  // Caller side (the Router Bridge thread). true: the loop executed the request and
-  // `result` holds its answer. false: not executed - text longer than kRpcTextMax,
-  // mailbox not started, or withdrawn after the wait (never executed later).
+  // Caller side (a thread other than the loop: the stock library's bridge thread).
+  // true: the loop executed the request and `result` holds its answer. false: not
+  // executed - text longer than kRpcTextMax, mailbox not started, or withdrawn after
+  // the wait (never executed later).
   bool call(uint8_t op, int32_t arg, const char* text, size_t len, int32_t& result) {
     if (!started_ || len > kRpcTextMax || (len && text == nullptr)) return false;
     if (!free_.take(wait_ms_)) return false;   // a timed-out request still runs in the loop

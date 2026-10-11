@@ -13,7 +13,8 @@
 #    arduino-build  The real Arduino build (official arduino:zephyr platform via
 #                   arduino-cli, the same compiler App Lab uses) of the
 #                   VENTUNO Q station sketch and of the UNO Q flight sketch
-#                   (default E22 radio build), each with its default profile.
+#                   (default E22 radio build), each with its default profile and
+#                   the bundled patched RadioLib and Arduino_RouterBridge.
 #
 #  Actions are pinned to full commit hashes (version in the comment).
 # =============================================================================
@@ -97,6 +98,16 @@ jobs:
             fi
           done
 
+      # Contract 41: both profiles use the patched Arduino_RouterBridge 0.4.3 in place of
+      # the platform's copy (the compile log names <sketch>/libraries/Arduino_RouterBridge).
+      - name: Bundle the patched Arduino_RouterBridge where a sketch profile references it
+        run: |
+          for sketch in ground/station_io/sketch spacecraft/vgq1_flight/sketch; do
+            if grep -q "dir: libraries/Arduino_RouterBridge" "$sketch/sketch.yaml"; then
+              python3 tools/routerbridge.py fetch "$sketch/libraries/Arduino_RouterBridge"
+            fi
+          done
+
       # "Arduino Q Boards" = arduino:zephyr (UNO Q and VENTUNO Q; ArduinoCore-zephyr
       # extra/artifacts/zephyr_unoq.json). A profile that names the platform without a
       # version uses the installed one, as App Lab does, so install it first.
@@ -114,3 +125,14 @@ jobs:
       # bundled RadioLib, which the E22 build stages but never compiles.
       - name: UNO Q flight sketch (default radio, E22-400T33D / T37S by strap)
         run: arduino-cli compile --profile default --warnings all spacecraft/vgq1_flight/sketch
+
+      # The verbose log of the (cached) rebuild names each library's folder: fail unless
+      # the bundled patched Arduino_RouterBridge, not the platform's copy, was used.
+      - name: Check that the bundled patched Arduino_RouterBridge was compiled
+        run: |
+          for sketch in ground/station_io/sketch spacecraft/vgq1_flight/sketch; do
+            log="$RUNNER_TEMP/$(basename "$(dirname "$sketch")").log"
+            arduino-cli compile --profile default -v "$sketch" > "$log" 2>&1
+            grep "Using library Arduino_RouterBridge" "$log"
+            grep -q "Using library Arduino_RouterBridge at version 0.4.3 in folder: $PWD/$sketch/libraries/Arduino_RouterBridge" "$log"
+          done

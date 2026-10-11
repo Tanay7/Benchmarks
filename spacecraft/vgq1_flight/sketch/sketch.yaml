@@ -2,15 +2,23 @@
 # arduino:zephyr:unoq. App Lab and arduino-cli always build the default profile below
 # (a profile cannot carry build flags: build switches are config.h #defines, and the
 # E22 model is a strap read at boot, contract 33).
-# Wire, SPI, Arduino_LED_Matrix and Arduino_RouterBridge ship with arduino:zephyr. The
-# one library listed is RadioLib 7.8.1 for the SX126x radio option (config.h:
-# VGQ_RADIO = VGQ_RADIO_SX126X). It is never downloaded by the board: tools/radiolib.py
-# fetches the release, verifies the tag commit, applies tools/radiolib-7.8.1.patch and
-# writes the copy to libraries/RadioLib next to this file (contract 25.2 / 30); the App
-# Lab package contains it. arduino-cli refuses a profile whose "dir:" is missing, so run
+# Wire, SPI and Arduino_LED_Matrix ship with arduino:zephyr. Two libraries are bundled
+# next to this file, never downloaded by the board (the App Lab package contains them):
+#  * RadioLib 7.8.1 for the SX126x radio option (config.h: VGQ_RADIO = VGQ_RADIO_SX126X):
+#    tools/radiolib.py fetches the release, verifies the tag commit, applies
+#    tools/radiolib-7.8.1.patch and writes libraries/RadioLib (contract 25.2 / 30). The
+#    default E22 build never includes RadioLib.h (drivers/sx126x.h is guarded by
+#    VGQ_RADIO), so none of it is compiled in.
+#  * Arduino_RouterBridge 0.4.3, the release arduino:zephyr ships, patched by
+#    tools/arduino_routerbridge-0.4.3.patch (bridge thread stack 1536 octets; provide_safe
+#    handlers only on the loop thread) and written by tools/routerbridge.py to
+#    libraries/Arduino_RouterBridge (contract 41). arduino-cli uses it instead of the
+#    platform's copy; its dependencies (Arduino_RPClite, MsgPack, ...) still come from
+#    the platform.
+# arduino-cli refuses a profile whose "dir:" is missing, so run
 #   python3 tools/radiolib.py fetch spacecraft/vgq1_flight/sketch/libraries/RadioLib
-# before building from the repository. The default E22 build never includes
-# RadioLib.h (drivers/sx126x.h is guarded by VGQ_RADIO), so none of it is compiled in.
+#   python3 tools/routerbridge.py fetch spacecraft/vgq1_flight/sketch/libraries/Arduino_RouterBridge
+# before building from the repository.
 profiles:
   default:
     fqbn: arduino:zephyr:unoq
@@ -18,4 +26,5 @@ profiles:
       - platform: arduino:zephyr
     libraries:
       - dir: libraries/RadioLib
+      - dir: libraries/Arduino_RouterBridge
 default_profile: default

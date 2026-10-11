@@ -1,6 +1,7 @@
 #pragma once
 #include "Arduino.h"
-// The real header includes these too (Arduino_RouterBridge 0.4.3 bridge.h:30-31).
+// The real header includes these too (Arduino_RouterBridge 0.4.3 bridge.h:30-31; the
+// bundled patched copy, tools/routerbridge.py, has them at bridge.h:34-35).
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 struct BridgeStub {

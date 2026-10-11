@@ -37,10 +37,12 @@
 //     (contract v3 sections 2.2, 14, 24.8 and 25; Semtech SX1261/2 datasheet rev 2.2).
 //
 //  Bridge services (Python side: ground/dssq/display/frontpanel.py, radio/sx126x.py).
-//  Every handler is executed in the loop thread through a mailbox (see "Bridge
-//  services" below: RouterBridge 0.4.3 runs provide_safe handlers on its own thread);
-//  a request the loop cannot start within the wait is not executed and answered with
-//  the "not done" value given in brackets.
+//  Every handler is executed in the loop thread: the bundled patched RouterBridge
+//  0.4.3 (libraries/Arduino_RouterBridge, contract 41) runs provide_safe handlers only
+//  there, and a mailbox keeps it so with the stock library, which also runs them on
+//  its own thread (see "Bridge services" below); a request the loop cannot start
+//  within the wait is not executed and answered with the "not done" value given in
+//  brackets.
 //   provide_safe "fp_line" (String)   S|aos|alarm|uplink|beacon   Q|<confirm id or -1>
 //                                     (beacon -1..3; a 4-field S line = beacon unknown)
 //   provide_safe "rcu_mode" (int)     set E22 mode 0..3, returns AUX (1 = ready) [0]
@@ -1297,8 +1299,8 @@ static void sx_setup() {
 // =============================================================================
 //  Bridge services: a mailbox to the loop thread
 //
-//  Arduino_RouterBridge 0.4.3 does NOT confine provide_safe handlers to the loop
-//  thread (its README says so, its code does not). Bridge.begin() starts a "bridge"
+//  The stock Arduino_RouterBridge 0.4.3 does NOT confine provide_safe handlers to the
+//  loop thread (its README says so, its code does not). Bridge.begin() starts a "bridge"
 //  thread (bridge.h: UPDATE_THREAD_PRIORITY 5 - above the main thread's 14 in both Q
 //  cores' CONFIG_MAIN_THREAD_PRIORITY - and UPDATE_THREAD_STACK_SIZE 500 octets) that
 //  calls update() every millisecond; update() fetches requests with get_rpc() WITHOUT
@@ -1308,7 +1310,11 @@ static void sx_setup() {
 //  them in the loop thread. Run directly, rf_cfg / rf_foff would interleave RadioLib
 //  SPI transactions with sx_service(), queue_tx() and sx_tx_finished() would race on
 //  tx_count, and sx_status()'s 224-octet line plus snprintf would sit on a 500-octet
-//  stack.
+//  stack. This sketch builds with the bundled patched copy (libraries/
+//  Arduino_RouterBridge, tools/arduino_routerbridge-0.4.3.patch, contract 41): update()
+//  leaves "__safe__" methods to update_safe() and the bridge thread has 1536 octets, so
+//  the shims below run on the loop thread and execute directly; the mailbox stays as
+//  defence in depth (a build against the stock library stays safe).
 //
 //  Every registered handler is therefore a shim (rpc_call) that only copies its
 //  arguments into one static slot, publishes it (atomic POSTED) and waits, bounded,
@@ -1427,7 +1433,8 @@ void setup() {
   for (int p : outs) { pinMode(p, OUTPUT); digitalWrite(p, LOW); }
 
   Bridge.begin();                                   // waits for the arduino-router service
-  // provide_safe or provide: either way the shims hand the work to the loop thread.
+  // provide_safe: run from __loopHook on the loop thread (bundled patched library);
+  // with the stock library the shims still hand the work to the loop thread.
   Bridge.provide_safe("fp_line", rpc_fp_line);
   Bridge.provide_safe("rcu_mode", rpc_rcu_mode);
   Wire.begin();                                     // header SDA/SCL (I2C4): the CardKB

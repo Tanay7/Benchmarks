@@ -35,6 +35,14 @@
 # the proof that the stub is strict enough to see what the patch fixes.
 # Without network access the RadioLib checks are reported as skipped.
 #
+# Arduino_RouterBridge (both sketches, contract 41): the sketches are type-checked
+# against the stub arduino_stub/Arduino_RouterBridge.h (its Zephyr / MsgPack
+# dependencies are not available on the host). Each bundled copy
+# <sketch>/libraries/Arduino_RouterBridge must be exactly tag 0.4.3 +
+# tools/arduino_routerbridge-0.4.3.patch (`routerbridge.py check`; a stale copy is a
+# failure); without a bundled copy, a fresh fetch into a temporary directory proves
+# that the pinned tag and the patch still apply (skipped without network access).
+#
 # Optional: export LIBS_DIR=<dir containing Arduino libraries> to also
 # type-check code paths that use other vendor libraries; their include
 # directories are passed as system headers, so only warnings in this
@@ -142,6 +150,34 @@ else
   fi
   if [[ -n "$RADIOLIB" && -z "$STOCK" ]]; then
     if fetch_copy "stock tag" "$TMP/stock/RadioLib" --unpatched; then STOCK="$TMP/stock/RadioLib/src"; fi
+  fi
+fi
+
+# ---- Arduino_RouterBridge copies (contract 41) ------------------------------------
+RB_TOOL="$ROOT/tools/routerbridge.py"
+if ! command -v "$PY" >/dev/null 2>&1; then
+  echo "skip Arduino_RouterBridge checks: $PY not found"
+else
+  rb_seen=0
+  for d in "$SK/libraries/Arduino_RouterBridge" "$(dirname "$FP")/libraries/Arduino_RouterBridge"; do
+    [[ -d "$d" ]] || continue
+    rb_seen=1
+    if "$PY" "$RB_TOOL" check "$d" >"$LOG" 2>&1; then
+      echo "ok   $(cat "$LOG")"
+    else
+      echo "FAIL $d (stale bundled copy: run python3 tools/routerbridge.py fetch $d)"; cat "$LOG"; fail=1
+    fi
+  done
+  if [[ $rb_seen -eq 0 ]]; then
+    rc=0
+    "$PY" "$RB_TOOL" fetch "$TMP/rb/Arduino_RouterBridge" >"$LOG" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]] && "$PY" "$RB_TOOL" check "$TMP/rb/Arduino_RouterBridge" >"$LOG" 2>&1; then
+      echo "ok   $(cat "$LOG") (fresh fetch; no bundled copy in the sketches)"
+    elif [[ $rc -eq 3 ]]; then
+      echo "skip Arduino_RouterBridge: upstream not reachable"; cat "$LOG"
+    else
+      echo "FAIL tools/routerbridge.py fetch / check, exit $rc"; cat "$LOG"; fail=1
+    fi
   fi
 fi
 

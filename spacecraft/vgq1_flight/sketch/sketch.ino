@@ -29,13 +29,15 @@ static void note_failure(const char* name) {
   memcpy(g_bridge_failures + used + (used ? 1u : 0u), name, strlen(name) + 1u);
 }
 
-// --- EGSE (Linux) -> MCU services (PB-4.1). Arduino_RouterBridge 0.4.3 runs a
-//     provide_safe handler on its own "bridge" thread (priority 5, 500-octet stack) as
-//     well as in __loopHook, NOT only in the loop thread (bridge.h update(): get_rpc()
-//     without the "__safe__" tag; see src/fsw/rpc_mailbox.h). Each handler therefore
-//     only hands its arguments to Flight's mailbox and waits for the loop, which runs
-//     the service on its own stack; nothing here may use a large local or block for
-//     long. Names and signatures are unchanged (the Linux side is not affected).
+// --- EGSE (Linux) -> MCU services (PB-4.1). The sketch is built with the bundled,
+//     patched Arduino_RouterBridge 0.4.3 (libraries/Arduino_RouterBridge, written by
+//     tools/routerbridge.py, contract 41): it runs provide_safe handlers only from
+//     update_safe() in __loopHook, on the loop thread, and gives its "bridge" thread a
+//     1536-octet stack. The stock 0.4.3 also ran them on that thread (priority 5,
+//     500-octet stack; see src/fsw/rpc_mailbox.h). Defence in depth, each handler
+//     still goes through Flight's mailbox, which executes at once on the loop thread
+//     and otherwise waits for the loop; nothing here may use a large local or block
+//     for long. Names and signatures are unchanged (the Linux side is not affected).
 static bool rpc_set_partition(int p) {          // SCLK partition = SDLS TM epoch
   return g_fsw.rpc_set_partition(p);
 }
