@@ -72,6 +72,7 @@ E22_T37S_POWER_DBM = {0: 37.0, 1: 37.0, 2: 37.0, 3: 37.0}   # "no power levels" 
 # EBYTE does not publish the LoRa parameters behind each air-rate code, so E22 air
 # time is an estimate: payload bits / air rate x 1.3 (the flight software's model).
 E22_AIRTIME_FACTOR = 1.3
+E22_UART_BAUD = 9600                   # the flight drives the module UART at 9600 8N1 (10 bit/octet)
 
 # -------------------------------------------------- SX126x LoRa (contract 2.2, 14)
 LORA_PREAMBLE_SYMBOLS = 12             # SX1261/2 DS 6.1.3: 12-symbol default; both ends
@@ -321,6 +322,48 @@ def airtime_s(model: str | RadioModel, code: int, payload_octets: int = CADU_OCT
     return payload_octets * 8 * E22_AIRTIME_FACTOR / rate_bps(m, code), SOURCE_ESTIMATED
 
 
+def lora_airtime_us(payload_octets: int, sf: int, bw_hz: float, cr: int = 1,
+                    preamble: int = LORA_PREAMBLE_SYMBOLS) -> int:
+    """LoRa time on air in whole microseconds, rounded UP, computed in integers exactly as
+    the flight lora_airtime_us() (radio.cpp: quarter symbols, explicit header, CRC on, LDRO
+    when Tsym >= 16.38 ms). The bandwidth must be a whole number of hertz."""
+    pl = _int_in(payload_octets, 0, 255, "payload length")
+    _int_in(sf, 7, 12, "spreading factor")
+    _int_in(cr, 1, 4, "coding rate index")
+    _int_in(preamble, 6, 65535, "preamble length")
+    bw = _float(bw_hz, "bandwidth")
+    if bw <= 0 or not bw.is_integer():
+        raise ValueError(f"bandwidth {bw_hz!r} must be a positive whole number of Hz")
+    bw_i = int(bw)
+    de = 2 if (1 << sf) / bw >= LDRO_SYMBOL_S else 0
+    num = 8 * pl - 4 * sf + 28 + 16
+    den = 4 * (sf - de)
+    blocks = -(-num // den) if num > 0 else 0
+    n_payload = 8 + blocks * (cr + 4)
+    quarter_symbols = 4 * preamble + 17 + 4 * n_payload
+    return -(-(quarter_symbols * (1_000_000 << sf)) // (4 * bw_i))
+
+
+def busy_s(model: str | RadioModel, code: int, payload_octets: int = CADU_OCTETS) -> float:
+    """Transmitter busy time of one packet as the FLIGHT computes it (radio_airtime_ms(),
+    whole milliseconds), in seconds - the time base of the flight frame period and of RF
+    last_airtime:
+      E22 models  UART transfer at 9600 8N1 + estimated air time, both in integer ms:
+                  n x 10 x 1000 // 9600 + n x 8 x 1300 // rate  (236 octets at 2.4k: 245 + 1022 = 1267 ms)
+      SX126x      LoRa time on air, microseconds rounded up, then milliseconds rounded up
+                  (profile 0: 34636 ms, profile 1: 17318 ms)."""
+    m = get_model(model)
+    _int_in(code, 0, 7, "rate code")
+    n = _int_in(payload_octets, 0, 255, "payload length")
+    if m.packet_mode:
+        p = SX126X_PROFILES[code]
+        ms = -(-lora_airtime_us(n, p.sf, p.bw_hz, p.cr) // 1000)
+    else:
+        bps = E22_AIR_RATE_BPS[code]
+        ms = n * 10 * 1000 // E22_UART_BAUD + n * 8 * round(E22_AIRTIME_FACTOR * 1000) // bps
+    return ms / 1000.0
+
+
 def parse_measured(table: Mapping[str, object] | None) -> dict[tuple[str, int], float]:
     """Validates station.toml [radio.sensitivity_measured]: "<MODEL>:<code>" = dBm.
     Raises ValueError naming the offending entry (a typo must not be silently ignored)."""
@@ -347,9 +390,11 @@ def sensitivity(model: str | RadioModel, code: int,
     m = get_model(model)
     _int_in(code, 0, 7, "rate code")
     if measured:
-        table = measured if all(isinstance(k, tuple) for k in measured) else parse_measured(measured)
+        parsed = all(isinstance(k, tuple) for k in measured)       # already parse_measured() output
+        table: Mapping[tuple[str, int], float] = (
+            measured if parsed else parse_measured(measured))      # type: ignore[assignment,arg-type]
         if (m.name, code) in table:
-            return float(table[(m.name, code)]), SOURCE_MEASURED      # type: ignore[index]
+            return float(table[(m.name, code)]), SOURCE_MEASURED
     if m.packet_mode:
         p = SX126X_PROFILES[code]
         return lora_sensitivity_dbm(p.sf, p.bw_hz, rx_boost)
@@ -500,7 +545,11 @@ AFC_CONFIRM_TIMEOUT_S = 10.0           # rf_foff result expected within this (en
 AFC_RETRY_S = 5.0                      # pause after a failed rf_foff (engineering choice)
 AFC_RPC_MAX_HZ = 50_000                # station rf_foff(int32 hz) accepts |hz| <= 50000
 AFC_EVENTS_MAX = 64
-AFC_RPC_RESULTS = {1: "applied", -1: "out of range", -2: "radio down"}
+# rf_foff results: 1 / -1 / -2 come from the station MCU (contract 24.8); -3 is the ground's
+# own code for "no answer": the Router Bridge call failed or timed out (the backend returns
+# None), so whether the station applied the offset is unknown - treated as not applied.
+AFC_RPC_NO_ANSWER = -3
+AFC_RPC_RESULTS = {1: "applied", -1: "out of range", -2: "radio down", AFC_RPC_NO_ANSWER: "no answer (bridge)"}
 
 
 class AfcLoop:
@@ -510,7 +559,8 @@ class AfcLoop:
         corr = afc.on_packet(t, freq_err_hz, snr_db, crc_ok)   # per received packet
         corr = afc.tick(t, los)                                 # periodically (>= 1 Hz)
         if corr is not None:                                    # int Hz for the station
-            afc.confirm(corr, station.rf_foff(corr), t_now)     # 1 / -1 / -2
+            r = station.rf_foff(corr)                           # 1 / -1 / -2, None = no answer
+            afc.confirm(corr, AFC_RPC_NO_ANSWER if r is None else r, t_now)
     While a command awaits confirm() no other command is issued and packets are not used
     (their local-oscillator frequency is uncertain). pop_events() returns
     (t, level, text) tuples for the GDS event log. Pure: no I/O, no threads."""
@@ -718,7 +768,8 @@ class AfcLoop:
         return None
 
     def confirm(self, hz: int, result: int, t: float) -> None:
-        """Result of the station RPC rf_foff(hz): 1 applied, -1 out of range, -2 radio down."""
+        """Result of the station RPC rf_foff(hz): 1 applied, -1 out of range, -2 radio down,
+        AFC_RPC_NO_ANSWER (-3) no answer from the bridge. Anything but 1 is a failure."""
         t = _float(t, "time")
         p = self._pending
         if p is None or p[0] != hz:
@@ -779,12 +830,3 @@ class AfcLoop:
                 "samples": len(self._hist), "limit_hz": self.limit_hz, "bound_hz": self.bound_hz,
                 "slew_hz": self.slew_hz, "deadband_hz": self.deadband_hz, "snr_min_db": self.snr_min_db,
                 **self.counters}
-
-
-# ------------------------------------------- legacy names (default model, T33D)
-# Kept for modules written before the registry; new code uses sensitivity(),
-# rate_bps(), power_dbm() with the configured model.
-AIR_RATE_BPS = dict(E22_AIR_RATE_BPS)
-SENSITIVITY_EST_DBM = {c: sensitivity(DEFAULT_MODEL, c)[0] for c in RATE_CODES}
-TX_POWER_DBM = dict(E22_T33D_POWER_DBM)
-MIN_EFFECTIVE_RATE_CODE = E22_MIN_EFFECTIVE_RATE_CODE

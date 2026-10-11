@@ -27,7 +27,10 @@ from dssq.cmdparse import (
     CommandError,
     SequenceEntry,
     SequenceError,
+    check_user_data,
     encode_dictionary,
+    help_text,
+    parse,
     pack_seqload,
     parse_sequence,
     seq_forbidden_opcodes,
@@ -303,6 +306,33 @@ def test_seqload_commands() -> None:
     assert ei.value.line_no == 2 and "mode=9 outside 1..4" in ei.value.message
 
 
+def test_seqload_is_builder_only() -> None:
+    """PB-2.4: SEQLOAD is listed (XTCE, help) but never typed: the 19-octet block comes from
+    a sequence file. The dictionary's 16 arguments describe exactly that block."""
+    with pytest.raises(CommandError, match="built from a sequence file"):
+        parse("SEQLOAD 0 1 10 1 1 0 0 0 0 0 0 0 0 0 0 0")
+    with pytest.raises(CommandError, match="built from a sequence file"):
+        parse("BD SEQLOAD 0 1 10 1 1 0 0 0 0 0 0 0 0 0 0 0")
+    assert "SEQLOAD" not in help_text()[0].split()
+    assert any("sequence file" in line for line in help_text("SEQLOAD"))
+    (cmd,) = seqload_commands(parse_sequence("T+00:00:10 PING tag=0x01020304"), first_slot=9)
+    blk = cmd.user_data[1:]
+    a = unpack_seqload(blk)
+    fields = [a.slot, int(a.relative), a.t_s, len(a.cmd), *a.cmd.ljust(SEQ_CMD_MAX, b"\x00")]
+    assert encode_dictionary("SEQLOAD", [(None, str(v)) for v in fields]) == cmd.user_data
+    assert check_user_data(cmd.user_data) == (0, "")
+
+
+def test_seqctrl_and_stored_command_rules() -> None:
+    assert parse("SEQCTRL DELETE 7").user_data.hex() == "1e0307"
+    assert parse("SEQCTRL START 0").user_data.hex() == "1e0000"
+    with pytest.raises(CommandError, match="slot must be 0"):
+        parse("SEQCTRL STOP 3")
+    # A stored command must pass the live-command rules (flight validate_stored_command).
+    with pytest.raises(SequenceError, match=r"led_cur=12 outside 0\.\.11"):
+        seqload_commands(parse_sequence("T+00:00:01 SPECCFG gain=AGC cycles=59 lamps=1 led_cur=12 ind=0"))
+
+
 # ---- flight cross-check -------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def flight_vectors(tmp_path_factory: pytest.TempPathFactory) -> Path:
@@ -362,3 +392,4 @@ def test_flight_magcal_matches_python(flight_vectors: Path) -> None:
         want = [sum(m[i][j] * d[j] for j in range(3)) for i in range(3)]
         got = [float(x) for x in r[6:9]]
         assert got == pytest.approx(want, abs=1e-5)
+        assert check_user_data(bytes([0x20]) + blk) == (0, ""), r       # the ground accepts it too

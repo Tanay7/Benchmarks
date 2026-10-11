@@ -15,8 +15,10 @@
 //  Decryption verifies the tag (constant-time compare) BEFORE touching the
 //  buffer: a frame that fails authentication is left exactly as received.
 //  Verified against the McGrew-Viega GCM test cases 13-16 in
-//  tools/host_test/test_crypto.cpp and cross-checked with an independent
-//  implementation (Python `cryptography`) in ground/tests/test_sdls.py.
+//  tools/host_test/test_crypto.cpp and cross-checked in ground/tests/test_sdls.py
+//  with the independent ground implementation ground/dssq/ccsds/aes_gcm.py
+//  (Python standard library only; plus the `cryptography` package when it is
+//  installed on a development PC).
 // =============================================================================
 #pragma once
 #include "aes.h"

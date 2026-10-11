@@ -377,8 +377,16 @@ static const size_t kSpecV31Len = 129;
 // if out is null or cap < kSpecV31Len.
 size_t pack_spec_v31(const SpecV31& p, uint8_t* out, size_t cap);
 
-// SPECBURST (APID 0x024, VC1), docs/05: t0_ms u32 | rate_dhz u16 | gain_code u8 |
-// int_cycles u8 | n u8 | n x {dt_ms u16, raw u16[18]}, n = 1..3 (9 + 38 n <= 123 octets).
+// SPECBURST (APID 0x024, VC1), contract 28 (supersedes 13.5; Phase B spec PB-1.12, C-03):
+//   t0_ms u32 | rate_dhz u16 | gain_code u8 | int_cycles u8 | n u8 (1..3) |
+//   encoding u8 (0 raw, 1 CCSDS 121.0-B-3) | dt_ms u16[n] | payload
+//   encoding 0: n x 18 raw u16, TIME-MAJOR (sample 0 channels 0..17, then sample 1 ...),
+//               10 + 38 n octets (<= 124);
+//   encoding 1: rice_encode(kRiceMission, cm, 18 n) of the CHANNEL-MAJOR samples
+//               cm[ch * n + t] = s[t].raw[ch] (each channel's time series contiguous, so
+//               the unit-delay predictor sees temporal correlation), 1 .. 36 n - 1 octets
+//               (zero fill to an octet): strictly shorter than raw by construction.
+// The ground decodes encoding 1 as time_major(rice.decode(payload, 18 n), 18).
 // The channels of one sample are NOT simultaneous: dt_ms stamps the DATA_RDY detection and
 // the values are then read one virtual register at a time (BANK 2: 3 DEV_SEL writes and 36
 // single-octet reads, each a four-step handshake of several I2C transactions), so at the
@@ -395,10 +403,18 @@ struct SpecBurstSample {
 // as 0xFFFE - at or above full scale - 1, i.e. saturated by spec_saturation_mask's rule.
 uint16_t spec_burst_raw(uint16_t counts);
 static const uint8_t kSpecBurstPerPacket = 3;
-static const size_t kSpecBurstMaxLen = 9 + 38 * kSpecBurstPerPacket;
-// Returns the length, or 0 if n is outside 1..3 or cap is too small.
+static const size_t kSpecBurstHdrLen = 10;                       // incl. the encoding octet
+static const size_t kSpecBurstMaxLen = kSpecBurstHdrLen + 38 * kSpecBurstPerPacket;   // 124
+enum SpecBurstEncoding : uint8_t { SPEC_BURST_RAW = 0, SPEC_BURST_RICE = 1 };
+// Contract 28 layout (PB-1.12). Tries CCSDS 121.0 (kRiceMission) on the channel-major
+// samples into cap 36 n - 1; RICE_OK -> encoding 1, else raw. rice_status = the attempt's
+// ccsds::RiceStatus (RICE_OK or RICE_ERR_OVERFLOW are normal; anything else: the
+// integrator raises EVR 0x0704 "BURST rice status %u"). Returns the length, or 0
+// (nothing valid written, rice_status = RICE_ERR_ARG: no attempt) for n outside 1..3 /
+// s or out null / cap < 10 + 38 n.
 size_t pack_specburst(uint32_t t0_ms, uint16_t rate_dhz, uint8_t gain_code, uint8_t int_cycles,
-                      const SpecBurstSample* s, uint8_t n, uint8_t* out, size_t cap);
+                      const SpecBurstSample* s, uint8_t n, uint8_t* out, size_t cap,
+                      uint8_t& rice_status);
 
 // ---- Onboard processing pipeline ----------------------------------------------------------
 struct SpecAttitude {

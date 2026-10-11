@@ -443,3 +443,198 @@ def test_tm_parser_seam_opens_flight_frames(vectors):
     tf = TransferFrame.parse(vectors["tm_null"]["frame"], 14, 16)
     opened, r = rx.open_frame(tf)
     assert r.verdict == "UNPROTECTED" and opened.data == vectors["tm_null"]["plain"]
+
+
+# --- Phase B: crash-safe SDLS state (F-64), hardline CLTU (F-63), key tool ----------
+import importlib.util  # noqa: E402
+import os  # noqa: E402
+import stat  # noqa: E402
+
+from dssq import cltu as hardline  # noqa: E402
+from dssq.ccsds import sdls as sdls_mod  # noqa: E402
+from dssq.ccsds.tc import cltu_decode, parse_tc_frame, tc_open_tfdf  # noqa: E402
+from dssq.cmdparse import parse, tc_packet  # noqa: E402
+from dssq.config import load_config  # noqa: E402
+
+
+def test_sn_file_is_written_atomically_before_use(tmp_path, monkeypatch):
+    sn_file = tmp_path / "sdls_sn.txt"
+    tx = SdlsSender(MASTER, 1, sn_file, service="AE")
+    assert tx.sn_state == "OK" and not tx.uplink_blocked and not sn_file.exists()   # missing file: first use
+    assert tx.next_sn() == 1 and sn_file.read_text() == "1"
+    assert stat.S_IMODE(sn_file.stat().st_mode) == 0o600
+    real_replace = os.replace
+
+    def power_cut(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sdls_mod.os, "replace", power_cut)
+    with pytest.raises(OSError):
+        tx.next_sn()                                       # the frame must not be sent
+    assert tx.sn == 1 and sn_file.read_text() == "1" and list(tmp_path.iterdir()) == [sn_file]
+    monkeypatch.setattr(sdls_mod.os, "replace", real_replace)
+    assert tx.next_sn() == 2 and sn_file.read_text() == "2"
+    assert SdlsSender(MASTER, 1, sn_file).sn == 2         # restart continues
+
+
+@pytest.mark.parametrize("content", ["", "  \n", "12x", "-4", "99999999999", "\xff\xfe"])
+def test_corrupt_sn_file_blocks_until_a_protected_hk(tmp_path, content):
+    sn_file = tmp_path / "sdls_sn.txt"
+    sn_file.write_bytes(content.encode("latin-1"))
+    tx = SdlsSender(MASTER, 1, sn_file, service="AE")
+    assert tx.uplink_blocked and tx.sn_state.startswith("BLOCKED: SDLS SN file corrupt")
+    with pytest.raises(RuntimeError):
+        tx.protect(tc_v1_header(44), NOOP)
+    assert tx.observe_spacecraft_sn(500, protected=False) is None and tx.uplink_blocked   # unprotected HK: ignored
+    msg = tx.observe_spacecraft_sn(41, protected=True)
+    assert "restored to 41" in msg and not tx.uplink_blocked and sn_file.read_text() == "41"
+    assert tx.next_sn() == 42
+
+
+def test_unprotected_hk_never_moves_the_sn(tmp_path):
+    tx = SdlsSender(MASTER, 1, tmp_path / "sn.txt", service="AE")
+    tx.next_sn()
+    for bad in (0xFFFFFFFF, 10**6):
+        assert tx.observe_spacecraft_sn(bad, protected=False) is None and tx.sn == 1
+    for junk in (-1, 2**32, True, "7"):
+        assert tx.observe_spacecraft_sn(junk, protected=True) is None and tx.sn == 1
+    assert tx.observe_spacecraft_sn(1, protected=True) is None              # not ahead: nothing to do
+    assert "raised 1 -> 9" in tx.observe_spacecraft_sn(9, protected=True) and tx.next_sn() == 10
+    off = SdlsSender(None, 1, tmp_path / "x.txt", service="AE")             # no key: never blocked
+    (tmp_path / "y.txt").write_text("garbage")
+    assert not off.uplink_blocked and not SdlsSender(None, 1, tmp_path / "y.txt").uplink_blocked
+
+
+def test_sn_shared_with_another_writer_is_never_reused(tmp_path):
+    sn_file = tmp_path / "sdls_sn.txt"
+    gds = SdlsSender(MASTER, 1, sn_file, service="AE")
+    assert gds.next_sn() == 1
+    tool = SdlsSender(MASTER, 1, sn_file, service="AE")                    # e.g. dssq.cltu, same file
+    assert tool.next_sn() == 2 and tool.next_sn() == 3
+    assert gds.next_sn() == 4                                              # re-read before use
+    sn_file.write_text("oops")
+    with pytest.raises(RuntimeError):
+        gds.next_sn()                                                      # became corrupt: blocked
+    assert gds.uplink_blocked
+
+
+def _tm_frames(epoch, n, hdr=bytes(6), data=bytes(range(158))):
+    tx = SdlsTmSender(MASTER)
+    tx.set_epoch(epoch)
+    return [hdr + tx.protect(hdr, data) + bytes(6) for _ in range(n)]
+
+
+def test_tm_replay_state_persisted_and_restored(tmp_path):
+    state = tmp_path / "sdls_tm_replay.txt"
+    frames = _tm_frames(5, 3)
+    rx = SdlsTmReceiver(MASTER, state_file=state)
+    assert [rx.process(f, 6, 194).verdict for f in frames[:2]] == ["OK", "OK"]
+    assert state.read_text() == "5 2" and stat.S_IMODE(state.stat().st_mode) == 0o600
+    again = SdlsTmReceiver(MASTER, state_file=state)                       # GDS restart
+    assert again.last == (5, 2) and again.load_warning is None
+    assert again.process(frames[0], 6, 194).verdict == "REPLAY"             # old genuine frame refused
+    assert again.process(frames[2], 6, 194).verdict == "OK" and state.read_text() == "5 3"
+    again.reset_replay()
+    assert state.read_text() == "0 0"
+    state.write_text("5 x")
+    bad = SdlsTmReceiver(MASTER, state_file=state)
+    assert bad.last == (0, 0) and "corrupt" in bad.load_warning
+    blocked = tmp_path / "dir"
+    blocked.mkdir()
+    rx2 = SdlsTmReceiver(MASTER, state_file=blocked)                       # cannot be written
+    assert rx2.process(frames[0], 6, 194).verdict == "OK" and "not saved" in rx2.persist_error
+
+
+def test_tm_epoch_regression_is_counted(tmp_path):
+    old, new = _tm_frames(5, 2), _tm_frames(6, 1)
+    rx = SdlsTmReceiver(MASTER, state_file=tmp_path / "s.txt")
+    assert rx.process(new[0], 6, 194).verdict == "OK"
+    assert rx.process(old[1], 6, 194).verdict == "REPLAY" and rx.epoch_regressed == 1   # valid MAC, lower epoch
+    assert rx.process(new[0], 6, 194).verdict == "REPLAY" and rx.epoch_regressed == 1   # same epoch: replay only
+    forged = bytearray(old[0])
+    forged[30] ^= 1
+    assert rx.process(bytes(forged), 6, 194).verdict == "BAD_MAC" and rx.epoch_regressed == 1
+
+
+def _cltu_cfg(tmp_path, framing, service):
+    cfg = load_config()
+    key_file = tmp_path / "sdls_key.hex"
+    key_file.write_text(MASTER.hex() + "\n")
+    cfg["sdls"].update(tc_service=service, key_file=str(key_file))
+    cfg["link"]["tc_framing"] = framing
+    cfg["gds"]["archive_dir"] = str(tmp_path / "archive")
+    return cfg
+
+
+@pytest.mark.parametrize("framing", ["TC", "USLP"])
+@pytest.mark.parametrize("service", ["AUTH", "AE"])
+def test_hardline_cltu_is_accepted_by_the_reference_receiver(tmp_path, framing, service):
+    cfg = _cltu_cfg(tmp_path, framing, service)
+    rx = SdlsReceiver(MASTER, service=service)
+    for want_sn, text in ((1, "NOOP"), (2, "MODE CRUISE"), (3, "PING 4242")):
+        cltu, info = hardline.build_hardline_cltu(cfg, text)
+        assert len(cltu) <= hardline.MAX_HARDLINE_OCTETS == 110
+        assert f"SDLS {service} SN {want_sn}" in info and framing in info
+        frame, _ = cltu_decode(cltu)
+        f = parse_tc_frame(frame, open_tfdf=False)
+        assert f is not None and f.bypass and f.vcid == 0
+        body, verdict = rx.process(frame[:f.length], f.data, hdr_len=f.hdr_len)
+        assert verdict == "OK", (framing, service, text)
+        f.data = body
+        f = tc_open_tfdf(f)
+        assert f is not None and f.data == tc_packet(parse(text), 0)
+    assert (tmp_path / "archive" / "sdls_sn.txt").read_text() == "3"     # shared with the GDS
+
+
+def test_hardline_cltu_rules(tmp_path, monkeypatch, capsys):
+    cfg = _cltu_cfg(tmp_path, "USLP", "AE")
+    with pytest.raises(hardline.HardlineError, match=r"frame \d+ > 64 octets with USLP/AE"):
+        hardline.build_hardline_cltu(cfg, "MAGCAL 0 1200 -750 400 16384 16384 16384 0 0 0")      # C-08
+    assert hardline.build_hardline_cltu(_cltu_cfg(tmp_path, "TC", "AE"), "MAGCAL 0 1200 -750 400 16384 16384 "
+                                        "16384 0 0 0")[0]
+    with pytest.raises(hardline.HardlineError, match="RF-only"):
+        hardline.build_hardline_cltu(cfg, "UNLOCK")
+    with pytest.raises(hardline.HardlineError, match="rejected"):
+        hardline.build_hardline_cltu(cfg, "MODE WARP")
+    (tmp_path / "archive" / "sdls_sn.txt").write_text("")
+    with pytest.raises(hardline.HardlineError, match="BLOCKED"):
+        hardline.build_hardline_cltu(cfg, "NOOP")
+    nokey = _cltu_cfg(tmp_path, "TC", "AE")
+    nokey["sdls"]["key_file"] = str(tmp_path / "missing.hex")
+    cltu, info = hardline.build_hardline_cltu(nokey, "NOOP")
+    assert "unprotected (no key file)" in info and len(cltu) == 26
+    app = tmp_path / "app_data"
+    cfg2 = load_config()
+    hardline.apply_app_data(cfg2, app)
+    assert cfg2["sdls"]["key_file"] == str(app / "sdls_key.hex") and cfg2["gds"]["archive_dir"].startswith(str(app))
+    monkeypatch.chdir(tmp_path)
+    assert hardline.main(["NOOP", "--app-data", str(app)]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip().startswith("EB90") and "# BD NOOP TC" in out.err
+    assert hardline.main(["MODE WARP"]) == 1
+
+
+def test_gen_sdls_key_writes_both_files(tmp_path, monkeypatch, capsys):
+    spec = importlib.util.spec_from_file_location("gen_sdls_key", ROOT / "tools" / "gen_sdls_key.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    monkeypatch.setattr(tool, "GROUND", tmp_path / "sdls_key.hex")
+    monkeypatch.setattr(tool, "FLIGHT", tmp_path / "sdls_key.h")
+    assert tool.main(["--spi", "7"]) == 0
+    msg = capsys.readouterr().out
+    key = bytes.fromhex((tmp_path / "sdls_key.hex").read_text().strip())
+    assert len(key) == 32 and stat.S_IMODE((tmp_path / "sdls_key.hex").stat().st_mode) == 0o600
+    header = (tmp_path / "sdls_key.h").read_text()
+    assert "#pragma once" in header and "#include <stdint.h>" in header and "#define VGQ_SDLS_SPI 7" in header
+    assert "static const uint8_t kVgqSdlsKey[32] = {" + ", ".join(f"0x{b:02X}" for b in key) + "};" in header
+    assert "tc_service / tm_service" in msg and "enabled" not in msg
+    assert "copy this file to <App>/data/sdls_key.hex (the App ignores a relative key_file)" in msg
+    assert "A new key allows the EGSE boot counter to restart; with an old key it must never go back" in msg
+    assert load_key_roundtrip(tmp_path / "sdls_key.hex") == key
+    assert tool.main([]) == 1                                              # never overwritten silently
+    assert tool.main(["--force"]) == 0 and bytes.fromhex((tmp_path / "sdls_key.hex").read_text()) != key
+    assert tool.main(["--spi", "0", "--force"]) == 2
+
+
+def load_key_roundtrip(path):
+    return sdls_mod.load_key(path)

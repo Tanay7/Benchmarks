@@ -19,13 +19,16 @@ namespace vgq {
 
 struct AruReading {
   uint8_t seq = 0;
-  uint8_t motion_flags = 0;     // b0 quaternion, b1 accel, b2 gyro, b3 magnetometer
+  uint8_t motion_flags = 0;     // b0 quaternion, b1 accel, b2 gyro, b3 magnetometer,
+                                // b4 BMM150 scale read from the BHI260 (else 1/16 uT/LSB fallback)
   float qw = 1, qx = 0, qy = 0, qz = 0;      // BHI260 rotation vector (x 16384 on the wire)
   uint16_t quat_acc_mrad = 0xFFFF;           // BHI260 rotation-vector accuracy estimate
   int16_t acc_mg[3] = {0, 0, 0};
   int16_t gyro_ddps[3] = {0, 0, 0};          // 0.1 deg/s
   int16_t mag_raw[3] = {0, 0, 0};            // BMM150 via BHI260, 0.1 uT (kAruMagUtPerLsb)
   uint8_t env_flags = 0;        // b0 pressure, b1 BSEC, b2 temperature, b3 humidity, b4 gas
+  uint32_t p_pa = 0xFFFFFFFFUL; // BMP390 pressure as sent (octets 3..6), Pa: the ENV packet
+                                // carries it unchanged (no float round trip, PB-1.11)
   float p_hpa = NAN, t_c = NAN, rh = NAN, bvoc_ppm = NAN;
   uint16_t iaq = 0, iaq_s = 0;
   uint32_t co2eq = 0, gas_ohm = 0;

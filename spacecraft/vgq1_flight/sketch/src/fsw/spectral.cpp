@@ -1,6 +1,7 @@
 #include "spectral.h"
 #include <math.h>
 #include <string.h>
+#include "../ccsds/rice.h"
 
 namespace vgq {
 
@@ -650,15 +651,39 @@ size_t pack_spec_v31(const SpecV31& p, uint8_t* out, size_t cap) {
 }
 
 size_t pack_specburst(uint32_t t0_ms, uint16_t rate_dhz, uint8_t gain_code, uint8_t int_cycles,
-                      const SpecBurstSample* s, uint8_t n, uint8_t* out, size_t cap) {
-  if (!s || !out || n == 0 || n > kSpecBurstPerPacket || cap < 9u + 38u * n) return 0;
+                      const SpecBurstSample* s, uint8_t n, uint8_t* out, size_t cap,
+                      uint8_t& rice_status) {
+  rice_status = ccsds::RICE_ERR_ARG;                 // no attempt (argument refusal)
+  if (!s || !out || n == 0 || n > kSpecBurstPerPacket || cap < kSpecBurstHdrLen + 38u * n) return 0;
   W w(out);
   w.u32(t0_ms); w.u16(rate_dhz); w.u8(gain_code); w.u8(int_cycles); w.u8(n);
-  for (uint8_t k = 0; k < n; ++k) {
-    w.u16(s[k].dt_ms);
-    for (uint8_t i = 0; i < kSpecChannels; ++i) w.u16(s[k].raw[i]);
+  const size_t enc_at = w.n;                         // offset 9: the encoding octet
+  w.u8(SPEC_BURST_RAW);
+  for (uint8_t k = 0; k < n; ++k) w.u16(s[k].dt_ms);
+
+  // CCSDS 121.0-B-3 attempt on the CHANNEL-MAJOR samples (each channel's time series
+  // contiguous: the unit-delay predictor then sees temporal correlation). The output
+  // capacity is one octet less than the raw payload, so a RICE_OK result is strictly
+  // shorter by construction; it never reaches beyond out[cap - 1] (header 10 + 2n, at
+  // most 36 n - 1 octets, cap >= 10 + 38 n).
+  const size_t count = (size_t)kSpecChannels * n;    // 18 n <= 54 samples
+  uint16_t cm[(size_t)kSpecChannels * kSpecBurstPerPacket];
+  for (uint8_t ch = 0; ch < kSpecChannels; ++ch)
+    for (uint8_t t = 0; t < n; ++t) cm[(size_t)ch * n + t] = s[t].raw[ch];
+  const size_t raw_len = 2u * count;                 // 36 n
+  size_t zl = 0;
+  const ccsds::RiceStatus st =
+      ccsds::rice_encode(ccsds::kRiceMission, cm, count, out + w.n, raw_len - 1u, &zl);
+  rice_status = (uint8_t)st;
+  if (st == ccsds::RICE_OK && zl >= 1u && zl < raw_len) {
+    out[enc_at] = SPEC_BURST_RICE;
+    return w.n + zl;
   }
-  return w.n;
+  // Raw, TIME-MAJOR: sample 0 channels 0..17, then sample 1 ... (overwrites any partial
+  // Rice output, which rice_encode leaves unspecified on failure).
+  for (uint8_t t = 0; t < n; ++t)
+    for (uint8_t ch = 0; ch < kSpecChannels; ++ch) w.u16(s[t].raw[ch]);
+  return w.n;                                        // 10 + 38 n
 }
 
 // =============================================================================

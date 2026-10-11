@@ -298,9 +298,8 @@ def test_strict_time_span_rule_and_non_ascii():
 
 # Orekit's KVN transcriptions of the Annex E examples (and its malformed-file test cases);
 # dev-bench reference copy, the test skips when it is absent.
-OREKIT = Path(os.environ.get("DSSQ_OREKIT_TDM_DIR", "/tmp/claude-0/-home-user-Benchmarks/"
-                             "5ee836b4-fd12-52ad-8530-d6659d1475b9/scratchpad/refs3/orekit/"
-                             "src/test/resources/ccsds/tdm/kvn"))
+# Set DSSQ_OREKIT_TDM_DIR to Orekit's src/test/resources/ccsds/tdm/kvn to run it.
+OREKIT = Path(os.environ.get("DSSQ_OREKIT_TDM_DIR") or "/nonexistent/orekit-tdm-kvn")
 
 
 @pytest.mark.skipif(not OREKIT.is_dir(), reason="Orekit TDM example files not on this bench")
@@ -512,7 +511,7 @@ def test_xtce_document_is_well_formed_and_deterministic(xtce_root):
     assert pr.XTCE_NS == "http://www.omg.org/spec/XTCE/20180204"                  # CCSDS 660.0-B-2 / XTCE 1.2
     assert xtce_root.find(f"{X}Header").get("validationStatus") == "Working"
     names = [ss.get("name") for ss in xtce_root.findall(f"{X}SpaceSystem")]
-    assert names == [dd.PACKETS[a]["name"] for a in sorted(dd.PACKETS)] + ["EVR", "RFSCAN"]
+    assert names == [dd.PACKETS[a]["name"] for a in sorted(dd.PACKETS)] + ["EVR", "RFSCAN", "SPECBURST", "CFDP"]
 
 
 def test_xtce_references_resolve_and_containers_match_the_dictionary(xtce_root):
@@ -523,8 +522,17 @@ def test_xtce_references_resolve_and_containers_match_the_dictionary(xtce_root):
         if kind == "param":
             xt.get(path, "ptype", e.get("parameterTypeRef"))
         if kind == "cont" and e.get("abstract") != "true":
-            crit = e.find(f"{X}BaseContainer/{X}RestrictionCriteria/{X}Comparison")
-            assert crit.get("parameterRef") == f"{root}/ccsds_apid"
+            # Every concrete container restricts on the APID, directly or through its abstract
+            # parent (SPECBURST_N1..N3 restrict on the sample count n of SPECBURST).
+            base = e.find(f"{X}BaseContainer")
+            crit = base.find(f"{X}RestrictionCriteria/{X}Comparison")
+            if crit.get("parameterRef") != f"{root}/ccsds_apid":
+                assert crit.get("parameterRef") == "n" and path == f"{root}/SPECBURST"
+                _, parent = xt.get(path, "cont", base.get("containerRef"))
+                assert parent.get("abstract") == "true"
+                pcrit = parent.find(f"{X}BaseContainer/{X}RestrictionCriteria/{X}Comparison")
+                assert pcrit.get("parameterRef") == f"{root}/ccsds_apid"
+                assert int(pcrit.get("value")) == dd.APID_SPECBURST
     by_name = {s["name"]: a for a, s in dd.PACKETS.items()}
     for apid, spec in dd.PACKETS.items():
         _, cont = xt.get(f"{root}/{spec['name']}", "cont", spec["name"])
@@ -553,7 +561,7 @@ def test_xtce_references_resolve_and_containers_match_the_dictionary(xtce_root):
 
 def _random_raw(code, rng, na_rate=0.15):
     if code in dd.NA and rng.random() < na_rate:
-        return dd.NA[code]
+        return dd.NA[code]                     # a sentinel, or a saturated reading (dd.NO_NA)
     if code == "f":
         return struct.unpack(">f", struct.pack(">f", rng.uniform(-1e4, 1e4)))[0]
     bits, signed = {"B": (8, 0), "b": (8, 1), "H": (16, 0), "h": (16, 1), "I": (32, 0), "i": (32, 1)}[code]
@@ -585,8 +593,11 @@ def test_xtce_decodes_every_packet_exactly_like_the_decommutator(xtce_root):
             for f, raw in zip(spec["fields"], raws, strict=True):
                 raw_x, val_x = vals[(sys_path, f[0])]
                 assert raw_x == raw or (f[1] == "f" and math.isnan(raw) and math.isnan(raw_x))
+                decoder = f[6] if len(f) > 6 else None
                 if ref[f[0]] is None:
-                    assert raw == dd.NA[f[1]]                              # documented sentinel
+                    assert raw == dd.field_na(apid, f)                     # documented sentinel
+                elif decoder is not None:                                  # raw code + named decoder
+                    assert ref[f[0]] == decoder(raw_x)
                 elif val_x is None or isinstance(val_x, str):
                     assert raw == ref[f[0]]                                # enumerated: raw code
                 else:
@@ -610,8 +621,8 @@ def test_xtce_variable_length_evr_and_rfscan(xtce_root):
         assert vals[(f"{root}/EVR", "severity")][1] == ref["severity"] == "WARN"
         assert vals[(f"{root}/EVR", "event_id")][0] == ref["event_id"] == 0x0601
         assert vals[(f"{root}/EVR", "text")][1] == ref["text"] == text.decode()
-    for noise in ([], [-100, -128, 5], [-90] * pr.RFSCAN_MAX_CHANNELS):
-        body = bytes([20, len(noise)]) + (1234).to_bytes(2, "big") + bytes(n & 0xFF for n in noise)
+    for noise in ([-100], [-100, -128, 5], [-90] * pr.RFSCAN_MAX_CHANNELS):
+        body = bytes([0, len(noise)]) + (1234).to_bytes(2, "big") + bytes(n & 0xFF for n in noise)
         pkt = build_packet(dd.APID_RFSCAN, 2, body, CucTime(9, 1))
         vals = {}
         _, cont = xt.get(f"{root}/RFSCAN", "cont", "RFSCAN")
@@ -622,22 +633,114 @@ def test_xtce_variable_length_evr_and_rfscan(xtce_root):
         assert vals[(f"{root}/RFSCAN", "duration_ms")][0] == ref["duration_ms"] == 1234
 
 
+def _valid_args(c, rng):
+    """Random argument values that pass the dictionary ranges and the command's check (the
+    cross-argument rules are prose in XTCE, so only valid commands are compared)."""
+    for _ in range(500):
+        values = {aname: rng.choice([lo, hi, rng.randint(lo, hi)]) for (aname, _c, lo, hi, _e) in c.args}
+        if c.check is None or c.check(values) is None:
+            return values
+    raise AssertionError(f"{c.mnemonic}: no valid argument set found")
+
+
 def test_xtce_encodes_every_command_exactly_like_cmdparse(xtce_root):
     xt = Xtce(xtce_root)
     rng = random.Random(7)
     for mn, c in dd.COMMANDS.items():
         for _ in range(10):
-            values, words = {}, [mn]
-            for (aname, _code, lo, hi, _enum) in c.args:
-                v = rng.choice([lo, hi, rng.randint(lo, hi)])
-                values[aname] = v
-                words.append(str(v))
+            values = _valid_args(c, rng)
             seq = rng.randrange(1 << 14)
-            ref = cmdparse.tc_packet(cmdparse.parse(" ".join(words)), seq)
+            if c.builder_only:                    # SEQLOAD: built from a sequence file
+                ud = cmdparse.encode_dictionary(mn, [(None, str(v)) for v in values.values()])
+                ref = build_packet(dd.APID_TC, seq, ud, None, tc=True)
+            else:
+                ref = cmdparse.tc_packet(cmdparse.parse(" ".join([mn, *map(str, values.values())])), seq)
             assert xt.encode(mn, values, seq) == ref, (mn, values)
     with pytest.raises(AssertionError):                                   # ranges are enforced
         c = next(c for c in dd.COMMANDS.values() if c.args and c.args[0][2] > 0)
         xt.encode(c.mnemonic, {c.args[0][0]: c.args[0][2] - 1, **{a[0]: a[2] for a in c.args[1:]}}, 0)
+
+
+def _blob(xt, path, ptype, data, pos, vals):
+    """BinaryParameterType with a DynamicValue size (the generator's only binary form)."""
+    dv = ptype.find(f"{X}BinaryDataEncoding/{X}SizeInBits/{X}DynamicValue")
+    bits = xt._dynamic(path, dv, vals)
+    assert bits % 8 == 0 and pos % 8 == 0 and bits >= 0
+    return data[pos // 8:(pos + bits) // 8], pos + bits
+
+
+def _decode_variable(xt, sys_path, cont_name, pkt):
+    """Decodes a packet against a container, handing BinaryParameterType entries to _blob."""
+    vals = {}
+    _, cont = xt.get(sys_path, "cont", cont_name)
+    orig = xt._value
+
+    def value(path, ptype, data, pos, v):
+        if ptype.tag == f"{X}BinaryParameterType":
+            raw, end = _blob(xt, path, ptype, data, pos, v)
+            return raw, raw, end
+        return orig(path, ptype, data, pos, v)
+    xt._value = value
+    try:
+        end = xt.decode(sys_path, cont, pkt, 0, vals)
+    finally:
+        xt._value = orig
+    return end, vals
+
+
+def test_xtce_specburst_and_cfdp_containers(xtce_root):
+    from dssq import spectral
+    xt = Xtce(xtce_root)
+    root = f"/{pr.SPACE_SYSTEM}"
+    ss = f"{root}/SPECBURST"
+    decom = Decommutator()
+    _, abstract = xt.get(ss, "cont", "SPECBURST")
+    assert abstract.get("abstract") == "true"
+    rng = random.Random(28)
+    for n in (1, 2, 3):
+        for enc in (0, 1):
+            if enc == 0:                                   # anything, incl. not converted / saturated
+                samples = [(30 * k, [rng.choice([None, 0xFFFF, rng.randint(0, 900)]) for _ in range(18)])
+                           for k in range(n)]
+            else:                                          # a steady light: compresses
+                samples = [(30 * k, [400 + rng.randint(0, 3) for _ in range(18)]) for k in range(n)]
+            user = spectral.pack_specburst(123456, 401, 2, 1, samples, encoding=enc)
+            pkt = build_packet(dd.APID_SPECBURST, n, user, CucTime(9, 9))
+            end, vals = _decode_variable(xt, ss, f"SPECBURST_N{n}", pkt)
+            assert end == 8 * len(pkt)
+            ref = decom.decode(SpacePacket.parse(pkt))
+            assert vals[(ss, "n")][0] == ref["n"] == n and vals[(ss, "encoding")][0] == ref["encoding"] == enc
+            assert vals[(ss, "t0_ms")][0] == ref["t0_ms"] and vals[(ss, "rate_hz")][1] == pytest.approx(40.1)
+            assert vals[(ss, "dt_ms")][0] == [s["dt_ms"] for s in ref["samples"]]
+            assert vals[(ss, f"payload_n{n}")][0] == user[10 + 2 * n:]
+            assert len(user[10 + 2 * n:]) == ref["payload_len"]
+            for other in {1, 2, 3} - {n}:                      # the restriction on n selects one
+                with pytest.raises(LookupError):
+                    _decode_variable(xt, ss, f"SPECBURST_N{other}", pkt)
+    from dssq.ccsds import cfdp
+    for pdu in cfdp.Sender(0x00070001, "ssr_p7_1.bin", bytes(range(200))):
+        pkt = build_packet(dd.APID_CFDP, 0, pdu, CucTime(1, 2))
+        end, vals = _decode_variable(xt, f"{root}/CFDP", "CFDP", pkt)
+        assert end == 8 * len(pkt) and vals[(f"{root}/CFDP", "pdu")][0] == pdu
+        assert decom.decode(SpacePacket.parse(pkt)) == {"pdu_len": len(pdu)}
+
+
+def test_xtce_notes_carry_rules_sentinels_and_labels(xtce_root):
+    def long_desc(path):
+        e = xtce_root.find(path)
+        assert e is not None, path
+        ld = e.find(f"{X}LongDescription")
+        return "" if ld is None else ld.text
+    mc = f"{X}CommandMetaData/{X}MetaCommandSet/{X}MetaCommand"
+    assert dd.COMMANDS["SPECCFG"].check_doc in long_desc(f"{mc}[@name='SPECCFG']")
+    assert "sequence file" in long_desc(f"{mc}[@name='SEQLOAD']")
+    pts = f"{X}SpaceSystem[@name='RF']/{X}TelemetryMetaData/{X}ParameterTypeSet"
+    assert "Every raw value is a reading" in long_desc(f"{pts}/*[@name='frame_period_ms_Type']")
+    assert "(0x7FFF) = not available" in long_desc(f"{pts}/*[@name='uplink_rssi_Type']")
+    hk = f"{X}SpaceSystem[@name='HK']/{X}TelemetryMetaData/{X}ParameterTypeSet"
+    assert "3 = URGENT" in long_desc(f"{hk}/*[@name='beacon_level_Type']")         # limits keep it an integer
+    labels = xtce_root.find(f"{hk}/{X}EnumeratedParameterType[@name='cfdp_state_Type']")
+    assert {e.get("label") for e in labels.iter(f"{X}Enumeration")} == set(dd.CFDP_STATES.values())
 
 
 def test_xtce_generator_refuses_what_it_cannot_express():
@@ -660,8 +763,9 @@ def test_xtce_custom_decoder_fields_are_raw_with_a_note():
     assert t.get("name") == "spec_410nm_Type" and "spec_log_decode" in t.find(f"{X}LongDescription").text
 
 
-XSD = Path(os.environ.get("DSSQ_XTCE_XSD", "/tmp/claude-0/-home-user-Benchmarks/5ee836b4-fd12-52ad-8530-"
-                          "d6659d1475b9/scratchpad/refs3/yamcs/yamcs-xtce/SpaceSystemV1.2.xsd"))
+# The normative XTCE 1.2 schema (OMG SpaceSystem.xsd, e.g. yamcs-xtce SpaceSystemV1.2.xsd): set
+# DSSQ_XTCE_XSD to its path to run the validation (skipped otherwise).
+XSD = Path(os.environ.get("DSSQ_XTCE_XSD") or "/nonexistent/SpaceSystemV1.2.xsd")
 
 
 def test_xtce_validates_against_the_xtce_1_2_schema():

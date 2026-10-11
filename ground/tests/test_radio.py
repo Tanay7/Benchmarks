@@ -23,8 +23,7 @@ from dssq.archive import SCHEMA
 from dssq.ccsds import CADU_LEN
 from dssq.ccsds.tm import FHP_ONLY_IDLE_DATA, build_frame, encode_cadu
 from dssq.framesync import FrameSynchronizer, RadioFault, RawCadu
-from dssq.link import (AIR_RATE_BPS, E22_T33D, E22_T37S, MIN_EFFECTIVE_RATE_CODE, SENSITIVITY_EST_DBM, SX126X,
-                       TX_POWER_DBM)
+from dssq.link import E22_T33D, E22_T37S, SX126X
 from dssq.linkmgr import LinkManager
 from dssq.radio import sx126x as sx
 from dssq.radio.e22 import describe, regs_from_cfg, sanitize_reg1
@@ -75,10 +74,12 @@ def test_e22_rate_power_and_sensitivity_tables():
     assert all(link.sensitivity(E22_T33D, c)[0] < link.sensitivity(E22_T33D, c + 1)[0] for c in range(2, 7))
 
 
-def test_legacy_names_follow_the_default_model():
-    assert AIR_RATE_BPS[0] == AIR_RATE_BPS[1] == AIR_RATE_BPS[2] == 2400 and AIR_RATE_BPS[7] == 62500
-    assert SENSITIVITY_EST_DBM[2] == -128.0 and TX_POWER_DBM[0] == 33.0
-    assert MIN_EFFECTIVE_RATE_CODE == 2
+def test_legacy_names_are_gone_and_the_model_tables_replace_them():
+    # Phase B F-52: the default-model aliases were removed; callers use the model tables.
+    for name in ("AIR_RATE_BPS", "SENSITIVITY_EST_DBM", "TX_POWER_DBM", "MIN_EFFECTIVE_RATE_CODE"):
+        assert not hasattr(link, name)
+    assert link.rate_bps(link.DEFAULT_MODEL, 2) == 2400 and link.power_dbm(link.DEFAULT_MODEL, 0) == 33.0
+    assert link.get_model(link.DEFAULT_MODEL).min_effective_rate_code == 2
     assert math.isclose(link.dbm_to_mw(30.0), 1000.0)
 
 
@@ -776,3 +777,302 @@ def test_afc_from_settings_reconfigure_and_disabled():
     assert e22.on_packet(1.0, 5000.0, 0.0) is None and e22.tick(2.0, True) is None
     clipped = link.AfcLoop(12, 31_250.0, F433, static_offset_hz=9000.0)
     assert clipped.static_hz == 6250 and "clipped" in clipped.pop_events()[0][2]
+
+
+# ---- Phase B (WS4) ----
+import contextlib  # noqa: E402
+import csv  # noqa: E402
+import errno  # noqa: E402
+import os  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import time  # noqa: E402
+
+from dssq.config import load_config  # noqa: E402
+from dssq.radio import e22  # noqa: E402
+from dssq.radio.e22 import E22Serial, SerialPort  # noqa: E402
+
+HOST_TEST = ROOT / "tools" / "host_test"
+
+
+# ------------------------------------------- stdlib serial transport on a pseudo-terminal (F-08)
+@pytest.fixture
+def pty_pair():
+    pty = pytest.importorskip("pty")
+    master, slave = pty.openpty()
+    path = os.ttyname(slave)
+    os.close(slave)              # SerialPort opens the device by name, like /dev/ttyUSB0
+    yield master, path
+    with contextlib.suppress(OSError):         # a test may have closed it ("unplugged")
+        os.close(master)
+
+
+def _drain(fd: int, n: int, timeout_s: float = 2.0) -> bytes:
+    out, deadline = b"", time.monotonic() + timeout_s
+    while len(out) < n and time.monotonic() < deadline:
+        try:
+            out += os.read(fd, n - len(out))
+        except BlockingIOError:
+            time.sleep(0.005)
+    return out
+
+
+def test_serial_port_raw_8n1_round_trip(pty_pair):
+    termios = pytest.importorskip("termios")
+    master, path = pty_pair
+    with SerialPort(path, 9600, timeout_s=0.05) as port:
+        attrs = termios.tcgetattr(port.fileno())
+        assert attrs[4] == attrs[5] == termios.B9600
+        assert attrs[2] & termios.CSIZE == termios.CS8 and not attrs[2] & (termios.PARENB | termios.CSTOPB)
+        assert not attrs[3] & (termios.ICANON | termios.ECHO | termios.ISIG)
+        assert not attrs[1] & termios.OPOST and not attrs[0] & (termios.IXON | termios.ICRNL)
+        raw = bytes(range(256))               # every octet value passes untouched (no CR/LF mapping)
+        os.write(master, raw)
+        got = b""
+        for _ in range(50):
+            got += port.read(4096, timeout_s=0.1)
+            if len(got) >= len(raw):
+                break
+        assert got == raw
+        t0 = time.monotonic()
+        assert port.read(timeout_s=0.1) == b""     # timeout, no data
+        assert 0.08 <= time.monotonic() - t0 < 1.0
+        port.write(b"\xc1\x00\x09\x0d\x0a")
+        port.flush()
+        assert _drain(master, 5) == b"\xc1\x00\x09\x0d\x0a"
+        os.write(master, b"stale")
+        time.sleep(0.05)
+        port.reset_input_buffer()
+        assert port.read(timeout_s=0.05) == b""
+    assert not port.is_open
+    port.close()                                   # idempotent
+    with pytest.raises(OSError):
+        port.read()
+
+
+def test_serial_port_is_exclusive(pty_pair):
+    _, path = pty_pair
+    with SerialPort(path, 9600):
+        with pytest.raises(OSError) as e:
+            SerialPort(path, 9600)
+        assert e.value.errno in (errno.EAGAIN, errno.EWOULDBLOCK) and path in str(e.value)
+    SerialPort(path, 9600).close()                 # lock released on close
+
+
+def test_serial_port_validation_and_errors(tmp_path, pty_pair):
+    _, path = pty_pair
+    for bad in (0, 9601, 62500, 230400, True, "9600"):
+        with pytest.raises(ValueError):
+            SerialPort(path, bad)
+    for baud in (1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200):
+        SerialPort(path, baud).close()
+    with pytest.raises(OSError) as e:
+        SerialPort(str(tmp_path / "ttyUSB9"), 9600)
+    assert e.value.errno == errno.ENOENT and "ttyUSB9" in str(e.value) and "open" in str(e.value)
+    plain = tmp_path / "file"
+    plain.write_bytes(b"")
+    with pytest.raises(OSError) as e:
+        SerialPort(str(plain), 9600)
+    assert e.value.errno == errno.ENOTTY
+    with SerialPort(path, 9600) as port:
+        with pytest.raises(ValueError):
+            port.read(0)
+        with pytest.raises(TypeError):
+            port.write("text")
+
+
+def test_e22_backend_survives_a_hang_up(pty_pair, monkeypatch):
+    master, path = pty_pair
+    monkeypatch.setattr(e22, "REOPEN_HOLDOFF_S", 0.0)
+    radio = E22Serial(path)
+    os.write(master, b"\x1a\xcf\xfc\x1d")
+    got = b""
+    for _ in range(20):
+        got += radio.read()
+        if got:
+            break
+    assert got == b"\x1a\xcf\xfc\x1d" and radio.connected
+    radio.write(b"\xeb\x90")
+    assert _drain(master, 2) == b"\xeb\x90"
+    os.close(master)                               # the "USB-UART" disappears
+    for _ in range(5):
+        assert radio.read() == b""                 # never raises
+    radio.write(b"\x00" * 10)                      # never raises; counted
+    assert radio.faults >= 1 and radio.tx_dropped >= 10 and radio.last_error
+    radio.close()
+    with pytest.raises(OSError):
+        E22Serial("/nonexistent/ttyUSB0")          # but a wrong port fails at start-up
+
+
+# ------------------------------------- flight radio tables == dssq.link (F-54, contract 3.2 / 24.8)
+@pytest.fixture(scope="module")
+def radio_tables(tmp_path_factory):
+    if not (shutil.which("make") and (shutil.which("g++") or shutil.which("c++"))):
+        pytest.skip("no host C++ toolchain")
+    out = tmp_path_factory.mktemp("radio_tables")
+    subprocess.run(["make", "-s", "-C", str(HOST_TEST), "host_test"], check=True)
+    subprocess.run([str(HOST_TEST / "host_test"), str(out)], check=True, stdout=subprocess.DEVNULL)
+    path = out / "radio_tables.csv"
+    if not path.exists():
+        pytest.fail("host_test did not write radio_tables.csv")
+    with path.open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def test_flight_radio_tables_match_the_ground_link_model(radio_tables):
+    assert list(radio_tables[0]) == ["model", "code", "bitrate_bps", "airtime_ms_236", "airtime_us_236", "sens_ddbm",
+                                     "sens_source", "sens_saving_ddbm", "sens_saving_source", "ferr_limit_hz_ch23",
+                                     "power_code_dbm"]
+    assert sorted({(r["model"], int(r["code"])) for r in radio_tables}) == sorted(
+        (m, c) for m in (E22_T33D, E22_T37S, SX126X) for c in range(8))
+    f23 = link.channel_freq_mhz(23) * 1e6
+    for r in radio_tables:
+        m, c = r["model"], int(r["code"])
+        where = f"{m} code {c}"
+        assert int(r["bitrate_bps"]) == round(link.rate_bps(m, c)), where
+        assert int(r["airtime_ms_236"]) == round(link.busy_s(m, c) * 1000), where       # frame-period basis
+        boost, saving = link.sensitivity(m, c, None, True), link.sensitivity(m, c, None, False)
+        assert (int(r["sens_ddbm"]), r["sens_source"]) == (round(boost[0] * 10), boost[1]), where
+        assert (int(r["sens_saving_ddbm"]), r["sens_saving_source"]) == (round(saving[0] * 10), saving[1]), where
+        if link.get_model(m).packet_mode:
+            p = link.SX126X_PROFILES[c]
+            assert int(r["airtime_us_236"]) == link.lora_airtime_us(236, p.sf, p.bw_hz), where
+            assert float(r["ferr_limit_hz_ch23"]) == pytest.approx(link.lora_max_freq_offset_hz(p.sf, p.bw_hz, f23),
+                                                                   abs=0.005), where
+        else:
+            assert int(r["airtime_us_236"]) == 0 and float(r["ferr_limit_hz_ch23"]) == 0.0, where
+        if c <= 3:
+            assert int(r["power_code_dbm"]) == round(link.power_dbm(m, c)), where
+        else:
+            assert r["power_code_dbm"] == "", where
+
+
+def test_busy_time_model_values():
+    # flight frame-period basis (contract 3.2): E22 = UART at 9600 baud + air at the code's rate x 1.3;
+    # SX126x = the LoRa time on air of the 236-octet CADU, whole milliseconds rounded up.
+    assert [link.busy_s(E22_T33D, c) for c in range(8)] == [1.267, 1.267, 1.267, 0.756, 0.5, 0.372, 0.308, 0.284]
+    assert [link.busy_s(SX126X, c) for c in range(8)] == [34.636, 17.318, 8.659, 4.74, 2.165, 1.185, 0.665, 0.373]
+    assert [link.lora_airtime_us(236, p.sf, p.bw_hz) for p in link.SX126X_PROFILES.values()] == \
+        [round(ms * 1000) for ms in AIRTIME_236_MS]
+
+
+# --------------------------------------------- GDS AFC glue: rf_foff(hz) -> 1 | -1 | -2 | None (F-32)
+class FoffStation:
+    """rf_foff test double (contract 24.8): scripted results, or an exception (link failure)."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def rf_foff(self, hz):
+        self.calls.append(hz)
+        r = self.results.pop(0)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    def close(self):
+        return None
+
+
+@pytest.fixture
+def sx_runner(monkeypatch, tmp_path):
+    from dssq.gds import Runner
+    clk = Clock()
+    clk.t = 1_800_000_000.0
+    monkeypatch.setattr(time, "time", clk)
+    cfg = load_config()
+    cfg["radio"].update(model="SX126x", air_rate=1)
+    cfg["gds"]["archive_dir"] = str(tmp_path / "archive")
+    cfg["sdls"]["key_file"] = str(tmp_path / "no_key.hex")
+    runner = Runner(cfg, sim=True, web=False, archive=False)
+    yield runner, clk
+    runner.close()
+
+
+def _afc_wants(runner, clk, ferr=5000.0, max_packets=10):
+    """Packets with a constant 5 kHz error until the AFC queues a correction."""
+    gs = runner.gs
+    for _ in range(max_packets):
+        clk.t += 20.0
+        gs.ingest_packet(link.RxPacket(b"", clk.t, -110.0, 0.0, ferr, True))
+        if gs.afc_out:
+            return list(gs.afc_out)
+    raise AssertionError("the AFC queued no correction")
+
+
+def _afc_events(gs):
+    return [e["text"] for e in gs.events if e["source"] == "AFC"]
+
+
+def test_gds_afc_glue_maps_every_rf_foff_result(sx_runner):
+    runner, clk = sx_runner
+    gs = runner.gs
+    assert gs.afc.enabled and gs.afc.correction_hz == 0
+    station = FoffStation([-1, -2, None, TimeoutError("router"), 1])
+    runner.radio = station
+    expect = ["out of range", "radio down", "no answer (bridge)", "no answer (bridge)"]
+    for text in expect:
+        assert _afc_wants(runner, clk) == [3906]                  # one slew step: 25 % of FERR_L (SF12 / 62.5 kHz)
+        runner._stage_afc()
+        assert gs.afc.correction_hz == 0 and f"rf_foff(3906) failed: {text}" in _afc_events(gs)[-1]
+    assert gs.afc.counters["rpc_failures"] == 4
+    _afc_wants(runner, clk)
+    runner._stage_afc()
+    assert gs.afc.correction_hz == 3906 and station.calls == [3906] * 5 and not gs.afc_out
+    assert gs.snapshot()["rx"]["rf"]["afc"]["correction_hz"] == 3906
+
+
+def test_gds_afc_glue_without_rf_foff(sx_runner):
+    runner, clk = sx_runner
+    gs = runner.gs
+
+    class NoFoff:
+        def close(self):
+            return None
+
+    runner.radio = NoFoff()
+    for _ in range(2):
+        _afc_wants(runner, clk)
+        runner._stage_afc()
+    warns = [t for t in _afc_events(gs) if "provides no rf_foff" in t]
+    assert len(warns) == 1                                            # reported once
+    assert gs.afc.correction_hz == 0 and gs.afc.counters["rpc_failures"] == 2
+    runner.radio = None                                               # radio unavailable: confirmed, no extra WARN
+    _afc_wants(runner, clk)
+    runner._stage_afc()
+    assert gs.afc.counters["rpc_failures"] == 3 and len([t for t in _afc_events(gs) if "provides no" in t]) == 1
+
+
+def test_gds_afc_uses_set_freq_offset_of_the_committed_backend(sx_runner):
+    runner, clk = sx_runner
+
+    class Backend:                       # Sx126xBridge names the rf_foff call set_freq_offset
+        def __init__(self):
+            self.calls = []
+
+        def set_freq_offset(self, hz):
+            self.calls.append(hz)
+            return 1
+
+        def close(self):
+            return None
+
+    runner.radio = b = Backend()
+    _afc_wants(runner, clk)
+    runner._stage_afc()
+    assert b.calls == [3906] and runner.gs.afc.correction_hz == 3906
+
+
+# ------------------------------------------------------------ configuration checks (F-10, F-31)
+def test_config_validation_rules():
+    from dssq.config import DEFAULTS, merge, validate
+    assert validate(merge({})) == [] and merge({}) == DEFAULTS
+    cfg = merge({"radio": {"uart_code": 4}})
+    with pytest.raises(ValueError, match="uart_code"):
+        validate(cfg)
+    assert validate(merge({"radio": {"model": "SX126x", "uart_code": 4}})) == []      # E22 models only
+    for bad in ({"radio": {"sx126x": {"afc": "yes"}}}, {"radio": {"freq_offset_calibrated": 1}},
+                {"science": {"field_ut": -3.0}}, {"radio": {"model": "E22-400T30D"}}):
+        with pytest.raises(ValueError):
+            validate(merge(bad))

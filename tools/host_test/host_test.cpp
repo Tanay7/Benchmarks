@@ -9,6 +9,10 @@
 //    <outdir>/packets.txt     "<vc> <hex packet>" for every real packet queued
 //    <outdir>/rs_vector.txt   one 232-octet dual-basis codeblock (hex)
 //    <outdir>/cltu.txt        CLTU produced by the flight BCH encoder (hex)
+//    <outdir>/sdls_frame.txt  an SDLS AUTH TC frame built with the flight HMAC code
+//  and then runs every check registered by tools/host_test/test_*.cpp (telemetry
+//  and command vectors: test_integration.cpp; CFDP, crypto, USLP, Rice, spectral,
+//  radio and autonomy vectors: their own files).
 //
 //  Build & run:   make -C tools/host_test   (or see Makefile)
 // =============================================================================
@@ -27,9 +31,7 @@
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tc.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tm.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/fsw/attitude.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/commands.h"
 #include "../../spacecraft/vgq1_flight/sketch/src/fsw/ssr.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/tlm_packets.h"
 #include <cmath>
 
 #include "host_test.h"
@@ -241,118 +243,6 @@ int main(int argc, char** argv) {
     CHECK(frames >= 120, "multiplexer produced CADU stream (cadus.bin / packets.txt)");
   }
 
-  // ---- Telemetry packet vectors (flight packers -> ground dictionary) -----------------
-  {
-    FILE* f = std::fopen((out + "/tlm_vectors.txt").c_str(), "w");
-    if (!f) return 2;
-    CucTime t{4242, 32768};
-    uint8_t pl[vgq::kMaxPayload], pkt[256];
-    auto emit = [&](const char* name, uint16_t apid, size_t n, const char* expect) {
-      const size_t m = build_tm_packet(pkt, sizeof(pkt), apid, 7, t, pl, n);
-      std::fprintf(f, "%s %s %s\n", name, hex(pkt, m).c_str(), expect);
-    };
-    vgq::HkPacket hk{};
-    hk.fsw_mode = vgq::MODE_ENCOUNTER; hk.sclk_partition = 12; hk.uptime_s = 86400;
-    hk.reset_cause = 0; hk.fdir_flags = vgq::FDIR_PA_OVERTEMP | vgq::FDIR_CMD_LOSS;
-    hk.sensor_health = 0x3FFF; hk.cmd_accepted = 100; hk.cmd_rejected = 3; hk.cmd_last_opcode = 9;
-    hk.cmd_last_status = 0; hk.tc_frames_ok = 101; hk.tc_frames_bad = 4; hk.farm_state = 1;
-    hk.farm_vr = 55; hk.cmd_loss_timer_s = 3600; hk.bus_temp_cC = 3125; hk.radio_fault = 3;
-    hk.radio_fault_reports = 17; hk.loop_max_ms = 42; hk.loop_overruns = 1;
-    hk.i2c_errors = 2; hk.ssr_fill_permille = 512; hk.ssr_dropped = 0; hk.ssr_kib = 256;
-    hk.vc0_backlog = 10; hk.vc1_backlog = 200; hk.vc2_backlog = 0;
-    hk.sdls_enabled = 1; hk.sdls_auth_fail = 3; hk.sdls_last_sn = 123456789;
-    size_t n = vgq::pack_hk(hk, pl);
-    CHECK(n == 58, "HK packet is 58 octets");
-    emit("HK", vgq::APID_HK, n, "fsw_mode=3,sclk_partition=12,uptime_s=86400,fdir_flags=20,"
-         "farm_vr=55,bus_temp=31.25,radio_fault=3,radio_fault_reports=17,ssr_kib=256,"
-         "ssr_fill=51.2,vc1_backlog=200,cmd_loss_timer_s=3600,sdls_enabled=1,sdls_auth_fail=3,"
-         "sdls_last_sn=123456789");
-
-    vgq::RfPacket rf{};
-    rf.air_rate_code = 2; rf.tx_power_code = 0; rf.channel = 23; rf.e22_cfg_ok = 1;
-    rf.frames_sent = 123456; rf.tx_duty_permille = 433; rf.frame_period_ms = 2000;
-    rf.uplink_rssi_dbm = -97; rf.noise_floor_dbm = -118; rf.mcfc = 200; rf.last_airtime_ds = 9;
-    n = vgq::pack_rf(rf, pl);
-    CHECK(n == 38, "RF packet is 38 octets");
-    emit("RF", vgq::APID_RF, n, "channel=23,frames_sent=123456,tx_duty=43.3,uplink_rssi=-97.0,"
-         "sc_noise_floor=-118.0,mcfc=200,last_airtime=0.9");
-
-    vgq::MagPacket mg{};
-    mg.nsamples = 4; mg.flags = 0x0B;
-    mg.outboard = {12345, -23456, 45678, 50};
-    mg.inboard = {vgq::kNaI32, vgq::kNaI32, vgq::kNaI32, vgq::kNaU16};
-    mg.body = {-1, 2, -3, 4}; mg.rm3100_cycle_count = 200;
-    n = vgq::pack_mag(mg, pl);
-    CHECK(n == 46, "MAG packet is 46 octets");
-    emit("MAG", vgq::APID_MAG, n, "ob_b_x=12.345,ob_b_y=-23.456,ob_b_z=45.678,ob_rms=0.05,"
-         "ib_b_x=None,ib_rms=None,body_b_z=-0.003,rm3100_cc=200");
-
-    vgq::AttPacket at{};
-    at.flags = 0x1F; at.acc_mg[2] = 1000; at.gyro_ddps[0] = -15; at.mag_dT[1] = 255;
-    at.q_fus[0] = 16384; at.q_fus_acc_mrad = 52; at.q_triad[1] = -8192;
-    n = vgq::pack_att(at, pl);
-    CHECK(n == 37, "ATT packet is 37 octets");
-    emit("ATT", vgq::APID_ATT, n, "acc_z=1.0,gyro_x=-1.5,mag_y=25.5,q_fus_w=1.0,q_fus_acc=0.052,"
-         "q_triad_x=-0.5");
-
-    vgq::SpecPacket sp{};
-    sp.flags = 0x03; sp.gain_code = 2; sp.int_cycles = 50;
-    for (int i = 0; i < 18; ++i) { sp.cal_uW_cm2[i] = 1.5f * i; sp.raw[i] = (uint16_t)(1000 + i); }
-    sp.temp_c[0] = -3; sp.temp_c[1] = 25; sp.temp_c[2] = -128;
-    n = vgq::pack_spec(sp, pl);
-    CHECK(n == 114, "SPEC packet is 114 octets");
-    emit("SPEC", vgq::APID_SPEC, n, "flags=3,gain_code=2,cal_410nm=0.0,cal_940nm=25.5,raw_410nm=1000,"
-         "raw_940nm=1017,temp_0=-3.0,temp_1=25.0,temp_2=None");
-
-    vgq::EnvPacket ev{};
-    ev.flags = 0x7F; ev.nenv_t_cC = 2234; ev.nenv_rh_cpct = 4567; ev.nenv_iaq = 1.5f;
-    ev.nenv_outdoor_aqi = 42; ev.nenv_no2_ppb = 12.25f; ev.nme_p_cPa = 100125; ev.nme_t_cC = -150;
-    ev.nme_iaq_s = 77; ev.nme_co2eq_ppm = 600; ev.nme_bvoc_cppm = 125; ev.nme_gas_ohm = 150000;
-    ev.nme_accuracy = 3;
-    n = vgq::pack_env(ev, pl);
-    CHECK(n == 51, "ENV packet is 51 octets");
-    emit("ENV", vgq::APID_ENV, n, "nenv_t=22.34,nenv_rh=45.67,nenv_iaq=1.5,nenv_aqi=42,nenv_no2=12.25,"
-         "nme_p=1001.25,nme_t=-1.5,nme_iaq_s=77,nme_co2eq=600,nme_bvoc=1.25,nme_gas=150000,"
-         "nme_accuracy=3");
-
-    vgq::CmdVerPacket cv{5, vgq::OP_PING, vgq::STAGE_EXECUTED, 0, 0xDEADBEEF};
-    n = vgq::pack_cmdver(cv, pl);
-    emit("CMDVER", vgq::APID_CMDVER, n, "tc_seq=5,opcode=9,stage=2,ground_tag=3735928559");
-
-    const int8_t noise[5] = {-118, -121, -97, -128, -120};
-    n = vgq::pack_rfscan(20, 5, 812, noise, pl);
-    CHECK(n == 9, "RFSCAN packet is 4 + N octets");
-    emit("RFSCAN", vgq::APID_RFSCAN, n, "first_ch=20,count=5,duration_ms=812,noise=-118;-121;-97;None;-120");
-
-    vgq::TimeCorrPacket tc{17, 4000, 1234, 2, 950};
-    n = vgq::pack_timecorr(tc, pl);
-    emit("TIMECORR", vgq::APID_TIMECORR, n, "ref_mcfc=17,sclk_coarse=4000,sclk_fine=1234,ref_airtime_ms=950");
-    std::fclose(f);
-  }
-
-  // ---- Command parsing --------------------------------------------------------------------
-  {
-    // TC packet: version 0, type 1, no sec hdr, APID 0x0C0, seq flags 11
-    auto mk = [](const std::vector<uint8_t>& user) {
-      std::vector<uint8_t> p = {0x10, 0xC0, 0xC0, 0x00, 0x00, (uint8_t)(user.size() - 1)};
-      p.insert(p.end(), user.begin(), user.end());
-      return p;
-    };
-    vgq::Command c;
-    auto p1 = mk({vgq::OP_PING, 0x01, 0x02, 0x03, 0x04});
-    CHECK(vgq::parse_tc_packet(p1.data(), p1.size(), c) == vgq::CE_OK && c.a32 == 0x01020304,
-          "CMD: PING tag decoded");
-    auto p2 = mk({vgq::OP_MODE, 9});
-    CHECK(vgq::parse_tc_packet(p2.data(), p2.size(), c) == vgq::CE_BAD_ARGUMENT, "CMD: bad mode rejected");
-    auto p3 = mk({vgq::OP_REBOOT, 0x12, 0x34});
-    CHECK(vgq::parse_tc_packet(p3.data(), p3.size(), c) == vgq::CE_BAD_MAGIC, "CMD: reboot needs magic");
-    auto p4 = mk({0x7E});
-    CHECK(vgq::parse_tc_packet(p4.data(), p4.size(), c) == vgq::CE_UNKNOWN_OPCODE, "CMD: unknown opcode");
-    auto p5 = mk({vgq::OP_AIRRATE, 0, 0x01, 0x2C});
-    CHECK(vgq::parse_tc_packet(p5.data(), p5.size(), c) == vgq::CE_OK && c.a8 == 0 && c.a16 == 300,
-          "CMD: AIRRATE code + revert timer");
-  }
-
   // ---- Solid-state recorder ------------------------------------------------------------------
   {
     static vgq::Ssr ssr;
@@ -360,7 +250,7 @@ int main(int argc, char** argv) {
     uint8_t p[100], o[128];
     for (int i = 0; i < 400; ++i) { std::memset(p, i & 0xFF, sizeof(p)); p[0] = (uint8_t)i; ssr.record(p, 100); }
     CHECK(ssr.dropped() > 0 && ssr.fill_permille() > 950, "SSR overwrites oldest when full");
-    ssr.start_playback();
+    CHECK(ssr.start_playback() && ssr.playing(), "SSR playback starts (no export running)");
     int cnt = 0, last = -1;
     bool ordered = true;
     while (uint16_t n = ssr.next_playback(o, sizeof(o))) {

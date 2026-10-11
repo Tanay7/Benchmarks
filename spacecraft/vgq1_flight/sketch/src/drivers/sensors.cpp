@@ -38,15 +38,23 @@ bool Rm3100::start() {
   return pending_;
 }
 
+int8_t Rm3100::poll_drdy() {
+  if (!pending_ || bus_ == nullptr) return 0;
+  uint8_t st = 0;
+  if (!bus_->read(addr_, kRm3100RegStatus, &st, 1)) return -1;
+  return (st & kRm3100StatusDrdy) ? 1 : 0;
+}
+
 bool Rm3100::collect(float& bx, float& by, float& bz, uint32_t timeout_ms) {
   if (!pending_) return false;
   pending_ = false;
   const uint32_t t0 = millis();
   uint8_t st = 0;
-  for (;;) {
-    if (!bus_->read(addr_, 0x34, &st, 1)) return false;    // STATUS
-    if (st & 0x80) break;                                  // DRDY
-    if (millis() - t0 >= timeout_ms) return false;
+  // Bounded twice: by time and by a poll count (one STATUS read per ms at most).
+  for (uint32_t i = 0;; ++i) {
+    if (!bus_->read(addr_, kRm3100RegStatus, &st, 1)) return false;
+    if (st & kRm3100StatusDrdy) break;
+    if (millis() - t0 >= timeout_ms || i >= timeout_ms) return false;
     delay(1);
   }
   uint8_t m[9];

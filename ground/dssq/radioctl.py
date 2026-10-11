@@ -128,6 +128,12 @@ class RadioManager:
             self.regs = bytes(regs)
         return ok
 
+    def _cached_regs(self) -> bytes | None:
+        """E22 registers 00..08 as last read back (read once on demand), None if unreadable."""
+        if self.regs is None and self.read_config() is None:
+            return None
+        return self.regs
+
     def _sx_configure(self, **kw: int) -> bool:
         if not self.available:
             return False
@@ -145,9 +151,10 @@ class RadioManager:
             raise ValueError(f"rate code {code} outside 0..7")
         if self.packet:
             return self._sx_configure(rate_code=code)
-        if self.regs is None and self.read_config() is None:
+        regs = self._cached_regs()
+        if regs is None:
             return False
-        reg0 = (self.regs[3] & ~0x07) | code
+        reg0 = (regs[3] & ~0x07) | code
         return self.write_regs(0x03, bytes([reg0]))
 
     def set_power(self, code: int) -> bool:
@@ -156,9 +163,10 @@ class RadioManager:
             raise ValueError(f"power code {code} outside 0..3")
         if self.packet:
             return self._sx_configure(power_code=code)
-        if self.regs is None and self.read_config() is None:
+        regs = self._cached_regs()
+        if regs is None:
             return False
-        reg1 = (self.regs[4] & ~0x03) | code
+        reg1 = (regs[4] & ~0x03) | code
         return self.write_regs(0x04, bytes([reg1]))
 
     def noise_dbm(self) -> float | None:
@@ -207,9 +215,10 @@ class RadioManager:
             raise ValueError(f"WOR cycle code {wor_cycle_code} outside 0..7")
         if not self.available:
             return False
-        if self.regs is None and self.read_config() is None:
+        regs = self._cached_regs()
+        if regs is None:
             return False
-        reg3 = self.regs[6]
+        reg3 = regs[6]
         wor_reg3 = (reg3 & ~0x0F) | 0x08 | wor_cycle_code             # WOR role = transmitter
         if not self.write_regs(0x06, bytes([wor_reg3])):
             return False

@@ -1,9 +1,11 @@
 """AS7265X ground spectral analytics: packet decoding, radiometry, colorimetry, instrument science.
 
 Implements the ground half of contract sections 8 and 13 (13.3 logarithmic spectral code,
-13.4 SPEC v3.1 and 13.5 SPECBURST field sets, 13.7 ground analytics) for the DSS-Q ground
-data system. Pure Python (standard library only); the only I/O is the JSON persistence of
-the white reference and of the spectral library.
+13.4 SPEC v3.1 field set, 13.7 ground analytics), the SPECBURST packet of contract 28 /
+Phase B PB-1.12 (raw or CCSDS 121.0-B-3 "Rice" payload) and the AS7265X cross-check
+decoding rules of contract 26 (PB-1.16) for the DSS-Q ground data system. Pure Python
+(standard library only); the only I/O is the JSON persistence of the white reference and
+of the spectral library.
 
 Governing documents
   ams AS7265x datasheet v1-04 (2018-07-09): 18 channels 410..940 nm, 20 nm FWHM, centre
@@ -59,6 +61,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from .ccsds import rice
+
 # =============================================================================
 # Instrument constants (AS7265x datasheet v1-04)
 # =============================================================================
@@ -95,8 +99,14 @@ DATASHEET_NOTES = (
 )
 
 MODE_NAMES = {0: "SURVEY", 1: "HDR", 2: "LOCKIN", 3: "FLUOR", 4: "BURST"}
+MODE_HDR = 1
 MODE_FLUOR = 3
 MODE_BURST = 4
+# HDR packets (flight spectral.h, contract 26 AS-DP-04): gain_code / int_cycles are the AGC
+# centre of the bracket, and each channel's raw count comes from the exposure chosen for that
+# channel, so raw / full_scale(int_cycles) is not a meaningful fraction.
+HDR_EXPOSURE_NOTE = ("bracket centre, not necessarily an exposure taken; raw[] from the frame "
+                     "chosen per channel")
 CLASS_NAMES = {0: "UNKNOWN", 1: "DARK", 2: "DAYLIGHT", 3: "INCANDESCENT/HALOGEN", 4: "WHITE LED",
                5: "FLUORESCENT", 6: "NARROWBAND", 7: "OWN LAMP"}
 CLASS_UNKNOWN, CLASS_DARK, CLASS_DAYLIGHT, CLASS_INCANDESCENT = 0, 1, 2, 3
@@ -105,6 +115,23 @@ CLASS_WHITE_LED, CLASS_FLUORESCENT, CLASS_NARROWBAND, CLASS_OWN_LAMP = 4, 5, 6, 
 # SPEC v3.1 flag bits (contract 13.4)
 F_VALID, F_WHITE, F_IR, F_UV, F_AGC, F_ACTIVE, F_SAT, F_ATTITUDE = (1 << b for b in range(8))
 LAMP_NAMES = ("white", "IR", "UV")          # flags b1..b3 / SPECCFG lamps b0..b2
+
+# Highest LED_DRV current code each board lamp may be driven at, by device = lamp bit
+# (flight spectral.h kSpecLedMaxCode; vendor limits from SparkFun AS7265x 1.0.5
+# Example3_Settings: white 120 mA max -> all codes, IR 65 mA -> <= 50 mA, UV 30 mA ->
+# 12.5 mA only; contract 26). SPECCFG led_cur: b1:0 white, b3:2 IR, b5:4 UV.
+LED_MAX_CODE = (3, 2, 0)
+
+
+def led_cur_allowed(led_cur: int) -> bool:
+    """True when every lamp code of led_cur respects LED_MAX_CODE, i.e. the flight's
+    spec_led_cur_applied(v) == v. The allowed set is exactly 0..11."""
+    if isinstance(led_cur, bool) or not isinstance(led_cur, int) or not 0 <= led_cur <= 63:
+        return False
+    return all((led_cur >> (2 * d)) & 3 <= LED_MAX_CODE[d] for d in range(3))
+
+
+LED_CUR_ALLOWED: tuple[int, ...] = tuple(v for v in range(64) if led_cur_allowed(v))
 
 APPROX_LABEL = "approximate (18-band)"
 HEURISTIC_LABEL = "heuristic"
@@ -115,7 +142,9 @@ DIRECTIVE_HELP = {
     "SPECLIB": "SPECLIB SAVE <name> | DEL <name> | LIST - named spectral library "
                "(best spectral-angle match shown live)",
 }
-EVR_SPECTRAL_IDS = range(0x0701, 0x0706)    # 0x0701..0x0705 (contract 13.6)
+# Onboard spectrometer EVRs 0x0701..0x0707 (PB-2.6): spectral event, light-source change,
+# SPECDIAG line, burst start/end, soft-reset recovery, identification, driver state.
+EVR_SPECTRAL_IDS = range(0x0701, 0x0708)
 
 
 # =============================================================================
@@ -260,10 +289,22 @@ _RANGE = {"B": (0, 0xFF), "b": (-128, 127), "H": (0, 0xFFFF), "h": (-32768, 3276
           "I": (0, 0xFFFFFFFF), "i": (-(1 << 31), (1 << 31) - 1)}
 
 
+def round_half_away(x: float) -> int:
+    """Nearest integer, halves away from zero (C lroundf, which the flight packers use)."""
+    return int(math.copysign(math.floor(abs(x) + 0.5), x))
+
+
 def azimuth_from_cdeg(raw: int) -> float:
     """bore_az decoder: the flight sends 0.01 deg wrapped to (-180, 180] (0..360 deg does not
     fit an i16); the ground reports degrees from north toward east, 0 <= az < 360."""
     return (raw * 0.01) % 360.0
+
+
+def azimuth_to_cdeg(deg: float) -> int:
+    """Inverse of azimuth_from_cdeg: degrees -> 0.01 deg wrapped to (-180, 180]."""
+    f = deg % 360.0
+    f = f - 360.0 if f > 180.0 else f
+    return round_half_away(f * 100.0)
 
 
 # Dictionary-format field tuples with a 7th element: an optional decoder applied to the raw
@@ -334,11 +375,7 @@ def _encode_field(code: str, scale: float | None, dec: Callable[[int], Any] | No
     f = _num(v)
     if f is None:
         return _NA.get(code, 0)
-    if dec is azimuth_from_cdeg:
-        f = f % 360.0
-        f = f - 360.0 if f > 180.0 else f      # (-180, 180] as the flight sends it
-        scale = 0.01
-    r = math.floor(f / scale + 0.5) if scale else math.floor(f + 0.5)
+    r = azimuth_to_cdeg(f) if dec is azimuth_from_cdeg else round_half_away(f / scale if scale else f)
     return min(hi, max(lo, r))
 
 
@@ -351,45 +388,117 @@ def pack_spec_v31(values: Mapping[str, Any]) -> bytes:
                             for name, code, scale, _u, _d, _l, dec in SPEC_V31_FIELDS])
 
 
-_BURST_HDR = struct.Struct(">IHBBB")        # t0_ms, rate_dhz, gain_code, int_cycles, n
-_BURST_SAMPLE = struct.Struct(">H18H")      # dt_ms, raw[18]
+# SPECBURST (APID 0x024, PB-1.12 = contract 28): t0_ms u32 | rate_dhz u16 | gain_code u8 |
+# int_cycles u8 | n u8 (1..3) | encoding u8 | dt_ms u16[n] | payload.
+#   encoding 0: n x 18 u16 big-endian, TIME-MAJOR (sample 0 channels 0..17, then sample 1 ...)
+#   encoding 1: CCSDS 121.0-B-3 (rice.MISSION: n = 16, J = 16, r = 128, Basic, preprocessor
+#               on) over the CHANNEL-MAJOR samples cm[ch * n + t] = s[t].raw[ch], 1..36 n - 1
+#               octets (the flight sends Rice only when it is strictly shorter than raw).
+# Raw codes (contract 26 AS-DP-07): 0xFFFF = channel not converted in the BANK mode (None);
+# a real count of 65535 is sent as 0xFFFE (flight spec_burst_raw), so a count is saturated
+# when it is >= full_scale(int_cycles) - 1, which includes 0xFFFE.
+_BURST_HDR = struct.Struct(">IHBBBB")       # t0_ms, rate_dhz, gain_code, int_cycles, n, encoding
+BURST_HDR_LEN = _BURST_HDR.size             # 10 octets (flight kSpecBurstHdrLen)
 BURST_PER_PACKET_MAX = 3
+BURST_RAW_PER_SAMPLE = 2 * N_CH             # 36 octets
+BURST_MAX_LEN = BURST_HDR_LEN + (2 + BURST_RAW_PER_SAMPLE) * BURST_PER_PACKET_MAX   # 124
+BURST_RAW, BURST_RICE = 0, 1
+BURST_ENCODINGS = {BURST_RAW: "raw", BURST_RICE: "CCSDS 121.0-B-3"}
+BURST_NOT_CONVERTED = 0xFFFF
+BURST_COUNT_MAX = 0xFFFE                    # code of any real count >= 65534
+
+
+def _burst_code(r: int | None) -> int:
+    """Wire code of one burst value: None = not converted; a count of 65535 -> 0xFFFE."""
+    if r is None:
+        return BURST_NOT_CONVERTED
+    if isinstance(r, bool) or not isinstance(r, int) or not 0 <= r <= 0xFFFF:
+        raise ValueError(f"SPECBURST raw value {r!r} is not a count 0..65535 or None")
+    return min(r, BURST_COUNT_MAX)
 
 
 def decode_specburst(data: bytes) -> dict[str, Any]:
-    """SPECBURST user data -> {t0_ms, rate_dhz, rate_hz, gain_code, int_cycles, n,
-    samples: [{dt_ms, raw: [18 x int | None]}]}; raw 0xFFFF (channel not converted in that
-    BANK mode) -> None. Raises ValueError on a malformed packet."""
-    if len(data) < _BURST_HDR.size:
-        raise ValueError(f"SPECBURST: {len(data)} octets < {_BURST_HDR.size}")
-    t0, rate_dhz, gain, cycles, n = _BURST_HDR.unpack_from(data)
+    """SPECBURST user data -> {t0_ms, rate_dhz, rate_hz, gain_code, int_cycles, n, encoding,
+    encoding_name, payload_len, compression_ratio, samples: [{dt_ms, raw: [18 x int | None],
+    saturated: [18 x bool]}]}. compression_ratio = 36 n / payload_len (1.0 for raw).
+    Raises ValueError for a malformed packet (bad n, unknown encoding, wrong payload length)
+    and rice.RiceError (a ValueError) for an undecodable CCSDS 121.0 payload."""
+    if len(data) < BURST_HDR_LEN:
+        raise ValueError(f"SPECBURST: {len(data)} octets < {BURST_HDR_LEN}")
+    if len(data) > BURST_MAX_LEN:
+        raise ValueError(f"SPECBURST: {len(data)} octets > {BURST_MAX_LEN}")
+    t0, rate_dhz, gain, cycles, n, encoding = _BURST_HDR.unpack_from(data)
     if not 1 <= n <= BURST_PER_PACKET_MAX:
         raise ValueError(f"SPECBURST: sample count {n} outside 1..{BURST_PER_PACKET_MAX}")
-    need = _BURST_HDR.size + n * _BURST_SAMPLE.size
-    if len(data) < need:
-        raise ValueError(f"SPECBURST: {len(data)} octets < {need} for {n} samples")
+    if encoding not in BURST_ENCODINGS:
+        raise ValueError(f"SPECBURST: unknown encoding {encoding}")
+    hdr_end = BURST_HDR_LEN + 2 * n
+    if len(data) < hdr_end:
+        raise ValueError(f"SPECBURST: {len(data)} octets < {hdr_end} for {n} time offsets")
+    dts = struct.unpack_from(f">{n}H", data, BURST_HDR_LEN)
+    payload = data[hdr_end:]
+    raw_len = BURST_RAW_PER_SAMPLE * n
+    if encoding == BURST_RAW:
+        if len(payload) != raw_len:
+            raise ValueError(f"SPECBURST raw: payload {len(payload)} octets, expected {raw_len}")
+        flat = struct.unpack(f">{N_CH * n}H", payload)
+        rows = [list(flat[t * N_CH:(t + 1) * N_CH]) for t in range(n)]
+    else:
+        if not 1 <= len(payload) < raw_len:
+            raise ValueError(f"SPECBURST Rice: payload {len(payload)} octets outside "
+                             f"1..{raw_len - 1}")
+        rows = rice.time_major(rice.decode(payload, N_CH * n), N_CH)
+    fs = full_scale(cycles)
     samples = []
-    for k in range(n):
-        dt, *raw = _BURST_SAMPLE.unpack_from(data, _BURST_HDR.size + k * _BURST_SAMPLE.size)
-        samples.append({"dt_ms": dt, "raw": [None if r == 0xFFFF else r for r in raw]})
+    for t in range(n):
+        raw = [None if r == BURST_NOT_CONVERTED else r for r in rows[t]]
+        samples.append({"dt_ms": dts[t], "raw": raw,
+                        "saturated": [r is not None and r >= fs - 1 for r in raw]})
     return {"t0_ms": t0, "rate_dhz": rate_dhz, "rate_hz": rate_dhz / 10.0, "gain_code": gain,
-            "int_cycles": cycles, "n": n, "samples": samples}
+            "int_cycles": cycles, "n": n, "encoding": encoding,
+            "encoding_name": BURST_ENCODINGS[encoding], "payload_len": len(payload),
+            "compression_ratio": raw_len / len(payload), "samples": samples}
+
+
+def _u(x: Any, bits: int, what: str) -> int:
+    if isinstance(x, bool) or not isinstance(x, int) or not 0 <= x < 1 << bits:
+        raise ValueError(f"SPECBURST {what} {x!r} is not a u{bits}")
+    return x
 
 
 def pack_specburst(t0_ms: int, rate_dhz: int, gain_code: int, int_cycles: int,
-                   samples: Sequence[tuple[int, Sequence[int | None]]]) -> bytes:
-    """SPECBURST user data from (dt_ms, raw[18]) tuples, 1..3 per packet (simulator)."""
+                   samples: Sequence[tuple[int, Sequence[int | None]]], *,
+                   encoding: int | None = None) -> bytes:
+    """Reference SPECBURST encoder (simulator, tests): (dt_ms, raw[18]) tuples, 1..3 per
+    packet; raw None = not converted, a count of 65535 goes out as 0xFFFE. encoding None
+    chooses like the flight (CCSDS 121.0 when strictly shorter than raw, else raw); 0 / 1
+    force one (ValueError if a forced Rice stream is not shorter than raw). Every argument
+    is range-checked (ValueError)."""
     if not 1 <= len(samples) <= BURST_PER_PACKET_MAX:
         raise ValueError(f"SPECBURST carries 1..{BURST_PER_PACKET_MAX} samples")
-    out = bytearray(_BURST_HDR.pack(t0_ms & 0xFFFFFFFF, min(0xFFFF, max(0, rate_dhz)),
-                                    gain_code & 0xFF, int_cycles & 0xFF, len(samples)))
+    if encoding is not None and (isinstance(encoding, bool) or encoding not in BURST_ENCODINGS):
+        raise ValueError(f"SPECBURST encoding {encoding!r} is not 0 (raw) or 1 (Rice)")
+    n = len(samples)
+    dts: list[int] = []
+    rows: list[list[int]] = []
     for dt, raw in samples:
         if len(raw) != N_CH:
             raise ValueError("SPECBURST sample needs 18 raw values")
-        out += _BURST_SAMPLE.pack(min(0xFFFF, max(0, dt)),
-                                  *[0xFFFF if r is None else min(0xFFFF, max(0, int(r)))
-                                    for r in raw])
-    return bytes(out)
+        dts.append(_u(dt, 16, "dt_ms"))
+        rows.append([_burst_code(r) for r in raw])
+    raw_payload = struct.pack(f">{N_CH * n}H", *[v for row in rows for v in row])
+    payload, enc = raw_payload, BURST_RAW
+    if encoding != BURST_RAW:
+        coded = rice.encode(rice.channel_major(rows))
+        if len(coded) < len(raw_payload):
+            payload, enc = coded, BURST_RICE
+        elif encoding == BURST_RICE:
+            raise ValueError(f"Rice stream {len(coded)} octets is not shorter than raw "
+                             f"{len(raw_payload)}: the flight sends raw")
+    return (_BURST_HDR.pack(_u(t0_ms, 32, "t0_ms"), _u(rate_dhz, 16, "rate_dhz"),
+                            _u(gain_code, 8, "gain_code"), _u(int_cycles, 8, "int_cycles"), n,
+                            enc)
+            + struct.pack(f">{n}H", *dts) + payload)
 
 
 # =============================================================================
@@ -1268,11 +1377,11 @@ def _channels(values: Mapping[str, Any], meta: Mapping[str, Any], warnings: list
     if rejected:
         warnings.append("out of range, ignored: " + ", ".join(rejected))
     raw = [_int(values.get(f"raw_{nm}nm"), 0, 0xFFFF) for nm in WAVELENGTHS_NM]
-    # 0xFFFF is both the "not converted" sentinel and a legitimate saturated count when the
-    # full scale is 65535 (N >= 63): the saturation mask disambiguates.
-    cyc = meta["int_cycles"]
-    if cyc is not None and full_scale(cyc) == 0xFFFF:
-        raw = [0xFFFF if r is None and meta["sat_mask"] >> i & 1 else r for i, r in enumerate(raw)]
+    # 0xFFFF is both the "not converted" sentinel and a saturated count: whenever a channel's
+    # saturation bit is set, 0xFFFF is the saturated count, whatever int_cycles says (the HDR
+    # int_cycles is the bracket centre, not the exposure the count came from; contract 26
+    # AS-DP-04).
+    raw = [0xFFFF if r is None and meta["sat_mask"] >> i & 1 else r for i, r in enumerate(raw)]
     return spec, unc, raw
 
 
@@ -1302,6 +1411,7 @@ def analyse(values: Mapping[str, Any], *, t: float | None = None,
         warnings.append("packet flag 'valid' is clear: spectrum not usable")
     cyc, gain, led = meta["int_cycles"], meta["gain_code"], meta["led_cur"]
     fs = full_scale(cyc) if cyc is not None else None
+    hdr = mode == MODE_HDR
     has_spec = valid and mode != MODE_BURST and any(v is not None for v in spec)
     out: dict[str, Any] = {
         "available": True, "t": _num(t), "label": APPROX_LABEL, "valid": valid,
@@ -1315,12 +1425,14 @@ def analyse(values: Mapping[str, Any], *, t: float | None = None,
                      "full_scale": fs, "n_frames": meta["n_frames"],
                      "led_ma": None if led is None else {
                          "white": LED_DRV_MA[led & 3], "IR": LED_DRV_MA[led >> 2 & 3],
-                         "UV": LED_DRV_MA[led >> 4 & 3]}},
+                         "UV": LED_DRV_MA[led >> 4 & 3]},
+                     "note": HDR_EXPOSURE_NOTE if hdr else None},
         "wavelength_nm": list(WAVELENGTHS_NM),
         "spectrum": spec, "uncertainty": unc,
         "snr": [None if v is None or s is None or not s > 0.0 else v / s
                 for v, s in zip(spec, unc, strict=True)],
-        "raw": raw, "raw_fraction": [None if r is None or not fs else r / fs for r in raw],
+        "raw": raw,
+        "raw_fraction": [None if r is None or not fs or hdr else r / fs for r in raw],
         "saturated": sat, "normalized": _normalised(spec),
         "temperature_c": meta["temps"],
         "boresight": (None if meta["zen"] is None else
@@ -1732,6 +1844,9 @@ class SpectralState:
         self.drift = TemperatureDrift()
         self._agree: bool | None = None
         self.counters = {"spec": 0, "duplicates": 0, "burst_packets": 0, "bursts": 0}
+        # SPECBURST payload statistics (contract 28): raw octets = 36 n per packet.
+        self.compression: dict[str, Any] = {"packets_raw": 0, "packets_rice": 0, "octets_raw": 0,
+                                            "octets_sent": 0, "ratio_mean": None, "last_ratio": None}
         self.white_ref: WhiteReference | None = None
         if self.ref_path is not None and self.ref_path.exists():
             try:
@@ -1765,7 +1880,7 @@ class SpectralState:
         return out
 
     def on_evr(self, event_id: int, severity: str, text: str, t: float | None) -> None:
-        """Copies onboard spectrometer EVRs (0x0701..0x0705) into the spectral event log
+        """Copies onboard spectrometer EVRs (0x0701..0x0707) into the spectral event log
         (the GDS logs EVRs itself, so nothing is queued for drain_events)."""
         if isinstance(event_id, int) and event_id in EVR_SPECTRAL_IDS:
             self.events.append({"t": _num(t), "level": str(severity), "source": "S/C",
@@ -1821,9 +1936,23 @@ class SpectralState:
             self.drift.add(a["temperature_c"], a["spectrum"], a["saturated"])
         return a
 
+    def _count_payload(self, values: Mapping[str, Any]) -> None:
+        enc = _int(values.get("encoding"), 0, 1)
+        n = _int(values.get("n"), 1, BURST_PER_PACKET_MAX)
+        plen = _int(values.get("payload_len"), 1, BURST_RAW_PER_SAMPLE * BURST_PER_PACKET_MAX)
+        if enc is None or n is None or plen is None:
+            return
+        c = self.compression
+        c["packets_rice" if enc == BURST_RICE else "packets_raw"] += 1
+        c["octets_raw"] += BURST_RAW_PER_SAMPLE * n
+        c["octets_sent"] += plen
+        c["last_ratio"] = BURST_RAW_PER_SAMPLE * n / plen
+        c["ratio_mean"] = c["octets_raw"] / c["octets_sent"]
+
     def on_specburst(self, values: Mapping[str, Any], t: float) -> None:
         """Adds one decoded SPECBURST packet (t = ERT or SCET, UNIX s); a new t0_ms closes
-        the previous burst."""
+        the previous burst. Payload statistics: compression.ratio_mean = all raw octets /
+        all payload octets sent (raw packets count 1:1), last_ratio = 36 n / payload_len."""
         t0 = _int(values.get("t0_ms"), 0, 0xFFFFFFFF)
         gain = _int(values.get("gain_code"), 0, 3)
         cyc = _int(values.get("int_cycles"), 0, 255)
@@ -1833,6 +1962,7 @@ class SpectralState:
             return
         t = tv
         self.counters["burst_packets"] += 1
+        self._count_payload(values)
         if self.burst is not None and self.burst.t0_ms != t0:
             self._close_burst(t)
         if self.burst is None:
@@ -2001,6 +2131,8 @@ class SpectralState:
             burst["previous"] = list(self.burst_done)
         elif self.burst_done:
             burst = {"active": False, "previous": list(self.burst_done)}
+        if burst is not None:
+            burst["compression"] = dict(self.compression)
         return {"spectral": spectral, "spectral_history": history, "spectral_burst": burst,
                 "spectral_skymap": self.skymap.snapshot(),
                 "spectral_library": self.library.snapshot()}

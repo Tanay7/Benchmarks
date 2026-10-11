@@ -65,7 +65,8 @@ bool NiclaAru::read_env(AruReading& r) {
   uint8_t b[kPageLen];
   if (!page(1, 0xA8, b)) return false;
   r.env_flags = b[2];
-  r.p_hpa = be_u32(b + 3) / 100.0f;
+  r.p_pa = be_u32(b + 3);
+  r.p_hpa = (float)r.p_pa / 100.0f;
   r.t_c = be_i16(b + 7) / 100.0f;
   r.rh = be_u16(b + 9) / 100.0f;
   r.iaq = be_u16(b + 11);

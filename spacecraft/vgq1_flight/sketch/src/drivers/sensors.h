@@ -9,8 +9,10 @@
 //
 //  Two-phase single-shot measurement: start() writes POLL and returns at once;
 //  collect() reads the result when DRDY is set. The flight loop starts every
-//  magnetometer, reads the Nicla while they convert, then collects - so the
-//  conversion time (~ 6.8 ms for X, Y, Z at CC = 200) is overlapped, not waited.
+//  magnetometer, reads the Nicla while they convert, then polls DRDY with
+//  poll_drdy() once per loop pass and collects with timeout 0 - so the conversion
+//  time (~ 6.8 ms for X, Y, Z at CC = 200) is overlapped and never spun on
+//  (the loop's 20 ms rule; the executive bounds the wait with kMagCollectTimeoutMs).
 //
 //  Built-in self-test (manual 5.6.1, contract 24.5): run_bist() checks the three
 //  LR sensor oscillators. With STE set, the next POLL write runs the self-test
@@ -31,8 +33,14 @@ class Rm3100 {
   bool begin(I2cBus& bus, uint8_t addr, uint16_t cycle_count = 200);
   bool set_cycle_count(uint16_t cc);
   bool start();                                              // POLL X, Y, Z
-  // Waits at most `timeout_ms` for DRDY, then reads the field in uT.
+  // One STATUS read while a measurement is pending: 1 DRDY set (collect() now), 0 not
+  // yet (or nothing pending), -1 bus error. Never clears the pending measurement.
+  int8_t poll_drdy();
+  // Waits at most `timeout_ms` for DRDY (0 = a single STATUS read, no wait), then reads
+  // the field in uT. Always ends the pending measurement: false = not ready in time,
+  // nothing pending or a bus error (a later start() begins a new one).
   bool collect(float& bx_uT, float& by_uT, float& bz_uT, uint32_t timeout_ms = 30);
+  bool pending() const { return pending_; }
   // Self-test, synchronous and bounded: 5 register transactions plus at most
   // kRm3100BistMaxPolls STATUS reads within kRm3100BistTimeoutUs (about 2 ms of
   // I2C at 100 kHz in the normal case). NOT_RUN when the unit is not fitted, BUSY

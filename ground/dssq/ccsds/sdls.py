@@ -19,6 +19,25 @@ been accepted. The SN is persisted so it keeps increasing across restarts; AUTH
 and AE share it. TM: (epoch, sn) must increase lexicographically; epoch = the
 spacecraft's SCLK partition, sn = its frame counter within the epoch.
 
+Crash safety (Phase B PB-7 F-64). An AE sequence number is a GCM nonce, so it must never
+be used twice with one key:
+  * the TC SN file is written atomically (temporary file, flush, fsync, rename) BEFORE the
+    frame that uses the number leaves; a write that fails stops the frame;
+  * the GDS and the hardline tool (dssq.cltu) share the file: every use re-reads it and
+    continues from the larger number;
+  * a missing SN file means first use (0); an empty or unparsable one BLOCKS the TC uplink
+    ("SDLS SN file corrupt") until a real-time HK that arrived in an AE-protected frame
+    reports the spacecraft's sdls_last_sn: then sn = max(sn, sdls_last_sn) and the uplink is
+    released; every later protected HK raises sn the same way (self-healing after a lost
+    file). An HK from an unprotected frame never moves the SN (an injected HK could push it
+    to the 2^32 wrap);
+  * the TM anti-replay state (epoch, sn) is persisted atomically after every accepted
+    protected frame and restored at start (a corrupt file restarts at (0, 0) with a
+    warning), so old genuine frames replayed after a GDS restart are still refused;
+  * a REPLAY verdict whose epoch is LOWER than the last accepted one (the MAC was valid)
+    is counted as epoch_regressed: a replayed recording or an EGSE boot-counter
+    regression, i.e. possible TM nonce reuse - the GDS raises a RED alarm.
+
 AES-256-GCM is dssq.ccsds.aes_gcm (pure Python, standard library only, validated
 against FIPS-197, the GCM specification's AES-256 test cases and the flight C++
 vectors), so the station needs no third-party package (contract section 23 rule 2).
@@ -29,8 +48,11 @@ AUTH or NONE there (docs/09_Regulatory_and_Safety.md).
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +75,40 @@ LABEL_TM_AE = b"VGQ1-SDLS-TM-AE"
 
 # Flight SdlsTm.state() values (HK sdls_tm_state)
 TM_STATE_NAMES = {0: "OFF", 1: "PROTECTED", 2: "WAITING FOR EPOCH", 3: "UNPROTECTED (null SA)"}
+
+U32_MAX = 0xFFFFFFFF
+_SN_RE = re.compile(r"[0-9]{1,10}")                    # ASCII decimal only
+_REPLAY_RE = re.compile(r"([0-9]{1,5}) ([0-9]{1,10})")
+
+
+def atomic_write_text(path: str | Path, text: str) -> None:
+    """Replaces `path` with `text` so that a crash or power loss leaves either the old
+    or the new content, never a partial file: write a temporary file in the same
+    directory, flush, fsync, rename over the target, then fsync the directory (the
+    rename itself must reach the disk). Mode 0600 (security state). Raises OSError."""
+    p = Path(path)
+    tmp = p.with_name(p.name + ".tmp")
+    data = text.encode("ascii")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        try:
+            view = memoryview(data)
+            while view:                                # bounded: each pass writes >= 1 octet
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, p)
+    except OSError:
+        with contextlib.suppress(OSError):             # the target keeps its old content
+            os.unlink(tmp)
+        raise
+    with contextlib.suppress(OSError):                 # not every filesystem allows a directory fsync
+        dfd = os.open(p.parent if str(p.parent) else ".", os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
 
 def parse_service(value: int | str | None) -> int:
@@ -106,7 +162,9 @@ class SdlsSender:
 
     `spi` is the AUTH SA's SPI ([sdls] spi, default 1); AE always uses SPI 2.
     `self.spi` is the SPI that goes on the wire. `key` is the master key (may be
-    reassigned later; the AE key is re-derived)."""
+    reassigned later; the AE key is re-derived). `sn` is the LAST sequence number used;
+    the next frame uses sn + 1. With `sn_file` the number is persisted atomically before
+    every use, and a corrupt file blocks the sender (module docstring, F-64)."""
 
     def __init__(self, key: bytes | None, spi: int = SPI_AUTH, sn_file: str | Path | None = None,
                  service: int | str = SERVICE_AUTH):
@@ -114,8 +172,8 @@ class SdlsSender:
         self.spi = SPI_TC_AE if self.service == SERVICE_AE else spi
         self.sn_file = Path(sn_file) if sn_file else None
         self.sn = 0
-        if self.sn_file and self.sn_file.exists():
-            self.sn = int(self.sn_file.read_text().strip() or 0)
+        self.blocked: str | None = None            # reason the TC uplink is blocked, None = OK
+        self._resync()
         self.key = key
 
     @property
@@ -143,11 +201,72 @@ class SdlsSender:
             return 0
         return SDLS_HDR_LEN + SDLS_MAC_LEN if self.service == SERVICE_AUTH else AE_OVERHEAD
 
+    @property
+    def uplink_blocked(self) -> bool:
+        """True while this sender may not protect a frame (SDLS in use and the SN unknown)."""
+        return self.enabled and self.blocked is not None
+
+    @property
+    def sn_state(self) -> str:
+        """"OK" or "BLOCKED: <reason>" (snapshot link.sdls.tc_sn_state)."""
+        return "OK" if self.blocked is None else f"BLOCKED: {self.blocked}"
+
+    def _persist(self, value: int) -> None:
+        if self.sn_file is not None:
+            atomic_write_text(self.sn_file, str(value))
+
+    def _resync(self) -> None:
+        """Continues from the persisted number when another writer of the same file (the
+        hardline tool dssq.cltu) has advanced it; a file that became corrupt blocks."""
+        if self.sn_file is None or not self.sn_file.exists():
+            return
+        try:
+            text = self.sn_file.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError) as e:
+            text = f"<unreadable: {e}>"
+        if _SN_RE.fullmatch(text) and int(text) <= U32_MAX:
+            self.sn = max(self.sn, int(text))
+        else:
+            self.blocked = (f"SDLS SN file corrupt ({self.sn_file}: {text[:40]!r}): TC uplink blocked until "
+                            "an SDLS-protected HK reports the spacecraft's sdls_last_sn")
+
     def next_sn(self) -> int:
-        self.sn = (self.sn + 1) & 0xFFFFFFFF
-        if self.sn_file:
-            self.sn_file.write_text(str(self.sn))
-        return self.sn
+        """Consumes the next sequence number. It is on disk before it is returned, so a
+        crash can never make the station use it twice; the file is re-read first, so a
+        number taken by the hardline tool (dssq.cltu, same file) is never used again.
+        Raises RuntimeError while blocked or at the 32-bit limit (a new key is then
+        required: the number may not wrap), OSError when it cannot be persisted (the
+        frame must not be sent)."""
+        if self.blocked is None:
+            self._resync()
+        if self.blocked is not None:
+            raise RuntimeError(self.blocked)
+        if self.sn >= U32_MAX:
+            raise RuntimeError("SDLS TC sequence number space exhausted: generate a new key "
+                               "(tools/gen_sdls_key.py)")
+        nxt = self.sn + 1
+        self._persist(nxt)
+        self.sn = nxt
+        return nxt
+
+    def observe_spacecraft_sn(self, last_sn: int, protected: bool) -> str | None:
+        """HK sdls_last_sn (the last TC SN the spacecraft accepted). Only an HK that came in
+        an SDLS-protected frame counts: then sn = max(sn, last_sn), which releases a block.
+        Returns an event text when something changed, else None. OSError if the new value
+        cannot be persisted (the block, if any, stays)."""
+        if not protected or isinstance(last_sn, bool) or not isinstance(last_sn, int) \
+                or not 0 <= last_sn <= U32_MAX:
+            return None
+        if self.blocked is None and last_sn <= self.sn:
+            return None
+        new = max(self.sn, last_sn)
+        self._persist(new)
+        old, was_blocked = self.sn, self.blocked is not None
+        self.sn, self.blocked = new, None
+        if was_blocked:
+            return (f"SDLS TC sequence number restored to {new} from a protected HK (sdls_last_sn {last_sn}): "
+                    "TC uplink released")
+        return f"SDLS TC sequence number raised {old} -> {new} from a protected HK (sdls_last_sn {last_sn})"
 
     def protect(self, hdr: bytes, data: bytes) -> bytes:
         """Security header || (data | ciphertext) || trailer for a frame whose primary
@@ -298,9 +417,13 @@ class TmSecResult:
 class SdlsTmReceiver:
     """TM ProcessSecurity: AE decrypt + tag check + (epoch, sn) anti-replay; null-SA
     frames are accepted (if `accept_null`) and flagged UNPROTECTED. A frame that
-    fails is dropped by the caller (never decoded) and never moves the replay state."""
+    fails is dropped by the caller (never decoded) and never moves the replay state.
+    With `state_file` the replay state survives a restart (module docstring, F-64):
+    `load_warning` tells why a stored state was discarded, `persist_error` why the last
+    write failed (the state in memory stays valid)."""
 
-    def __init__(self, key: bytes | None, service: int | str = SERVICE_AE, accept_null: bool = True):
+    def __init__(self, key: bytes | None, service: int | str = SERVICE_AE, accept_null: bool = True,
+                 state_file: str | Path | None = None):
         self.ae = bool(key) and parse_service(service) == SERVICE_AE
         self._k = derive_key(key, LABEL_TM_AE) if self.ae and key else None
         self._gcm = AesGcm(self._k) if self._k else None
@@ -310,6 +433,21 @@ class SdlsTmReceiver:
         self.auth_fail = 0
         self.replay = 0
         self.unprotected = 0
+        self.epoch_regressed = 0                  # REPLAY with a lower epoch and a valid MAC
+        self.state_file = Path(state_file) if state_file else None
+        self.load_warning: str | None = None
+        self.persist_error: str | None = None
+        if self.state_file is not None and self.state_file.exists():
+            try:
+                text = self.state_file.read_text(encoding="ascii").strip()
+            except (OSError, UnicodeDecodeError) as e:
+                text = f"<unreadable: {e}>"
+            m = _REPLAY_RE.fullmatch(text)
+            if m and int(m.group(1)) <= 0xFFFF and int(m.group(2)) <= U32_MAX:
+                self.last = (int(m.group(1)), int(m.group(2)))
+            else:
+                self.load_warning = (f"SDLS TM replay state file {self.state_file} corrupt ({text[:40]!r}): "
+                                     "replay window restarted at (0, 0)")
 
     @property
     def service(self) -> int:
@@ -319,14 +457,27 @@ class SdlsTmReceiver:
     def overhead(self) -> int:
         return AE_OVERHEAD if self.ae else 0
 
+    def _persist(self) -> None:
+        if self.state_file is None:
+            return
+        try:
+            atomic_write_text(self.state_file, f"{self.last[0]} {self.last[1]}")
+            self.persist_error = None
+        except OSError as e:
+            self.persist_error = f"SDLS TM replay state not saved to {self.state_file}: {e}"
+
     def reset_replay(self) -> None:
         """Forget the last (epoch, sn) - operator action, e.g. after the EGSE boot
-        counter was lost and the spacecraft restarted at a lower epoch."""
+        counter was lost and the spacecraft restarted at a lower epoch. Persisted."""
         self.last = (0, 0)
+        self._persist()
 
     def _fail(self, verdict: str, **kw) -> TmSecResult:
         if verdict == "REPLAY":
             self.replay += 1
+            epoch = kw.get("epoch")
+            if isinstance(epoch, int) and epoch < self.last[0]:
+                self.epoch_regressed += 1
         else:
             self.auth_fail += 1
         return TmSecResult(verdict, None, **kw)
@@ -382,6 +533,7 @@ class SdlsTmReceiver:
             return self._fail("REPLAY", spi=spi, epoch=epoch, sn=sn)
         self.last = (epoch, sn)
         self.frames_ok += 1
+        self._persist()
         return TmSecResult("OK", plain, spi=spi, epoch=epoch, sn=sn)
 
 
@@ -401,12 +553,18 @@ def link_snapshot(tc: SdlsSender | None, tm: SdlsTmReceiver | None) -> dict:
 
 
 def load_key(path: str | Path | None) -> bytes | None:
+    """The 256-bit master key from a hex file; None when no path is given or the file does
+    not exist. ValueError for a file that is not exactly 64 hex digits."""
     if not path:
         return None
     p = Path(path)
     if not p.exists():
         return None
-    key = bytes.fromhex(p.read_text().strip())
+    text = p.read_text(encoding="ascii", errors="replace").strip()
+    try:
+        key = bytes.fromhex(text)
+    except ValueError:
+        raise ValueError(f"{p}: not a hexadecimal key") from None
     if len(key) != 32:
         raise ValueError(f"{p}: expected a 256-bit (64 hex digit) key")
     return key

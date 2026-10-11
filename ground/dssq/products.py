@@ -77,12 +77,12 @@ import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from . import dictionary as dd
-from .cmdparse import APID_TC
+from . import spectral
 from .link import C_M_S
 
 # =============================================================================
@@ -534,7 +534,7 @@ def format_epoch(t_utc: float) -> str:
     """UNIX seconds -> 'YYYY-MM-DDThh:mm:ss.fff' (UTC, millisecond resolution, 4.3.9).
     Rounded through integer milliseconds so 59.9996 s never prints as '60.000'."""
     ms = round(_finite(t_utc, "t_utc", 0.0, 253402300799.0) * 1000.0)
-    dt = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
+    dt = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=ms)
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}"
 
 
@@ -617,7 +617,7 @@ def build_tdm(records: Iterable[TdmRecord], *, station: str, spacecraft: str = "
             groups.append([])
         groups[-1].append((ep, r))
 
-    created = format_epoch(creation_utc if creation_utc is not None else datetime.now(timezone.utc).timestamp())
+    created = format_epoch(creation_utc if creation_utc is not None else datetime.now(UTC).timestamp())
     out = [f"CCSDS_TDM_VERS = {TDM_VERSION}",
            "COMMENT One-way downlink tracking data from the DSS-Q ground data system",
            "COMMENT UHF = 300 MHz to 3 GHz (ITU-R V.431 band 9); timetags = UTC at the end of reception at the "
@@ -694,7 +694,7 @@ def tdm_filename(spacecraft: str, station: str, first_utc: float) -> str:
     letters, digits and '-', UTC of the first record as YYYYMMDDThhmmssZ."""
     sc = re.sub(r"[^A-Za-z0-9]", "", spacecraft) or "SC"
     st = re.sub(r"[^A-Za-z0-9-]", "", station) or "STATION"
-    stamp = datetime.fromtimestamp(_finite(first_utc, "first_utc", 0.0, 4102444800.0), timezone.utc)
+    stamp = datetime.fromtimestamp(_finite(first_utc, "first_utc", 0.0, 4102444800.0), UTC)
     return f"{sc}_{st}_{stamp.strftime('%Y%m%dT%H%M%SZ')}.kvn"
 
 
@@ -776,7 +776,7 @@ def records_from_csv(text: str) -> list[TdmRecord]:
             t_txt = (row["t_utc"] or "").strip()
             if re.match(r"\d{4}-", t_txt):
                 dt = datetime.fromisoformat(t_txt.replace("Z", "+00:00"))
-                t = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+                t = (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
             else:
                 t = float(t_txt)
             out.append(TdmRecord(t, opt(row, "rx_power_dbm"), opt(row, "snr_db"), opt(row, "freq_offset_hz"),
@@ -795,17 +795,26 @@ SPACE_SYSTEM = "VGQ-1"
 TM_BASE = "CCSDS_TM_Packet"
 TC_BASE = "VGQ1_TC"
 _NAME_RE = re.compile(r"[^./:\[\] ]+$")          # SpaceSystem.xsd NameType
-EVR_TEXT_MAX = 80                    # flight tlm_packets.h pack_evr(): text <= 80 characters
-RFSCAN_MAX_CHANNELS = 84             # flight tlm_packets.h pack_rfscan(): up to 84 channels
+APID_TC = dd.APID_TC
+EVR_TEXT_MAX = dd.EVR_TEXT_MAX                  # flight pack_evr(): text <= 80 characters
+RFSCAN_MAX_CHANNELS = dd.RFSCAN_MAX_CHANNELS    # flight pack_rfscan(): up to 84 channels
 # Struct code -> (bits, signed, is_float); big-endian everywhere (dictionary.py).
 _CODES: dict[str, tuple[int, bool, bool]] = {
     "B": (8, False, False), "b": (8, True, False), "H": (16, False, False), "h": (16, True, False),
     "I": (32, False, False), "i": (32, True, False), "Q": (64, False, False), "q": (64, True, False),
     "f": (32, True, True), "d": (64, True, True)}
-# Enumerated telemetry fields (packet name, field) -> labels, from dictionary.py's tables.
+# Enumerated telemetry fields (packet name, field) -> labels, from dictionary.py's tables. A
+# field that also has GDS limits stays an integer type (alarm ranges) and lists the labels in
+# its LongDescription instead.
 _TM_ENUMS: dict[tuple[str, str], Mapping[int, str]] = {
     ("HK", "fsw_mode"): dd.MODES, ("HK", "reset_cause"): dd.RESET_CAUSES, ("HK", "farm_state"): dd.FARM_STATES,
-    ("CMDVER", "stage"): dd.CMD_STAGES, ("CMDVER", "error_code"): dd.CMD_ERRORS}
+    ("HK", "cmd_last_status"): dd.CMD_ERRORS, ("HK", "radio_fault"): dd.RADIO_FAULTS,
+    ("HK", "sdls_tc_service"): dd.SDLS_SERVICES, ("HK", "sdls_tm_service"): dd.SDLS_SERVICES,
+    ("HK", "sdls_tm_state"): dd.SDLS_TM_STATES, ("HK", "cfdp_state"): dd.CFDP_STATES,
+    ("HK", "seq_state"): dd.SEQ_STATES, ("HK", "beacon_level"): dd.BEACON_LEVELS,
+    ("RF", "radio_model"): dd.RADIO_MODELS, ("RF", "framing"): dd.FRAMINGS,
+    ("CMDVER", "stage"): dd.CMD_STAGES, ("CMDVER", "error_code"): dd.CMD_ERRORS,
+    ("SPEC", "spec_mode"): spectral.MODE_NAMES, ("SPEC", "spec_class"): spectral.CLASS_NAMES}
 
 
 def _q(tag: str) -> str:
@@ -871,24 +880,29 @@ def _alarm(e: ET.Element, limits: Sequence[float | None] | None) -> None:
             maxExclusive=None if hi is None else repr(float(hi)))
 
 
-def _na_note(code: str) -> list[str]:
-    na = dd.NA.get(code)
+def _na_note(apid: int, fld: Sequence[object]) -> list[str]:
+    """The not-available sentinel of one field (dictionary.field_na: saturating counters,
+    bit masks and time fields have none, every raw value is a reading)."""
+    code = str(fld[1])
+    na = dd.field_na(apid, tuple(fld))
     if na is None:
-        return []
+        return [] if code not in dd.NA else ["Every raw value is a reading (no not-available sentinel)."]
     bits, signed, _ = _CODES[code]
     raw = na & ((1 << bits) - 1) if signed else na
     return [f"Raw value {na} (0x{raw:0{bits // 4}X}) = not available."]
 
 
-def _tm_param_type(pts: ET.Element, packet: str, fld: Sequence[object]) -> str:
+def _tm_param_type(pts: ET.Element, packet: str, fld: Sequence[object], apid: int = -1) -> str:
     name, code, scale, unit, desc, limits = (fld[0], fld[1], fld[2], fld[3], fld[4], fld[5])
     transform = fld[6] if len(fld) > 6 else None
     if not isinstance(name, str) or not isinstance(code, str) or code not in _CODES:
         raise ValueError(f"{packet}: unsupported field {fld!r}")
     bits, signed, is_float = _CODES[code]
     tname = _name(f"{name}_Type")
-    notes = _na_note(code)
+    notes = _na_note(apid, fld)
     enum = _TM_ENUMS.get((packet, name))
+    if enum is not None and not (not is_float and scale is None and limits is None):
+        notes.append("Values: " + ", ".join(f"{k} = {v}" for k, v in sorted(enum.items())) + ".")
     if callable(transform):
         notes.append(f"Raw code; engineering value = {getattr(transform, '__name__', 'custom decoder')}(raw) "
                      "in the DSS-Q GDS (not expressible as a polynomial).")
@@ -974,7 +988,7 @@ def _tm_packet_system(root: ET.Element, apid: int, spec: Mapping[str, object]) -
     for fld in fields:
         if not isinstance(fld, tuple) or len(fld) < 6:
             raise ValueError(f"{pname}: field tuple {fld!r} must have >= 6 elements")
-        tname = _tm_param_type(pts, pname, fld)
+        tname = _tm_param_type(pts, pname, fld, apid)
         names.append(_name(str(fld[0])))
         _el(ps, "Parameter", name=names[-1], parameterTypeRef=tname)
     if len(set(names)) != len(names):
@@ -1053,6 +1067,112 @@ def _rfscan_system(root: ET.Element) -> None:
                        ("ParameterRefEntry", "duration_ms"), ("ArrayParameterRefEntry", "noise")])
 
 
+def _int_type(pts: ET.Element, name: str, bits: int, signed: bool, unit: str, desc: str,
+              scale: float | None = None) -> None:
+    """One integer-encoded parameter type (raw integer, or a 64-bit float with a polynomial)."""
+    if scale is None:
+        t = _el(pts, "IntegerParameterType", name=f"{name}_Type", signed=str(signed).lower(),
+                sizeInBits=str(bits), shortDescription=desc)
+        _unitset(t, unit)
+        _int_encoding(t, bits, signed)
+    else:
+        t = _el(pts, "FloatParameterType", name=f"{name}_Type", sizeInBits="64", shortDescription=desc)
+        _unitset(t, unit)
+        _int_encoding(t, bits, signed, scale)
+
+
+def _enum_type(pts: ET.Element, name: str, desc: str, labels: Mapping[int, str]) -> None:
+    t = _el(pts, "EnumeratedParameterType", name=f"{name}_Type", shortDescription=desc)
+    _int_encoding(t, 8, False)
+    el = _el(t, "EnumerationList")
+    for value, label in sorted(labels.items()):
+        _el(el, "Enumeration", value=str(value), label=label)
+
+
+def _blob_type(pts: ET.Element, name: str, desc: str, notes: Sequence[str], intercept_bits: int) -> None:
+    """Binary parameter running to the end of the packet: size in bits = 8 x ccsds_packet_length
+    + intercept_bits (the packet data field holds ccsds_packet_length + 1 octets)."""
+    t = _el(pts, "BinaryParameterType", name=f"{name}_Type")
+    _describe(t, desc, notes)
+    enc = _el(t, "BinaryDataEncoding")
+    dv = _el(_el(enc, "SizeInBits"), "DynamicValue")
+    _el(dv, "ParameterInstanceRef", parameterRef=f"/{SPACE_SYSTEM}/ccsds_packet_length")
+    _el(dv, "LinearAdjustment", slope="8", intercept=str(intercept_bits))
+
+
+# User-data offset of the first octet after the CUC secondary header, in bits relative to
+# 8 x ccsds_packet_length: data field = L + 1 octets = 6 (CUC) + user data.
+_USER_BITS_INTERCEPT = 8 * (1 - 6)
+
+
+def _specburst_system(root: ET.Element) -> None:
+    """SPECBURST (APID 0x024, PB-1.12 = contract 28): t0_ms u32 | rate_dhz u16 | gain_code u8
+    | int_cycles u8 | n u8 | encoding u8 | dt_ms u16[n] | payload. The payload length depends
+    on n and on the packet length, so the abstract container SPECBURST is specialised per
+    sample count (SPECBURST_N1..N3, restriction on n) with a binary payload of exactly the
+    remaining octets: 8 L - 40 - 80 - 16 n bits."""
+    ss = _el(root, "SpaceSystem", name="SPECBURST")
+    _describe(ss, f"AS7265X burst samples (APID 0x{dd.APID_SPECBURST:03X}, variable length)")
+    tm = _el(ss, "TelemetryMetaData")
+    pts, ps = _el(tm, "ParameterTypeSet"), _el(tm, "ParameterSet")
+    _int_type(pts, "t0_ms", 32, False, "ms", "millis() of the first sample (SCLK ms since MCU boot, mod 2^32)")
+    _int_type(pts, "rate_hz", 16, False, "Hz", "Achieved sample rate (sent in 0.1 Hz)", 0.1)
+    _enum_type(pts, "gain_code", "AS7265X gain", {i: f"{g:g}x" for i, g in enumerate(spectral.GAIN_X)})
+    _int_type(pts, "int_cycles", 8, False, "", "Burst integration N: (N + 1) x 2.78 ms")
+    _int_type(pts, "n", 8, False, "", f"Samples in this packet, 1..{spectral.BURST_PER_PACKET_MAX}")
+    _enum_type(pts, "encoding", "Payload encoding", {0: "RAW", 1: "CCSDS_121_0_B_3"})
+    _int_type(pts, "dt_ms_item", 16, False, "ms", "DATA_RDY detection of one sample, ms after t0_ms")
+    arr = _el(pts, "ArrayParameterType", name="dt_ms_Type", arrayTypeRef="dt_ms_item_Type",
+              shortDescription="Sample time offsets, one per sample")
+    dim = _el(_el(arr, "DimensionList"), "Dimension")
+    _el(_el(dim, "StartingIndex"), "FixedValue", "0")
+    dv = _el(_el(dim, "EndingIndex"), "DynamicValue")
+    _el(dv, "ParameterInstanceRef", parameterRef="n")
+    _el(dv, "LinearAdjustment", slope="1", intercept="-1")
+    payload_note = (
+        "Payload per encoding. RAW (0): n x 18 u16 counts big-endian, time-major (sample 0 channels "
+        "410..940 nm, then sample 1 ...). CCSDS_121_0_B_3 (1): CCSDS 121.0-B-3 lossless (n = 16 bit, "
+        "J = 16, r = 128, Basic, preprocessor with unit-delay predictor) of the channel-major sequence "
+        "cm[ch x n + t] = sample t channel ch, zero-filled to an octet, strictly shorter than raw. "
+        "Count 0xFFFF = channel not converted; 0xFFFE = count >= 65534 (saturated).")
+    for k in range(1, spectral.BURST_PER_PACKET_MAX + 1):
+        _blob_type(pts, f"payload_n{k}", f"Burst payload, {k} sample(s)", [payload_note],
+                   _USER_BITS_INTERCEPT - 8 * spectral.BURST_HDR_LEN - 16 * k)
+    for n in ("t0_ms", "rate_hz", "gain_code", "int_cycles", "n", "encoding", "dt_ms",
+              *[f"payload_n{k}" for k in range(1, spectral.BURST_PER_PACKET_MAX + 1)]):
+        _el(ps, "Parameter", name=n, parameterTypeRef=f"{n}_Type")
+    cs = _el(tm, "ContainerSet")
+    c = _el(cs, "SequenceContainer", name="SPECBURST", abstract="true",
+            shortDescription="SPECBURST header and sample times (payload in SPECBURST_N1..N3)")
+    el = _el(c, "EntryList")
+    for n in ("t0_ms", "rate_hz", "gain_code", "int_cycles", "n", "encoding"):
+        _el(el, "ParameterRefEntry", parameterRef=n)
+    _el(el, "ArrayParameterRefEntry", parameterRef="dt_ms")
+    base = _el(c, "BaseContainer", containerRef=f"/{SPACE_SYSTEM}/{TM_BASE}")
+    _el(_el(base, "RestrictionCriteria"), "Comparison", parameterRef=f"/{SPACE_SYSTEM}/ccsds_apid",
+        value=str(dd.APID_SPECBURST))
+    for k in range(1, spectral.BURST_PER_PACKET_MAX + 1):
+        ck = _el(cs, "SequenceContainer", name=f"SPECBURST_N{k}", shortDescription=f"SPECBURST with {k} sample(s)")
+        _el(_el(ck, "EntryList"), "ParameterRefEntry", parameterRef=f"payload_n{k}")
+        b = _el(ck, "BaseContainer", containerRef="SPECBURST")
+        _el(_el(b, "RestrictionCriteria"), "Comparison", parameterRef="n", value=str(k))
+
+
+def _cfdp_system(root: ET.Element) -> None:
+    """CFDP (APID 0x030, VC3): the user data is exactly one CCSDS 727.0-B-5 class-1 PDU."""
+    ss = _el(root, "SpaceSystem", name="CFDP")
+    _describe(ss, f"CFDP file delivery (APID 0x{dd.APID_CFDP:03X}, VC3, variable length)")
+    tm = _el(ss, "TelemetryMetaData")
+    pts, ps = _el(tm, "ParameterTypeSet"), _el(tm, "ParameterSet")
+    _blob_type(pts, "pdu", "One CFDP PDU (opaque to the MCS)", [
+        f"Exactly one CCSDS 727.0-B-5 class-1 (unacknowledged) PDU of {dd.CFDP_PDU_MIN}..{dd.CFDP_PDU_MAX} "
+        "octets: fixed header (mission profile: 10 octets), then Metadata (0x07), File Data or EOF "
+        "(0x04, with the Entity-ID fault-location TLV when the condition code is not 0). Reassembled "
+        "into files by the CFDP receiver of the DSS-Q GDS; not recorded in the SSR."], _USER_BITS_INTERCEPT)
+    _el(ps, "Parameter", name="pdu", parameterTypeRef="pdu_Type")
+    _packet_container(tm, "CFDP", dd.APID_CFDP, [("ParameterRefEntry", "pdu")])
+
+
 def _arg_type(ats: ET.Element, tname: str, code: str, lo: int, hi: int, enum: Mapping[str, int] | None,
               desc: str) -> None:
     if code not in _CODES or _CODES[code][2]:
@@ -1114,7 +1234,10 @@ def _commands(root: ET.Element, commands: Mapping[str, dd.CommandDef]) -> None:
         seen_ops.add(c.opcode)
         nbytes = 0
         mc = _el(mcs, "MetaCommand", name=_name(mn))
-        _describe(mc, c.desc + (" [HAZARDOUS]" if c.hazardous else ""))
+        notes = [f"Rule (checked by the flight parser and the DSS-Q GDS): {c.check_doc}."] if c.check_doc else []
+        if c.builder_only:
+            notes.append("Built by the DSS-Q GDS from a sequence file (one per stored command), not typed.")
+        _describe(mc, c.desc + (" [HAZARDOUS]" if c.hazardous else ""), notes)
         bm = _el(mc, "BaseMetaCommand", metaCommandRef=TC_BASE)
         aal = _el(bm, "ArgumentAssignmentList")
         _el(aal, "ArgumentAssignment", argumentName="opcode", argumentValue=str(c.opcode))
@@ -1158,7 +1281,8 @@ def build_xtce(packets: Mapping[int, Mapping[str, object]] | None = None,
             "CCSDS Space Packets (CCSDS 133.0-B-2); every multi-octet field big-endian, most significant bit first.",
             "TM secondary header: CUC (CCSDS 301.0-B-4), implicit P-field 0x2E, 4 coarse + 2 fine octets, SCLK "
             "since the MCU boot of the partition reported in HK; SCET comes from ground time correlation.",
-            f"Not-available sentinels by struct code (raw value means 'no value'): {na}.",
+            f"Not-available sentinels by struct code (raw value means 'no value'): {na}; saturating "
+            "counters, bit masks and time fields have none (each parameter type says which).",
             f"TC packets: APID 0x{APID_TC:03X}, no secondary header, data field = opcode + arguments; the packet "
             "sequence count is assigned by the ground system; TC frames, COP-1 and SDLS are below this layer.",
             "Alarm ranges: WarningRange = YELLOW and CriticalRange = RED limits of the DSS-Q GDS; a value equal "
@@ -1170,6 +1294,8 @@ def build_xtce(packets: Mapping[int, Mapping[str, object]] | None = None,
         _tm_packet_system(root, apid, packets[apid])
     _evr_system(root)
     _rfscan_system(root)
+    _specburst_system(root)
+    _cfdp_system(root)
     return root
 
 

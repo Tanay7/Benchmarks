@@ -8,9 +8,12 @@ Syntax (case-insensitive, whitespace separated; numbers decimal or 0x-hex):
     SETVR <n>                 COP-1 control: set V(R) = n         (Type-BC)
     HELP [mnemonic]
 
-Every command is checked against the command dictionary (range, enum, arity)
-before it can be queued — the same "build / verify / send" discipline used in
-real mission operations. Hazardous commands additionally require confirmation.
+Every command is checked against the command dictionary (range, enum, arity and
+the command's cross-argument `check`, the rule the flight parse_user_data() applies
+identically) before it can be queued — the same "build / verify / send" discipline
+used in real mission operations. Hazardous commands additionally require
+confirmation. builder_only commands (SEQLOAD) are refused here: they are built from a
+sequence file (seqload_commands).
 
 Stored command sequences (contract 24.1 SEQLOAD 0x1D / 24.2), the ground half of
 the flight's CommandSequencer (spacecraft/.../src/fsw/autonomy.h). A sequence file
@@ -36,9 +39,14 @@ from dataclasses import dataclass
 
 from .ccsds.packets import build_packet
 from .ccsds.tc import bc_set_vr, bc_unlock
-from .dictionary import COMMANDS, DIRECTIVES, GROUND_DIRECTIVES, CommandDef
+from .dictionary import APID_TC, COMMANDS, DIRECTIVES, GROUND_DIRECTIVES, CommandDef
 
-APID_TC = 0x0C0
+__all__ = ["APID_TC", "ArgToken", "CommandError", "Encoder", "ParsedCommand", "SeqLoadArgs",
+           "SequenceEntry", "SequenceError", "check_user_data", "encode_dictionary", "help_text",
+           "pack_seqload", "parse", "parse_sequence", "seq_forbidden_opcodes", "seqload_commands",
+           "tc_packet", "unpack_seqload"]
+
+COMMAND_TEXT_MAX = 512          # characters of one typed command (MAGCAL, the longest, is ~70)
 
 
 class CommandError(ValueError):
@@ -57,10 +65,9 @@ class ParsedCommand:
 
 
 def _num(tok: str) -> int:
-    try:
-        return int(tok, 0)
-    except ValueError:
-        raise CommandError(f"'{tok}' is not a number") from None
+    """Decimal or 0x-hex integer (the sequence-file rule, _seq_int): int(tok, 0) would also
+    take '1_000', '0o17', '0b1' and non-ASCII digits, which no operator means."""
+    return _seq_int(tok)
 
 
 def help_text(mnemonic: str | None = None) -> list[str]:
@@ -69,12 +76,28 @@ def help_text(mnemonic: str | None = None) -> list[str]:
         if not c:
             return [f"unknown command {mnemonic}"]
         args = " ".join(f"<{a[0]}>" for a in c.args)
-        return [f"{c.mnemonic} {args}".strip(), c.desc + (" [HAZARDOUS]" if c.hazardous else "")]
-    return ["commands: " + " ".join(sorted(COMMANDS)),
-            "directives: UNLOCK SETVR <n>  prefix BD = bypass"]
+        out = [f"{c.mnemonic} {args}".strip(), c.desc + (" [HAZARDOUS]" if c.hazardous else "")]
+        for name, _code, lo, hi, enum in c.args:
+            labels = f" ({', '.join(f'{k}={v}' for k, v in enum.items())})" if enum else ""
+            out.append(f"  {name}: {lo}..{hi}{labels}")
+        if c.check_doc:
+            out.append(f"  rule: {c.check_doc}")
+        if c.builder_only:
+            out.append("  built from a sequence file (Sequences panel), not typed")
+        return out
+    return ["commands: " + " ".join(sorted(m for m, c in COMMANDS.items() if not c.builder_only)),
+            "directives: UNLOCK SETVR <n>  prefix BD = bypass",
+            "ground: " + " ".join(sorted(GROUND_DIRECTIVES))]
 
 
 def parse(text: str) -> ParsedCommand:
+    """One typed command -> ParsedCommand (CommandError with the reason otherwise)."""
+    if not isinstance(text, str):
+        raise CommandError("command text must be str")
+    if len(text) > COMMAND_TEXT_MAX:
+        raise CommandError(f"command longer than {COMMAND_TEXT_MAX} characters")
+    if not text.isascii():
+        raise CommandError("non-ASCII character in the command")
     toks = text.strip().split()
     if not toks:
         raise CommandError("empty command")
@@ -101,6 +124,9 @@ def parse(text: str) -> ParsedCommand:
     c = COMMANDS.get(mn)
     if c is None:
         raise CommandError(f"unknown command '{mn}' (try HELP)")
+    if c.builder_only:
+        raise CommandError(f"{mn} is built from a sequence file: web Sequences panel / "
+                           "cmdparse.seqload_commands")
     if len(toks) - 1 != len(c.args):
         raise CommandError(help_text(mn)[0])
     args, payload = _encode_args(c, toks[1:], _num)
@@ -110,19 +136,22 @@ def parse(text: str) -> ParsedCommand:
 
 def _encode_args(c: CommandDef, toks: Sequence[str],
                  num: Callable[[str], int]) -> tuple[dict[str, int], bytes]:
-    """Range-checks one token per dictionary argument; returns (values, opcode + args)."""
-    payload = bytes([c.opcode])
+    """Range-checks one token per dictionary argument, then applies the command's
+    cross-argument check (the flight parse_user_data() rule); returns (values, opcode +
+    args). Used by parse() and by the sequence encoder alike."""
+    payload = bytearray([c.opcode])
     args: dict[str, int] = {}
     for (name, code, lo, hi, enum), tok in zip(c.args, toks, strict=True):
-        if enum and tok.upper() in enum:
-            v = enum[tok.upper()]
-        else:
-            v = num(tok)
+        v = enum[tok.upper()] if enum and tok.upper() in enum else num(tok)
         if not lo <= v <= hi:
             raise CommandError(f"{name}={v} outside {lo}..{hi}")
         args[name] = v
         payload += struct.pack(">" + code, v)
-    return args, payload
+    if c.check is not None:
+        err = c.check(args)
+        if err:
+            raise CommandError(err)
+    return args, bytes(payload)
 
 
 def tc_packet(cmd: ParsedCommand, seq: int) -> bytes:
@@ -136,9 +165,11 @@ def tc_packet(cmd: ParsedCommand, seq: int) -> bytes:
 SEQ_SLOTS = 32                  # on-board table entries (autonomy.h kSeqSlots)
 SEQ_CMD_MAX = 12                # stored command: opcode + arguments, octets (kSeqCmdMax)
 SEQ_HORIZON_S = 604_800         # 7 days: relative limit; also the absolute look-ahead limit
-SEQLOAD_OPCODE = 0x1D
-SEQCTRL_OPCODE = 0x1E
-REBOOT_OPCODE = 0x0C            # commands.h OP_REBOOT
+SEQLOAD_OPCODE = COMMANDS["SEQLOAD"].opcode     # 0x1D (commands.h OP_SEQLOAD)
+SEQCTRL_OPCODE = COMMANDS["SEQCTRL"].opcode     # 0x1E
+REBOOT_OPCODE = COMMANDS["REBOOT"].opcode       # 0x0C
+MAGCAL_OPCODE = COMMANDS["MAGCAL"].opcode       # 0x20
+REBOOT_MAGIC = 0xB007
 SEQ_FLAG_RELATIVE = 0x01        # SEQLOAD flags b0
 SEQLOAD_ARG_LEN = 19            # u8 slot | u8 flags | u32 t_s | u8 len | u8 cmd[12]
 SEQ_TEXT_MAX = 65_536           # characters accepted from a sequence file
@@ -427,3 +458,82 @@ def seqload_commands(entries: Sequence[SequenceEntry], encoder: Encoder = encode
                   "cmd": block[7:7 + n].hex()},
             hazardous=False, user_data=bytes([SEQLOAD_OPCODE]) + block))
     return out
+
+
+# --------------------------------------------------------------------------------
+# The flight's verdict on a TC user-data field (PB-2.1 .. 2.3)
+# --------------------------------------------------------------------------------
+CE_OK, CE_UNKNOWN_OPCODE, CE_BAD_LENGTH, CE_BAD_ARGUMENT, CE_BAD_MAGIC = 0, 1, 2, 3, 6
+# Opcodes whose arguments the flight parse_user_data() checks only for length (19 octets);
+# the argument rules run when the command executes (CommandSequencer::load,
+# MagCalStore::load) and map to CE_BAD_LENGTH / CE_BAD_ARGUMENT (seq_cmd_error,
+# magcal_cmd_error). PB-2.3.
+LATE_VALIDATED_OPCODES = frozenset({SEQLOAD_OPCODE, MAGCAL_OPCODE})
+_BY_OPCODE: dict[int, CommandDef] = {c.opcode: c for c in COMMANDS.values()}
+
+
+def _opcode_and_length(user_data: bytes) -> tuple[int, str, CommandDef | None, bytes]:
+    """Stage 1 of parse_user_data(): known opcode, exact argument length."""
+    if not isinstance(user_data, (bytes, bytearray)) or not user_data:
+        return CE_BAD_LENGTH, "empty user data field", None, b""
+    op = user_data[0]
+    c = _BY_OPCODE.get(op)
+    if c is None:
+        return CE_UNKNOWN_OPCODE, f"unknown opcode 0x{op:02X}", None, b""
+    args = bytes(user_data[1:])
+    if len(args) != c.arg_octets:
+        return (CE_BAD_LENGTH, f"{c.mnemonic}: {len(args)} argument octets, needs {c.arg_octets}",
+                c, args)
+    return CE_OK, "", c, args
+
+
+def _argument_rules(c: CommandDef, args: bytes) -> tuple[int, str]:
+    """Stage 2: REBOOT magic, per-argument range, the command's cross-argument check."""
+    values = struct.unpack(">" + "".join(a[1] for a in c.args), args)
+    if c.opcode == REBOOT_OPCODE and values[0] != REBOOT_MAGIC:
+        return CE_BAD_MAGIC, f"REBOOT magic 0x{values[0]:04X} is not 0x{REBOOT_MAGIC:04X}"
+    named: dict[str, int] = {}
+    for (name, _code, lo, hi, _enum), v in zip(c.args, values, strict=True):
+        if not lo <= v <= hi:
+            return CE_BAD_ARGUMENT, f"{c.mnemonic}: {name}={v} outside {lo}..{hi}"
+        named[name] = v
+    if c.check is not None:
+        err = c.check(named)
+        if err:
+            return CE_BAD_ARGUMENT, f"{c.mnemonic}: {err}"
+    return CE_OK, ""
+
+
+def check_user_data(user_data: bytes, *, parse_stage: bool = False) -> tuple[int, str]:
+    """(CmdError, reason) the spacecraft returns for a TC user-data field (opcode +
+    arguments); (0, "") = accepted. Same order as the flight parse_user_data(): unknown
+    opcode 1, argument length 2, REBOOT magic 6, argument range / enum / the command's
+    `check` 3. For SEQLOAD and MAGCAL the parse stage checks the length only; parse_stage
+    True stops there (exactly parse_user_data(), also the stored-command validator), the
+    default adds their execution-stage rules - the error the CMDVER reports. SEQLOAD times
+    need the spacecraft SCLK and are checked by pack_seqload(now_sclk_s=...), not here.
+    State-dependent refusals (BUSY, HARDWARE, SPECCFG lamp/mode combinations) are not
+    predictable from the packet and are not modelled."""
+    code, why, c, args = _opcode_and_length(user_data)
+    if code != CE_OK or c is None:
+        return code, why
+    if c.opcode in LATE_VALIDATED_OPCODES and parse_stage:
+        return CE_OK, ""
+    code, why = _argument_rules(c, args)
+    if code != CE_OK or c.opcode != SEQLOAD_OPCODE:
+        return code, why
+    # SEQLOAD execution stage (CommandSequencer::load): block structure, sequence policy,
+    # then the stored command through the parse-stage validator (validate_stored_command).
+    try:
+        blk = unpack_seqload(args)
+    except CommandError as e:
+        return CE_BAD_ARGUMENT, str(e)
+    if blk.cmd[0] in seq_forbidden_opcodes():
+        return CE_BAD_ARGUMENT, (f"SEQLOAD: opcode 0x{blk.cmd[0]:02X} cannot be stored "
+                                 "(hazardous, REBOOT, SEQLOAD or SEQCTRL)")
+    code, why, inner, inner_args = _opcode_and_length(blk.cmd)
+    if code == CE_OK and inner is not None and inner.opcode not in LATE_VALIDATED_OPCODES:
+        code, why = _argument_rules(inner, inner_args)
+    if code != CE_OK:
+        return CE_BAD_ARGUMENT, f"SEQLOAD: stored command refused ({why})"
+    return CE_OK, ""

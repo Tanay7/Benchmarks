@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from dssq import spectral as S
+from dssq.ccsds import rice
 
 ROOT = Path(__file__).resolve().parents[2]
 HOST = ROOT / "tools" / "host_test"
@@ -133,20 +134,104 @@ def test_spec_v31_layout_and_round_trip():
         S.decode_spec_v31(data[:128])
 
 
-def test_specburst_codec():
-    samples = [(0, list(range(18))), (25, [None] * 4 + [7] * 14), (50, [65534] * 18)]
-    data = S.pack_specburst(123456, 401, 1, 1, samples)
-    assert len(data) == 9 + 3 * 38
+def test_specburst_raw_layout_by_hand():
+    """Contract 28 / PB-1.12: header 10 octets incl. encoding, dt_ms[n], then n x 18 u16
+    TIME-MAJOR; raw codes 0xFFFF = not converted, a count of 65535 travels as 0xFFFE."""
+    samples = [(0, list(range(18))), (25, [None] * 4 + [7] * 14), (50, [65535] * 18)]
+    data = S.pack_specburst(123456, 401, 1, 1, samples, encoding=0)
+    assert len(data) == 10 + 3 * 38 == S.BURST_MAX_LEN == 124
+    assert data[:10] == struct.pack(">IHBBBB", 123456, 401, 1, 1, 3, 0)
+    assert struct.unpack_from(">3H", data, 10) == (0, 25, 50)
+    assert struct.unpack_from(">18H", data, 16) == tuple(range(18))            # sample 0 first
+    assert struct.unpack_from(">5H", data, 16 + 36) == (0xFFFF,) * 4 + (7,)    # then sample 1
+    assert struct.unpack_from(">H", data, 16 + 72)[0] == 0xFFFE                 # 65535 -> 0xFFFE
     d = S.decode_specburst(data)
     assert (d["t0_ms"], d["rate_dhz"], d["rate_hz"], d["gain_code"], d["int_cycles"], d["n"]) == \
            (123456, 401, 40.1, 1, 1, 3)
+    assert (d["encoding"], d["encoding_name"], d["payload_len"], d["compression_ratio"]) == (0, "raw", 108, 1.0)
     assert d["samples"][1]["dt_ms"] == 25 and d["samples"][1]["raw"][:5] == [None] * 4 + [7]
-    for bad in (data[:8], data[:9 + 2 * 38], bytes([0, 0, 0, 0, 0, 0, 0, 0, 4]) + bytes(200),
-                bytes(9)):
+    # N = 1: full scale 2047, so >= 2046 is saturated; 0xFFFE always is (AS-DP-07).
+    assert d["samples"][2]["raw"][0] == 0xFFFE and all(d["samples"][2]["saturated"])
+    assert not any(d["samples"][0]["saturated"]) and d["samples"][1]["saturated"][:5] == [False] * 5
+    hi = S.decode_specburst(S.pack_specburst(0, 0, 0, 63, [(0, [65533, 65534] + [1] * 16)], encoding=0))
+    assert hi["samples"][0]["saturated"][:3] == [False, True, False]            # fs 65535 at N = 63
+
+
+def test_specburst_rice_layout_and_choice():
+    steady = [(30 * k, [1000 + (ch % 3) + k for ch in range(18)]) for k in range(3)]
+    auto = S.pack_specburst(7, 333, 2, 1, steady)
+    assert auto[9] == S.BURST_RICE and len(auto) < S.pack_specburst(7, 333, 2, 1, steady, encoding=0).__len__()
+    assert auto == S.pack_specburst(7, 333, 2, 1, steady, encoding=1)
+    payload = auto[16:]
+    cm = [steady[t][1][ch] for ch in range(18) for t in range(3)]              # channel-major
+    assert payload == rice.encode(cm) and 1 <= len(payload) <= 36 * 3 - 1
+    d = S.decode_specburst(auto)
+    assert [s["raw"] for s in d["samples"]] == [list(r) for _dt, r in steady]
+    assert d["compression_ratio"] == pytest.approx(108 / len(payload)) and d["encoding_name"] == "CCSDS 121.0-B-3"
+    noisy = [(0, [random.Random(k).randint(0, 65535) for k in range(18)])]
+    assert S.pack_specburst(0, 0, 0, 1, noisy)[9] == S.BURST_RAW                # Rice not shorter
+    with pytest.raises(ValueError, match="not shorter"):
+        S.pack_specburst(0, 0, 0, 1, noisy, encoding=1)
+
+
+def test_specburst_rejects_malformed_packets():
+    good = S.pack_specburst(1, 2, 0, 1, [(0, [5] * 18)], encoding=0)
+    rice_pkt = S.pack_specburst(1, 2, 0, 1, [(0, [5] * 18)], encoding=1)
+    hdr = bytearray(good[:10])
+    bad = [good[:9],                                      # short header
+           good[:-1], good + b"\x00",                    # raw payload length
+           bytes(hdr[:8]) + b"\x00\x00" + good[10:],      # n = 0
+           bytes(hdr[:8]) + b"\x04\x00" + bytes(8 + 144),  # n = 4
+           bytes(hdr[:9]) + b"\x02" + good[10:],           # unknown encoding
+           good[:10] + good[10:12],                       # no payload
+           rice_pkt[:12] + bytes(36),                     # "Rice" as long as raw
+           bytes(125)]                                    # longer than any SPECBURST
+    for b in bad:
         with pytest.raises(ValueError):
-            S.decode_specburst(bad)
-    with pytest.raises(ValueError):
-        S.pack_specburst(0, 0, 0, 1, samples * 2)
+            S.decode_specburst(b)
+    with pytest.raises(rice.RiceError):                   # undecodable CCSDS 121.0 stream
+        S.decode_specburst(rice_pkt[:12] + b"\x00")
+    samples = [(0, [1] * 18)]
+    for kw in ({"encoding": 2}, {"encoding": True}):
+        with pytest.raises(ValueError):
+            S.pack_specburst(0, 0, 0, 1, samples, **kw)
+    for args in ((-1, 0, 0, 1), (1 << 32, 0, 0, 1), (0, 1 << 16, 0, 1), (0, 0, 256, 1), (0, 0, 0, -1)):
+        with pytest.raises(ValueError):
+            S.pack_specburst(*args, samples)
+    for smp in ([], samples * 4, [(70000, [1] * 18)], [(0, [1] * 17)], [(0, [-1] + [1] * 17)],
+                [(0, [1.5] + [1] * 17)], [(0, [True] + [1] * 17)]):
+        with pytest.raises(ValueError):
+            S.pack_specburst(0, 0, 0, 1, smp)
+
+
+def test_led_current_limits():
+    """Contract 26: white code <= 3, IR <= 2, UV = 0 - exactly the integers 0..11."""
+    assert S.LED_MAX_CODE == (3, 2, 0)
+    assert list(S.LED_CUR_ALLOWED) == list(range(12))
+    assert all(S.led_cur_allowed(v) for v in range(12))
+    assert not any(S.led_cur_allowed(v) for v in (12, 15, 16, 63, 64, -1, 1.0, True, None))
+
+
+def test_hdr_packet_semantics():
+    """AS-DP-04: in HDR the gain / integration are the bracket centre, so raw_fraction is
+    meaningless (None) and the exposure carries the note."""
+    hdr = S.analyse(spec_packet([1.0] * 18, [0.1] * 18, mode=S.MODE_HDR, cycles=20))
+    assert hdr["raw_fraction"] == [None] * 18 and hdr["exposure"]["note"] == S.HDR_EXPOSURE_NOTE
+    survey = S.analyse(spec_packet([1.0] * 18, [0.1] * 18, cycles=20))
+    assert survey["exposure"]["note"] is None
+    assert survey["raw_fraction"][0] == pytest.approx(1000 / S.full_scale(20))
+
+
+def test_burst_compression_statistics():
+    st = S.SpectralState()
+    steady = [(30 * k, [800 + k] * 18) for k in range(3)]
+    for t0, enc in ((100, 1), (100, 0), (100, 1)):
+        st.on_specburst(S.decode_specburst(S.pack_specburst(t0, 333, 0, 1, steady, encoding=enc)), 1.0)
+    c = st.snapshot(now=1.5)["spectral_burst"]["compression"]
+    assert (c["packets_raw"], c["packets_rice"]) == (1, 2)
+    assert c["octets_raw"] == 3 * 108 and c["ratio_mean"] == pytest.approx(c["octets_raw"] / c["octets_sent"])
+    assert c["last_ratio"] > 1.0
+    json_safe(st.snapshot(now=2.0))
 
 
 # --- colorimetry (contract 13.7) --------------------------------------------------------
@@ -536,10 +621,19 @@ def test_analyse_full_packet_through_the_codec():
 
 def test_saturated_raw_sentinel_is_disambiguated():
     raw = [None] * 18                                        # decom maps 0xFFFF to None
-    a = S.analyse(spec_packet([1.0] * 18, cycles=100, sat=0b11, raw=raw))
-    assert a["raw"][0] == 0xFFFF and a["raw"][2] is None
-    assert a["saturated"][:3] == [True, True, False]
-    assert a["indices"]["ndvi"]["saturated"] is False
+    for cycles in (100, 10):                                 # AS-DP-04: whatever int_cycles is
+        a = S.analyse(spec_packet([1.0] * 18, cycles=cycles, sat=0b11, raw=raw))
+        assert a["raw"][0] == 0xFFFF and a["raw"][2] is None
+        assert a["saturated"][:3] == [True, True, False]
+        assert a["indices"]["ndvi"]["saturated"] is False
+
+
+def test_spectral_evr_range():
+    assert list(S.EVR_SPECTRAL_IDS) == list(range(0x0701, 0x0708))
+    st = S.SpectralState()
+    for eid in (0x0700, 0x0706, 0x0707, 0x0708):
+        st.on_evr(eid, "INFO", f"evr {eid:#06x}", 1.0)
+    assert [e["event_id"] for e in st.snapshot()["spectral"]["events"] if e["source"] == "S/C"] == [0x0706, 0x0707]
 
 
 # --- flight cross-check (vectors written by tools/host_test/test_spectral.cpp) -----------
@@ -548,7 +642,9 @@ def test_saturated_raw_sentinel_is_disambiguated():
 #   logdec <code hex> <value %.9g>       spec_log_decode(code)
 #   spec31 <hex>                         a packed SPEC v3.1 user-data field (129 octets)
 #   field <name> <raw> <eng %.9g | nan>  every field of that packet, ground names and units
-#   specburst <hex>                      a packed SPECBURST user-data field (3 samples)
+#   specburst <encoding> <hex> <samples> a packed SPECBURST user-data field (contract 28 layout),
+#                                        samples "<dt_ms>:<raw0>;...;<raw17>" joined by '/'
+#                                        (65535 = not converted, 65534 = saturated)
 # Nine significant digits identify a binary32 value uniquely: to_f32(float(text)) is the
 # flight's value bit for bit.
 VECTOR_KINDS = ("log", "logdec", "spec31", "field", "specburst")
@@ -575,7 +671,7 @@ def flight_vectors(tmp_path_factory) -> dict[str, list[list[str]]]:
             rec[tok[0]].append(tok[1:])
     counts = {k: len(v) for k, v in rec.items()}
     assert counts["log"] and counts["logdec"] and counts["spec31"] == 1 and \
-        counts["field"] == len(S.SPEC_V31_FIELDS) and counts["specburst"] == 1, counts
+        counts["field"] == len(S.SPEC_V31_FIELDS) and counts["specburst"] >= 1, counts
     return rec
 
 
@@ -638,12 +734,24 @@ def test_flight_spec_v31_packet_and_fields(flight_vectors):
 
 
 def test_flight_specburst(flight_vectors):
-    data = bytes.fromhex(flight_vectors["specburst"][0][0])
-    d = S.decode_specburst(data)
-    assert (d["t0_ms"], d["rate_dhz"], d["gain_code"], d["int_cycles"], d["n"]) == \
-           (0x01020304, 123, 3, 1, 3)
-    assert [s["dt_ms"] for s in d["samples"]] == [0, 77, 154]
-    assert d["samples"][1]["raw"][0] is None and d["samples"][2]["raw"][17] == 217
-    samples = [(s["dt_ms"], s["raw"]) for s in d["samples"]]
-    assert S.pack_specburst(d["t0_ms"], d["rate_dhz"], d["gain_code"], d["int_cycles"],
-                            samples) == data
+    """Every flight SPECBURST record ("specburst <encoding> <hex> <samples>", one Rice and one
+    raw): the header's encoding is the stated one, the payload decodes to the stated samples
+    (65535 = not converted -> None, 65534 = saturated), it re-encodes bit-exactly with that
+    encoding, and the ground reference encoder makes the same raw/Rice choice."""
+    seen = set()
+    for enc_tok, hx, samples_txt, *_rest in flight_vectors["specburst"]:
+        data = bytes.fromhex(hx)
+        d = S.decode_specburst(data)
+        assert d["encoding"] == int(enc_tok)
+        seen.add(d["encoding"])
+        want = []
+        for item in samples_txt.split("/"):
+            dt, raws = item.split(":")
+            want.append((int(dt), [None if int(r) == 0xFFFF else int(r) for r in raws.split(";")]))
+        assert [(x["dt_ms"], x["raw"]) for x in d["samples"]] == want
+        for x, (_dt, raw) in zip(d["samples"], want, strict=True):
+            assert x["saturated"] == [r is not None and r >= S.full_scale(d["int_cycles"]) - 1 for r in raw]
+        hdr = (d["t0_ms"], d["rate_dhz"], d["gain_code"], d["int_cycles"])
+        assert S.pack_specburst(*hdr, want, encoding=d["encoding"]) == data
+        assert S.pack_specburst(*hdr, want) == data                    # same choice as the flight
+    assert seen == {S.BURST_RAW, S.BURST_RICE}

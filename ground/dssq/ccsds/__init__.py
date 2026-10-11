@@ -21,7 +21,13 @@ CADU_LEN = len(ASM) + CODEBLOCK_LEN                                     # 236
 FHP_NO_PACKET_START = 0x7FF
 FHP_ONLY_IDLE_DATA = 0x7FE
 
-VC_NAMES = {0: "RT-ENG", 1: "RT-SCI", 2: "PLAYBACK", 7: "IDLE/OID"}
+# Virtual channels (ccsds_types.h enum Vc; Phase B PB-1.2). Downlink priority VC0 > VC1 >
+# VC2 > VC3 > OID. The same numbers are the USLP VCIDs; the USLP OID frame is VCID 63.
+VC_RT_ENG, VC_RT_SCI, VC_PLAYBACK, VC_FILE, VC_IDLE = 0, 1, 2, 3, 7
+VC_IDLE_USLP = 63
+NUM_DATA_VCS = 4                # VC 0..3 carry packets (kNumDataVcs)
+VC_NAMES = {VC_RT_ENG: "RT-ENG", VC_RT_SCI: "RT-SCI", VC_PLAYBACK: "PLAYBACK",
+            VC_FILE: "FILE (CFDP)", VC_IDLE: "IDLE/OID", VC_IDLE_USLP: "IDLE/OID (USLP)"}
 
 SP_PRI_HDR_LEN = 6
 SP_SEC_HDR_LEN = 6

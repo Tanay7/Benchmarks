@@ -48,13 +48,16 @@ static const size_t kCaduLen      = kAsmLen + kCodeblockLen;            // 236
 static const uint16_t kFhpNoPacketStart = 0x7FF;  // no packet starts in this frame
 static const uint16_t kFhpOnlyIdleData  = 0x7FE;  // OID frame (idle data only)
 
-// Virtual channel assignment (see docs/04_Space_Data_Link_ICD.md)
+// Virtual channel assignment (see docs/04_Space_Data_Link_ICD.md). Downlink
+// priority VC0 > VC1 > VC2 > VC3 > OID (fsw/datalink.h Downlink). In USLP mode
+// the same numbers are the VCIDs; the OID frame is then VCID 63 (uslp.h).
 enum Vc : uint8_t {
   VC_RT_ENG   = 0,   // real-time engineering: HK, RF, EVR, CMD verification, time
-  VC_RT_SCI   = 1,   // real-time science: MAG, ATT, SPEC, ENV
+  VC_RT_SCI   = 1,   // real-time science: MAG, ATT, SPEC, ENV, SPECBURST
   VC_PLAYBACK = 2,   // solid-state-recorder playback
+  VC_FILE     = 3,   // file delivery: one CFDP PDU per Space Packet (APID 0x030, 727.0-B-5)
   VC_IDLE     = 7,   // Only-Idle-Data frames (keeps the link + CLCW alive)
-  kNumDataVcs = 3
+  kNumDataVcs = 4    // VC 0..3 carry packets
 };
 
 // ---- Space Packet constants (133.0-B-2) ---------------------------------------
