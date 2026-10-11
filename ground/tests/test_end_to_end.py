@@ -222,8 +222,13 @@ def test_stored_sequence_check_uplink_and_start(world):
 def test_magcal_collect_fit_and_uplink_recover_the_truth(world):
     w, gs = world, world.gs
     w.run(20)
-    assert w.command("MODE TEST") == "EXECUTED"                                  # MAG every 4 s
+    assert w.command("MODE TEST") == "EXECUTED"                                  # MAG every 4 s, averaged
     assert gs.magcal_action("start", 0)["status"] == "OK"
+    w.run(30)
+    cov = gs.snapshot()["magcal"]["units"]["0"]
+    assert cov["coverage"]["n"] == 0 and cov["averaged_skipped"] > 0             # 4-sample means are not fitted
+    assert any("PKTRATE MAG 1" in t for t in w.events("MAGCAL"))
+    assert w.command("PKTRATE MAG 1") == "EXECUTED"                              # 1 s MAG: nsamples = 1
     w.run(420)
     r = gs.magcal_action("fit", 0)
     assert r["status"] == "OK", r
@@ -324,9 +329,7 @@ def flight_vectors(tmp_path_factory):
     out = tmp_path_factory.mktemp("vectors")
     subprocess.run(["make", "-s", "-C", str(HOST), "host_test"], check=True)
     subprocess.run([str(HOST / "host_test"), str(out)], check=True, stdout=subprocess.DEVNULL)
-    if not (out / "integration_tm_ae.bin").exists():
-        if not (HOST / "test_integration.cpp").exists():
-            pytest.skip("tools/host_test/test_integration.cpp not in the tree yet (WS1)")
+    if not (out / "integration_tm_ae.bin").exists():                            # never a skip (C59)
         pytest.fail("host_test did not write integration_tm_ae.bin")
     return out
 
@@ -390,8 +393,7 @@ def test_flight_integration_vector_through_ingest(flight_vectors, monkeypatch, t
     content = (Path(s["cfdp"]["files_dir"]) / tr[-1]["name"]).read_bytes()
     assert content.hex().startswith(exp["cfdp"]["content"][:64])
     assert s["rx"]["decoder"]["rice_errors"] == 0 and s["rx"]["decoder"]["decom_errors"] == 0
-    assert any(e["text"].startswith("stored sequence") or "0xFE" in e["text"] or "stored" in e["text"]
-               for e in s["events"])                                             # CMDVER tc_seq 0xFE
+    assert any(e["text"].startswith("stored sequence") for e in s["events"])     # CMDVER cmd_source STORED (I1)
     sci = gs.science_snapshot()
     assert sci["spectral_burst"]["compression"]["packets_rice"] >= 1
     assert sci["spectral_burst"]["compression"]["packets_raw"] >= 1
@@ -560,3 +562,285 @@ def test_los_is_suppressed_while_hibernating(world):
     w.run(7300, step=5.0)
     assert any(x.startswith("LOS: no beacon for") for x in gs.snapshot()["alarm_reasons"])
     assert gs.snapshot()["alarm"] == "RED"
+
+
+# =============================================================================
+# (e) Phase C regressions (receiver statistics, link manager, archive, replay, AFC, time,
+#     command source, SDLS continuity, App Lab registration)
+# =============================================================================
+def _clear_cadu(mcfc, vcid=0, fhp=FHP_ONLY_IDLE_DATA, data=bytes(188)):
+    return encode_cadu(build_frame(vcid, mcfc, mcfc, fhp, data, 0))
+
+
+def _ingest_pass(gs, t0, mcfc0, n, dt=5.0, rssi=-90):
+    for i in range(n):
+        gs.ingest(_clear_cadu((mcfc0 + i) & 0xFF) + bytes([256 + rssi]), t0 + i * dt)
+    return t0 + (n - 1) * dt
+
+
+def test_pass_windows_and_link_manager_fer_ignore_the_los_gap(tmp_path):
+    """C41: the AOS frame's samples belong to the new pass and the LOS gap is no
+    inter-arrival time. C32: the inter-pass MCFC jump is not a frame error for the link
+    manager (it stepped AUTO down at 32 dB margin and could never step up again)."""
+    gs = GroundStation(_config(tmp_path, key=False, air_rate=4), archive=False)
+    gs.link_mgr.mode = "AUTO"
+    t = _ingest_pass(gs, T0, 0, 20)
+    gs.housekeeping(t + 200.0)                                                   # LOS
+    assert gs.rx.los
+    t = _ingest_pass(gs, T0 + 3 * 3600.0, 20 + 112, 20)                          # 2160 frames sent out of view
+    rx = gs.rx
+    assert rx.frames_lost == 112 and rx.passes == 2                              # lifetime count unchanged
+    assert rx.w["pass"]["rssi"].stats()["n"] == 20 and rx.w["pass"]["asm"].stats()["n"] == 20
+    iat = rx.w["pass"]["iat"].stats()
+    assert iat["n"] == 19 and iat["max"] == pytest.approx(5.0)
+    assert rx.fer_window(t) == 0.0
+    gs.link_mgr.last_eval = -1e18
+    gs.housekeeping(t + 1.0)
+    rec = gs.link_mgr.recommendation
+    assert rec["fer"] == 0.0 and "margin low" not in rec.get("why", "")
+    assert gs.snapshot()["rx"]["frames"]["fer_10m"] == 0.0
+    t = _ingest_pass(gs, t + 5.0, (20 + 112 + 20 + 3) & 0xFF, 5)                # 3 frames lost IN the pass
+    assert rx.fer_window(t) == pytest.approx(3 / 28)
+
+
+def test_link_manager_rate_limits_follow_the_radio_model(tmp_path):
+    """C34 (PB-3.2): [linkmgr] min_rate absent = E22 2, SX126x 0."""
+    from dssq.config import validate
+    from dssq.linkmgr import LinkManager
+    cfg = _config(tmp_path, key=False, model="SX126x", air_rate=1)
+    assert "min_rate" not in cfg["linkmgr"]
+    sx = GroundStation(cfg, archive=False)
+    assert sx.link_mgr.min_rate == 0
+    lm = LinkManager(6.0, 0.0, 0.0, None, 4, model="SX126x")
+    lm.mode = "ADVISE"
+    rx = {"windows": {"10m": {"rssi": {"n": 20, "p10": -141.0}}}, "frames": {"fer": 0.0}}
+    lm.evaluate(1.0, rx, 1, None)
+    assert lm.recommendation["action"] == "LINKRATE" and lm.recommendation["value"] == 0
+    e22 = GroundStation(_config(tmp_path, key=False, air_rate=4), archive=False)
+    assert e22.link_mgr.min_rate == 2
+    e22.link_mgr.model = link.get_model(link.SX126X)                             # follows a model change
+    assert e22.link_mgr.min_rate == 0
+    assert LinkManager(min_rate=0, model="E22-400T33D").min_rate == 2            # E22 codes 0-1 alias 2
+    bad = _config(tmp_path, key=False)
+    bad["linkmgr"].update(min_rate=5, max_rate=4)
+    with pytest.raises(ValueError, match="min_rate"):
+        validate(bad)
+
+
+def test_archive_disk_full_keeps_reception_and_commanding(tmp_path, monkeypatch):
+    """C33: a full disk (open -> ENOSPC, sqlite 'database or disk is full') stops the
+    recording only: frames are still counted, CLCWs reach FOP-1, the alarm says why."""
+    import builtins
+    import errno
+    import sqlite3
+    gs = GroundStation(_config(tmp_path, key=False), archive=True)
+    real_open = builtins.open
+
+    def full_open(file, *a, **kw):
+        if str(file).endswith(("cadu.bin", "events.log")):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(file, *a, **kw)
+
+    class FullDb:
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, *a, **kw):
+            raise sqlite3.OperationalError("database or disk is full")
+
+        executemany = execute
+        commit = execute
+
+        def close(self):
+            self.db.close()
+
+    monkeypatch.setattr(builtins, "open", full_open)
+    gs.archive.db = FullDb(gs.archive.db)
+    t = _ingest_pass(gs, T0, 0, 3)
+    assert gs.rx.frames_ok == 3 and gs.rx.codeblocks == 3
+    assert gs.fop.last_clcw is not None                                          # the CLCW reached FOP-1
+    gs.housekeeping(t)
+    s = gs.snapshot()
+    assert s["health"]["archive_write_errors"] > 0 and s["health"]["archive_last_error"]
+    assert any(r.startswith("archive write errors") for r in s["alarm_reasons"])
+    assert any(e["source"] == "ARCHIVE" and e["level"] == "WARN" for e in s["events"])
+    assert gs.submit_command("NOOP")["status"] == "QUEUED"
+    gs.close()
+
+
+def test_replay_accepts_the_asm_bit_errors_the_live_gds_accepts(tmp_path):
+    """C35: the archive keeps the ASM as received; replay applies the lock tolerance."""
+    from dssq.archive import Archive, read_cadu_file
+    from dssq.framesync import LOCK_TOL
+    from dssq.replay import Pipeline
+    ar = Archive(tmp_path / "ar")
+    cadus = [bytearray(_clear_cadu(i)) for i in range(4)]
+    cadus[1][0] ^= 0x01                                                          # 1 ASM bit error
+    cadus[2][0] ^= 0x0F                                                          # LOCK_TOL bit errors
+    cadus[3][:4] = bytes(4)                                                      # not an ASM
+    for i, c in enumerate(cadus):
+        ar.raw_cadu(T0 + i, -90, bytes(c))
+    ar.close()
+    pipe = Pipeline()
+    for _ert, _rssi, c in read_cadu_file(next((tmp_path / "ar").glob("*/cadu.bin"))):
+        pipe.push(c)
+    assert pipe.frames["TM OID"] == 3 and pipe.frames["bad: ASM"] == 1
+    assert pipe.asm_bit_errors == 1 + LOCK_TOL
+
+
+def test_afc_static_offset_returns_after_a_narrow_profile(tmp_path):
+    """C36: a narrow profile clips the static offset; the calibration comes back on return."""
+    p1, p0 = link.SX126X_PROFILES[1], link.SX126X_PROFILES[0]
+    afc = link.AfcLoop(p1.sf, p1.bw_hz, 433.125e6, static_offset_hz=8000.0)
+    assert afc.static_hz == 8000 and afc.bound_hz > 8000
+    afc.reconfigure(1.0, p0.sf, p0.bw_hz, 433.125e6)
+    assert afc.static_hz < 8000 and any("clipped" in e[2] for e in afc.pop_events())
+    afc.reconfigure(2.0, p1.sf, p1.bw_hz, 433.125e6)
+    assert afc.static_hz == 8000
+
+
+def test_sim_time_correlation_is_unbiased(monkeypatch, tmp_path):
+    """C37: the simulated E22 downlink includes the ground module's UART transfer, which
+    _time_correlate removes: the correlated SCET of an SCLK matches the simulator's clock."""
+    w = World(monkeypatch, tmp_path)
+    w.run(20)
+    gs = w.gs
+    for _ in range(2):                                                           # TIMECORR on request
+        assert gs.submit_command("TIMECORR")["status"] == "QUEUED"
+        w.run(40, step=0.01)                                                     # ERT resolution 10 ms
+    assert len(gs.corr.samples) >= 2
+    now = w.clk.t
+    err = gs.corr.scet(w.sim._sclk(now)) - now
+    assert abs(err) < 0.03, err                                                  # was -0.247 s
+
+
+def test_time_drift_and_residual_need_enough_samples(tmp_path):
+    """C44: no fit, no number (PB-5.1)."""
+    gs = GroundStation(_config(tmp_path, key=False), archive=False)
+    t = gs.snapshot()["time"]
+    assert t["corr_samples"] == 0 and t["drift_ppm"] is None and t["residual_rms_ms"] is None
+    gs.corr.add(0, 100.0, T0)
+    gs.corr.add(0, 200.0, T0 + 100.001)
+    t = gs.snapshot()["time"]
+    assert t["drift_ppm"] == pytest.approx(10.0, rel=1e-3) and t["residual_rms_ms"] is None
+    gs.corr.add(0, 300.0, T0 + 200.0)
+    assert gs.snapshot()["time"]["residual_rms_ms"] is not None
+
+
+def test_alarm_red_count_and_stale_snr(tmp_path):
+    """C40: the RED / YELLOW split travels with the reasons. C42: the last packet's RSSI is
+    never combined with a noise reading taken after LOS."""
+    gs = GroundStation(_config(tmp_path, key=False), archive=False)
+    t = _ingest_pass(gs, T0, 0, 3)
+    gs.rx.on_noise(-120.0, t)
+    assert gs.snapshot()["rx"]["rf"]["snr_est_db"] == pytest.approx(30.0)
+    gs.housekeeping(t + 7200.0)                                                  # LOS
+    gs.rx.on_noise(-110.0, t + 7200.0)
+    gs.tlm["HK"] = {"values": {"fdir_flags": 1}, "limits": {}}                  # a YELLOW reason (FDIR)
+    gs.housekeeping(t + 7202.0)
+    s = gs.snapshot()
+    assert s["rx"]["rf"]["snr_est_db"] is None
+    assert s["alarm"] == "RED" and s["alarm_reasons"][0] == "LOS" and s["alarm_red_count"] == 1
+    assert s["alarm_reasons"][1].startswith("FDIR")
+
+
+def test_ground_scan_is_calibrated_and_sx126x_has_no_rcu(monkeypatch, tmp_path):
+    """C43: GSCAN readings carry rssi_cal_offset_db like the noise floor. C45: an SX126x
+    station has no Radio Control Unit."""
+    w = World(monkeypatch, tmp_path, radio={"air_rate": 7, "rssi_cal_offset_db": -3.0})
+    w.run(10)
+    rm, raw = w.gs.radio_mgr, []
+    read = rm.noise_dbm
+    monkeypatch.setattr(rm, "noise_dbm", lambda: raw.append(read()) or raw[-1])
+    w.gs.submit_command("GSCAN 20 22")
+    w.run(5)
+    scan = w.gs.snapshot()["radio"]["last_scan"]
+    assert len(raw) == 3 and None not in raw
+    assert scan["calibrated"] and scan["noise"] == [n - 3.0 for n in raw]
+    assert w.gs.snapshot()["radio"]["rcu"] is True
+    (tmp_path / "sx").mkdir()
+    sx = World(monkeypatch, tmp_path / "sx", radio={"model": "SX126x", "air_rate": 4})
+    assert sx.gs.snapshot()["radio"]["rcu"] is False
+
+
+def test_cmdver_routes_on_the_command_source(world):
+    """I1: an AD N(S) of 254 / 255 is an ordinary AD command (the old in-band sentinels);
+    the stored sequence is recognised by its source, never by tc_seq."""
+    gs = world.gs
+    gs._on_cmdver({"tc_seq": 254, "opcode": 1, "stage": 2, "cmd_source": 2, "error_code": 0, "ground_tag": 0}, T0)
+    assert gs.console_lines[-1][1] == "stored sequence: opcode 0x01 EXECUTED"
+    calls = []
+    monkey = gs.fop.on_cmdver
+    gs.fop.on_cmdver = lambda v, now: calls.append(v) or monkey(v, now)
+    n = len(gs.console_lines)
+    gs._on_cmdver({"tc_seq": 254, "opcode": 1, "stage": 2, "cmd_source": 0, "error_code": 0, "ground_tag": 0}, T0)
+    assert len(calls) == 1 and not any(x[1].startswith("stored") for x in list(gs.console_lines)[n:])
+    gs._on_cmdver({"tc_seq": 0, "opcode": 1, "stage": 2, "cmd_source": 3, "error_code": 0, "ground_tag": 0}, T0)
+    assert len(calls) == 1 and any("unknown command source 3" in e["text"] for e in gs.events)
+
+
+def test_spacecraft_sn_only_from_an_all_protected_hk(world, monkeypatch):
+    """I2: the frame's SDLS status is passed to the packet extractor and the HK SN is
+    observed with the packet's own flag."""
+    import dataclasses
+    gs = world.gs
+    seen, frame_status = [], []
+    orig = gs.sdls_tc.observe_spacecraft_sn
+    monkeypatch.setattr(gs.sdls_tc, "observe_spacecraft_sn", lambda sn, prot: seen.append(prot) or orig(sn, prot))
+    world.run(40)
+    assert seen and all(seen)                                                    # AE downlink: protected
+    ex = gs.extract[0]
+    push = ex.push
+
+    def mixed_push(vcfc, fhp, data, protected=None):
+        # As if every packet had started in a null-SA frame: the frame itself verified.
+        frame_status.append(protected)
+        return [dataclasses.replace(p, protected=False) for p in push(vcfc, fhp, data, protected=protected)]
+
+    monkeypatch.setattr(ex, "push", mixed_push)
+    n = len(seen)
+    world.run(40)
+    assert frame_status and all(st is True for st in frame_status)               # the frame status is passed
+    assert len(seen) > n and not any(seen[n:])                                   # the packet's flag decides
+
+
+def test_app_lab_registration_is_retried(tmp_path, monkeypatch):
+    """C52: the router unreachable at start (App Lab AppError for the first seconds) no
+    longer disables the front panel and the SX126x radio for the whole run."""
+    import dssq.gds as gds_mod
+    from dssq.display.frontpanel import BridgeLink
+
+    provided: dict = {}
+
+    class Bridge:
+        up = False
+
+        def provide(self, name, fn):
+            if not Bridge.up:
+                raise ConnectionError("Cannot reach the Arduino Router within 5s.")
+            provided[name] = fn
+
+        def notify(self, name, *args):
+            if not Bridge.up:
+                raise ConnectionError("down")
+
+        def call(self, name, *args, timeout=3.0):
+            if not Bridge.up:
+                raise ConnectionError("down")
+            return 1
+
+    monkeypatch.setattr(gds_mod, "REGISTER_RETRY_S", 0.0)
+    cfg = _config(tmp_path, key=False, model="SX126x", air_rate=4)
+    cfg["gds"].update(frontpanel=True, rcu=False)
+    r = Runner(cfg, bridge=BridgeLink(Bridge(), "test"), mode="applab", web=False, archive=False)
+    try:
+        assert r.fp is None and r.radio is None and r.gs.radio_unavailable
+        r.step()
+        assert r.fp is None and r.radio is None                                  # still down: retried
+        Bridge.up = True
+        r.step()
+        assert r.fp is not None and r.radio is not None
+        assert r.gs.radio_unavailable is None and r.gs.radio_mgr is not None
+        assert {"fp_in", "rf_rx", "rf_evt"} <= set(provided)
+    finally:
+        r.close()

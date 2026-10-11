@@ -31,7 +31,7 @@ namespace vgq {
 class Rm3100 {
  public:
   bool begin(I2cBus& bus, uint8_t addr, uint16_t cycle_count = 200);
-  bool set_cycle_count(uint16_t cc);
+  bool set_cycle_count(uint16_t cc);                         // false while a measurement is pending
   bool start();                                              // POLL X, Y, Z
   // One STATUS read while a measurement is pending: 1 DRDY set (collect() now), 0 not
   // yet (or nothing pending), -1 bus error. Never clears the pending measurement.

@@ -74,43 +74,10 @@ const uint8_t kChipModeRx = 0x50;
 // register nor the scale is in DS Table 12-1: VERIFY (sign test, docs/08 T-RF-06).
 const uint16_t kRegFreqError = RADIOLIB_SX126X_REG_FREQ_ERROR_RX_CRC;
 const float kFreqErrScale = 1.55f / 1600.0f;
-// RxDutyCycle (DS 13.1.7). RadioLib startReceiveDutyCycle() programs the sleep period
-// minus (TCXO delay + 1 ms) to cover the wake-up transition; its TCXO delay is the
-// setTCXO() default 5 ms (0 with a crystal, so the real window is only longer).
-const uint32_t kSxDutyTransitionUs = 6000;
-const uint32_t kSxDutyDetectSym = 8;    // RadioLib's preamble-detection minimum for SF >= 7
 
 uint32_t pin_or_nc(int pin) { return pin < 0 ? (uint32_t)RADIOLIB_NC : (uint32_t)pin; }
 
 int32_t ms_value(uint32_t dt) { return dt > (uint32_t)INT32_MAX ? INT32_MAX : (int32_t)dt; }
-
-// RxDutyCycle periods for an explicit-header sender preamble of n_pre symbols, us.
-//   sleep = (n_pre - 2 x 8) Tsym: a preamble that starts just after an RX window
-//           closes still leaves 8 symbols for detection in the next one (the same
-//           catch guarantee as RadioLib's startReceiveDutyCycleAuto()).
-//   rx    = max(9 Tsym, ceil((need - programmed sleep) / 2) + 1 Tsym), where
-//           need = Tpreamble + Theader = (n_pre + 4.25 + 8) Tsym (DS 6.1.4 time on
-//           air; the explicit header is in the first 8-symbol block), so that the
-//           timer restarted on preamble detection, 2 x rxPeriod + sleepPeriod
-//           (DS 13.1.7), never expires before the header. RadioLib's Auto periods
-//           give only (n_pre + 2) Tsym - 6 ms and miss early-detected WAKEs.
-// Returns false (use continuous RX) when duty cycling is impossible or the 24-bit
-// period fields (15.625 us steps, DS Table 13-12) would overflow.
-bool sx_duty_cycle_us(uint8_t sf, uint32_t bw_hz, uint16_t n_pre, uint32_t& rx_us, uint32_t& sleep_us) {
-  const uint64_t ts = lora_symbol_us(sf, bw_hz);
-  if (ts == 0 || n_pre <= 2u * kSxDutyDetectSym) return false;
-  const uint64_t sleep = (uint64_t)(n_pre - 2u * kSxDutyDetectSym) * ts;
-  if (sleep <= (uint64_t)kSxDutyTransitionUs + 16u) return false;   // RadioLib's own minimum
-  const uint64_t prog_sleep = sleep - kSxDutyTransitionUs;
-  const uint64_t need = ((4u * (uint64_t)n_pre + 49u) * ts + 3u) / 4u;   // (n_pre + 12.25) Tsym, rounded up
-  uint64_t rx = need > prog_sleep ? (need - prog_sleep + 1u) / 2u + ts : ts;
-  if (rx < (kSxDutyDetectSym + 1u) * ts) rx = (kSxDutyDetectSym + 1u) * ts;
-  const uint64_t max_us = 0xFFFFFFull * 125u / 8u;                  // 24-bit raw limit
-  if (rx > max_us || sleep > max_us) return false;
-  rx_us = (uint32_t)rx;
-  sleep_us = (uint32_t)sleep;
-  return true;
-}
 
 }  // namespace
 

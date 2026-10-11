@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from .ccsds import ASM, CADU_LEN
 
 ASM_INT = int.from_bytes(ASM, "big")
+SEARCH_TOL = 2          # E_s: ASM bit errors accepted while searching
+LOCK_TOL = 4            # E_l: ASM bit errors accepted at the expected position (also dssq.replay)
 
 
 def _hamming32(a: int, b: int) -> int:
@@ -56,7 +58,7 @@ RADIO_FAULTS = {1: "UNDER-VOLTAGE (<4.5 V)", 2: "OVER-VOLTAGE (>15 V)", 3: "OVER
 class FrameSynchronizer:
     SEARCH, LOCK, FLYWHEEL = "SEARCH", "LOCK", "FLYWHEEL"
 
-    def __init__(self, rssi_byte: bool = True, search_tol: int = 2, lock_tol: int = 4,
+    def __init__(self, rssi_byte: bool = True, search_tol: int = SEARCH_TOL, lock_tol: int = LOCK_TOL,
                  flywheel: int = 3, stale_s: float = 3.0):
         self.rssi_byte = rssi_byte
         self.search_tol = search_tol

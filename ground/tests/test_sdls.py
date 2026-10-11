@@ -322,7 +322,7 @@ def test_service_selection():
 def test_flight_tm_frames_verify_on_ground(vectors):
     rx = SdlsTmReceiver(MASTER)
     seq = sorted((n for n in vectors if n.startswith("tm_ae_")), key=lambda n: int(n[6:]))
-    assert len(seq) == 6
+    assert len(seq) >= 6                       # 0..5 below; later ones: sn 0xFFFFFFFF, next epoch
     for name in seq:
         v = vectors[name]
         f = v["frame"]
@@ -332,12 +332,14 @@ def test_flight_tm_frames_verify_on_ground(vectors):
         assert (r.epoch, r.sn) == (v["epoch"], v["sn"])
     assert vectors["tm_ae_5"]["hdr_len"] == 8 and len(vectors["tm_ae_5"]["plain"]) == 156   # USLP
     assert len(vectors["tm_ae_0"]["plain"]) == 158                                          # TM v1
-    assert rx.frames_ok == 6 and rx.last == (6, 2)
+    assert (vectors["tm_ae_5"]["epoch"], vectors["tm_ae_5"]["sn"]) == (6, 2)
+    last = (vectors[seq[-1]]["epoch"], vectors[seq[-1]]["sn"])
+    assert rx.frames_ok == len(seq) and rx.last == last
     # replays (any earlier (epoch, sn)) are dropped and do not move the state
     for name in seq:
         v = vectors[name]
         assert rx.process(v["frame"], v["hdr_len"], v["prot_end"]).verdict == "REPLAY"
-    assert rx.replay == 6 and rx.last == (6, 2)
+    assert rx.replay == len(seq) and rx.last == last
 
 
 def test_flight_tm_frames_tamper(vectors):
@@ -471,7 +473,8 @@ def test_sn_file_is_written_atomically_before_use(tmp_path, monkeypatch):
     monkeypatch.setattr(sdls_mod.os, "replace", power_cut)
     with pytest.raises(OSError):
         tx.next_sn()                                       # the frame must not be sent
-    assert tx.sn == 1 and sn_file.read_text() == "1" and list(tmp_path.iterdir()) == [sn_file]
+    lock = tmp_path / "sdls_sn.txt.lock"                  # inter-process lock file (C11)
+    assert tx.sn == 1 and sn_file.read_text() == "1" and sorted(tmp_path.iterdir()) == [sn_file, lock]
     monkeypatch.setattr(sdls_mod.os, "replace", real_replace)
     assert tx.next_sn() == 2 and sn_file.read_text() == "2"
     assert SdlsSender(MASTER, 1, sn_file).sn == 2         # restart continues
@@ -516,6 +519,61 @@ def test_sn_shared_with_another_writer_is_never_reused(tmp_path):
     with pytest.raises(RuntimeError):
         gds.next_sn()                                                      # became corrupt: blocked
     assert gds.uplink_blocked
+
+
+def test_protected_hk_never_lowers_a_file_the_hardline_tool_advanced(tmp_path):
+    """C10: observe_spacecraft_sn re-reads the shared file before persisting; the HK lags a
+    queued burst of hardline CLTUs, so max(in-memory, last_sn) alone would lower the file
+    and the GDS would reuse the tool's GCM nonces."""
+    sn_file = tmp_path / "sdls_sn.txt"
+    sn_file.write_text("45")
+    gds = SdlsSender(MASTER, 1, sn_file, service="AE")
+    tool = SdlsSender(MASTER, 1, sn_file, service="AE")                    # dssq.cltu
+    assert [tool.next_sn() for _ in range(5)] == [46, 47, 48, 49, 50]
+    assert gds.sn == 45 and gds.observe_spacecraft_sn(46, protected=True) is None
+    assert sn_file.read_text() == "50" and gds.next_sn() == 51
+    assert "raised 51 -> 60" in gds.observe_spacecraft_sn(60, protected=True) and sn_file.read_text() == "60"
+
+
+def test_sn_file_lock_serialises_the_read_modify_write(tmp_path):
+    """C11: next_sn holds an exclusive flock on <file>.lock from the re-read to the rename,
+    so a second writer (dssq.cltu in another process) cannot take the same number."""
+    fcntl = pytest.importorskip("fcntl")
+    import threading
+    sn_file = tmp_path / "sdls_sn.txt"
+    gds = SdlsSender(MASTER, 1, sn_file, service="AE")
+    assert gds.next_sn() == 1
+    fd = os.open(tmp_path / "sdls_sn.txt.lock", os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)                                         # the "other process"
+    got: list[int] = []
+    t = threading.Thread(target=lambda: got.append(gds.next_sn()))
+    t.start()
+    t.join(0.3)
+    assert t.is_alive() and not got                                        # waits for the lock
+    sdls_mod.atomic_write_text(sn_file, "41")                              # the tool used 2..41
+    os.close(fd)
+    t.join(5)
+    assert got == [42] and sn_file.read_text() == "42"
+
+
+def _take_sns(sn_file: str, n: int, out: str) -> None:
+    tx = SdlsSender(MASTER, 1, sn_file, service="AE")
+    Path(out).write_text(" ".join(str(tx.next_sn()) for _ in range(n)))
+
+
+def test_two_processes_never_share_a_sequence_number(tmp_path):
+    import multiprocessing as mp
+    pytest.importorskip("fcntl")
+    ctx = mp.get_context("fork")
+    sn_file = tmp_path / "sdls_sn.txt"
+    procs = [ctx.Process(target=_take_sns, args=(str(sn_file), 150, str(tmp_path / f"o{i}"))) for i in range(2)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    assert [p.exitcode for p in procs] == [0, 0]                           # no OSError (shared .tmp)
+    used = [int(x) for i in range(2) for x in (tmp_path / f"o{i}").read_text().split()]
+    assert sorted(used) == list(range(1, 301)) and sn_file.read_text() == "300"
 
 
 def _tm_frames(epoch, n, hdr=bytes(6), data=bytes(range(158))):

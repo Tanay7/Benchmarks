@@ -79,6 +79,12 @@ class Downlink {
   size_t backlog(uint8_t v) const;         // octets queued on VC v (0 for v > 3)
   bool has_real_data(uint8_t v) const;     // VcStream::has_real_data (false for v > 3)
   void reset_vc(uint8_t v);                // SSRCLEAR empties VC 2 (no-op for v > 3)
+  // Hibernation beacon (PB-1, C20): called before the beacon HK (hk_len octets) is pushed
+  // on VC0. Every routine packet is also in the SSR, so the real-time backlog the beacon
+  // must not queue behind is dropped: all of VC1 (it could take every second frame by the
+  // anti-starvation rule), and VC0 too when VC0 + the HK would need more than max_frames
+  // frames. Returns the frames (1..max_frames) that carry VC0 up to and including the HK.
+  uint8_t prepare_beacon(size_t hk_len, uint8_t max_frames);
   // Packets refused by push() on VC v (no room, or the priority reserve), counted since
   // init() and NOT cleared by reset_vc() (0 for v > 3).
   uint32_t overflows(uint8_t v) const;

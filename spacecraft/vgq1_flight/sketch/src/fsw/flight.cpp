@@ -2,10 +2,11 @@
 //  VGQ-1 flight software executive, v3 - implementation (see flight.h).
 //
 //  Structure of one loop() pass (PB-8.6 item 3; every step bounded, see the WS2
-//  loop-timing table): SCLK -> radio events -> spectrometer -> magnetometer / ARU
-//  sampling -> deferred MAGBIST -> stored sequence -> CFDP pacing and relay
-//  supervision -> SDLS TM epoch timeout -> downlink -> 1 Hz tick -> EGSE
-//  notifications -> status display.
+//  loop-timing table): SCLK -> EGSE RPC -> radio events -> spectrometer -> EGSE RPC ->
+//  magnetometer / ARU sampling -> deferred MAGBIST -> stored sequence -> CFDP pacing and
+//  relay supervision -> SDLS TM epoch timeout -> downlink -> EGSE RPC -> 1 Hz tick ->
+//  EGSE notifications -> status display. ("EGSE RPC": one Router Bridge request from the
+//  mailbox, rpc_mailbox.h.)
 //
 //  EVR texts are printf formats with literal event ids (tools/gen_dictionary_doc.py
 //  parses `evr(<severity>, 0x....` calls); numbers that the Phase B specification
@@ -72,6 +73,9 @@ namespace {
 // ---- executive constants (each with its reason) ------------------------------------------
 const uint8_t  kRadioPollsPerPass = 4;          // radio events handled per pass (radio.h contract)
 const size_t   kNotifyMargin = 32;              // MsgPack framing + method name per notification (PB-0.4)
+// The Router Bridge thread writes RPC responses to the same UART at any time (rpc_mailbox.h):
+// one response (MsgPack [1, msgid, nil, result]) is at most ~12 octets; keep that much free.
+const size_t   kRpcResponseReserve = 16;
 const size_t   kCaduHexLen = 2 * kCaduLen;      // tm_cadu argument: 472 hex characters
 const size_t   kMaxPacketLen = kSpPriHdrLen + kSpSecHdrLen + kMaxPayload;   // 158 octets
 // A routine (non-priority) packet may fill a VC buffer only up to here (PB-1.2 reserve).
@@ -89,6 +93,8 @@ const size_t   kDiagBacklogMax = 512;           // SPECDIAG lines only while VC0
 const uint32_t kNoBitLockMs = 300000;           // CLCW No Bit Lock: no CLTU decoded for 5 min (v2)
 const uint32_t kLoopOverrunMs = 250;            // HK loop_overruns threshold
 const uint32_t kRebootDrainMs = 50;             // lets the last tm_cadu copy leave the UART
+const uint32_t kRebootMaxWaitMs = 10000;        // REBOOT without 2 frames sent: reset after >= 10 s
+const uint8_t  kBeaconMaxFrames = 2;            // hibernation beacon: VC0 backlog + HK in <= 2 frames
 const uint32_t kPaKeyedSpecBudgetUs = 2000;     // AS7265X poll budget while the PA is keyed
 const uint32_t kNoiseAfterTxMs = 300;           // noise sample not right after a transmission (v2)
 const uint32_t kT37sFaultClearMs = 3000;        // T37S reports repeat every 500 ms while active
@@ -154,10 +160,8 @@ int hexval(char c) {
 
 // Decodes an RPC hex argument: even length within [min_chars, max_chars] and fitting
 // `cap` octets, hex digits only. Returns the octet count, 0 for anything else.
-size_t hex_decode(const String& hex, uint8_t* out, size_t cap, size_t min_chars, size_t max_chars) {
-  const size_t len = hex.length();
+size_t hex_decode(const char* p, size_t len, uint8_t* out, size_t cap, size_t min_chars, size_t max_chars) {
   if (len < min_chars || len > max_chars || (len & 1u) != 0 || len / 2 > cap) return 0;
-  const char* p = hex.c_str();
   if (p == nullptr) return 0;
   for (size_t i = 0; i < len / 2; ++i) {
     const int hi = hexval(p[2 * i]), lo = hexval(p[2 * i + 1]);
@@ -284,6 +288,9 @@ void Flight::setup(const char* bridge_failures) {
 #ifdef VGQ_HAVE_SDLS_KEY
   sdls_tc_.configure(VGQ_SDLS_TC, kVgqSdlsKey, sizeof kVgqSdlsKey, VGQ_SDLS_SPI);
   sdls_tm_.init(VGQ_SDLS_TM, kVgqSdlsKey, sizeof kVgqSdlsKey);
+  // The TC anti-replay counter is RAM only: until the EGSE restores it (set_sdls_sn)
+  // a recorded authentic frame would pass the replay check (C17).
+  sdls_tc_.hold_for_restore();
 #else
   sdls_tc_.configure(SDLS_SVC_NONE, nullptr, 0);
   sdls_tm_.init(SDLS_SVC_NONE, nullptr, 0);
@@ -303,7 +310,7 @@ void Flight::setup(const char* bridge_failures) {
   init_radio();
   init_sensors();
 
-  last_valid_tc_ms_ = millis();
+  note_valid_tc(millis());              // command-loss timer and HK cmd_loss_timer_s start at boot
   set_mode(MODE_SAFE, "boot");          // like a real spacecraft: come up safe, wait for the ground
   safe_by_fdir_ = true;
   evr(1, 0x0001, "BOOT VGQ-1 FSW 3.0 rst=%u %s radio=%s %s TC %s TM %s", (unsigned)reset_cause_,
@@ -326,19 +333,39 @@ void Flight::setup(const char* bridge_failures) {
   evr_gate_.fill();                     // the routine-EVR budget starts full (PB-2.6)
 }
 
+// Reset cause (HK reset_cause, contract 15). RCC_CSR alone cannot separate a power-up
+// from a brown-out on the STM32U5 (classify_reset_cause()); the discriminator is a magic
+// word in TAMP backup register 31 (backup domain: kept through a reset while VDD stays
+// above the backup-domain POR, cleared by a power-up). Written on every boot, so a
+// brown-out during setup() is recognised too. Backup-domain write access (PWR_DBPR DBP)
+// is restored to its previous state afterwards (Zephyr CONFIG_STM32_BACKUP_PROTECTION).
 uint8_t Flight::read_reset_cause() {
 #if defined(RCC) && defined(RCC_CSR_SFTRSTF) && defined(RCC_CSR_RMVF)
   const uint32_t csr = RCC->CSR;
-  uint8_t cause = 255;
-  if (csr & RCC_CSR_IWDGRSTF) cause = 3;
+  uint8_t flags = 0;
+  if (csr & RCC_CSR_IWDGRSTF) flags |= RST_F_IWDG;
 #ifdef RCC_CSR_WWDGRSTF
-  else if (csr & RCC_CSR_WWDGRSTF) cause = 3;
+  if (csr & RCC_CSR_WWDGRSTF) flags |= RST_F_WWDG;
 #endif
-  else if (csr & RCC_CSR_SFTRSTF) cause = 2;
-  else if (csr & RCC_CSR_BORRSTF) cause = 4;
-  else if (csr & RCC_CSR_PINRSTF) cause = 1;
+  if (csr & RCC_CSR_SFTRSTF) flags |= RST_F_SOFT;
+  if (csr & RCC_CSR_BORRSTF) flags |= RST_F_BOR;
+  if (csr & RCC_CSR_PINRSTF) flags |= RST_F_PIN;
   RCC->CSR |= RCC_CSR_RMVF;            // clear the flags for the next boot
-  return cause;
+  bool warm = false;
+#if defined(TAMP) && defined(PWR_DBPR_DBP) && defined(RCC_APB3ENR_RTCAPBEN)
+  static const uint32_t kWarmMagic = 0x56475131u;   // "VGQ1"
+#ifdef RCC_AHB3ENR_PWREN
+  RCC->AHB3ENR |= RCC_AHB3ENR_PWREN;                // PWR_DBPR access
+#endif
+  RCC->APB3ENR |= RCC_APB3ENR_RTCAPBEN;             // TAMP registers are on the RTC APB clock
+  (void)RCC->APB3ENR;                               // read back: clock on before the access
+  warm = TAMP->BKP31R == kWarmMagic;
+  const uint32_t dbp = PWR->DBPR & PWR_DBPR_DBP;
+  PWR->DBPR |= PWR_DBPR_DBP;
+  TAMP->BKP31R = kWarmMagic;
+  if (!dbp) PWR->DBPR &= ~PWR_DBPR_DBP;
+#endif
+  return classify_reset_cause(flags, warm);
 #else
   return 255;                          // not accessible from this build: UNKNOWN
 #endif
@@ -422,8 +449,10 @@ void Flight::report_tcxo() {
 void Flight::init_sensors() {
   // Bus clear first (AS-T6): a target left mid-transfer by the previous run cannot hold SDA.
   bus_.begin(SENSOR_WIRE, kI2cClockHz, kPinSensorSda, kPinSensorScl);
-  if (!bus_.begin_clear_ok())
+  bus_clear_failed_ = !bus_.begin_clear_ok();   // retried by reprobe_instruments()
+  if (bus_clear_failed_)
     evr(3, 0x060A, "I2C bus clear: SDA or SCL still low after %u clocks", (unsigned)kI2cClearMaxPulses);
+  reprobe_.begin(millis());
   uint16_t h = 0;
   if (aru_.begin(bus_)) {
     h |= SNS_NICLA_ME;
@@ -498,8 +527,12 @@ void Flight::loop() {
   large_sent_ = false;
   evr_notes_pass_ = 0;
 
+  // EGSE RPCs (rpc_mailbox.h): at the top and between the phases that can be long, so a
+  // waiting Router Bridge thread is answered within one phase, not one whole pass.
+  service_rpc();
   service_radio(now);
   service_spec(now);
+  service_rpc();
   service_mag(now);
   service_bist(now);
 
@@ -508,7 +541,7 @@ void Flight::loop() {
   switch (seq_.poll(sclk_.seconds(), safe_by_fdir_, ev)) {
     case SEQ_EV_EXECUTE:
       evr(1, 0x0904, "SEQ slot %u: opcode 0x%02X", (unsigned)ev.slot, (unsigned)ev.cmd[0]);
-      execute_user(ev.cmd, ev.len <= kSeqCmdMax ? ev.len : kSeqCmdMax, kCmdVerSeqStored);
+      execute_user(ev.cmd, ev.len <= kSeqCmdMax ? ev.len : kSeqCmdMax, 0, CMD_SRC_STORED);
       if (ev.completed) evr(1, 0x0906, "sequence COMPLETE");
       break;
     case SEQ_EV_SKIPPED_LATE:
@@ -527,7 +560,15 @@ void Flight::loop() {
   if (sdls_tm_.poll_epoch_timeout(sclk_.seconds(), kSdlsEpochWaitS))
     evr(2, 0x0121, "SDLS TM: no epoch after %lu s: null SA (clear) until the EGSE sends one",
         (unsigned long)kSdlsEpochWaitS);
-  service_tx(now);
+  // Bounded wait for the TC anti-replay restore: without an EGSE the spacecraft must
+  // stay commandable, so the hold ends (from the in-RAM counter) and says so.
+  if (sdls_tc_.held() && sclk_.seconds() >= kSdlsSnWaitS) {
+    sdls_tc_.release_hold();
+    evr(2, 0x0124, "SDLS TC: no anti-replay restore after %lu s: accepting above sn %lu",
+        (unsigned long)kSdlsSnWaitS, (unsigned long)sdls_tc_.last_sn());
+  }
+  service_tx(now);                      // may run an E22 configure() (typically 60-80 ms)
+  service_rpc();
 
   if (now - last_1hz_ms_ >= 1000u) {
     last_1hz_ms_ = (now - last_1hz_ms_ > 3000u) ? now : last_1hz_ms_ + 1000u;   // no burst catch-up
@@ -618,13 +659,16 @@ void Flight::on_tx_end(uint32_t now, int32_t elapsed_ms, bool timeout) {
   }
   tx_state_ = TX_IDLE;
   if (cfg_change_after_frames_ && --cfg_change_after_frames_ == 0) radio_reconfig_pending_ = true;
-  if (reboot_pending_ && reboot_after_frames_ && --reboot_after_frames_ == 0) {
-    LOGF("WARN", "commanded reboot");
-    delay(kRebootDrainMs);              // the last tm_cadu copy leaves the UART (~43 ms)
+  if (reboot_pending_ && reboot_after_frames_ && --reboot_after_frames_ == 0) do_reboot("after 2 frames");
+}
+
+void Flight::do_reboot(const char* why) {
+  LOGF("WARN", "commanded reboot (%s)", why);
+  (void)why;
+  delay(kRebootDrainMs);                // the last tm_cadu copy leaves the UART (~43 ms)
 #if defined(__ARM_ARCH)
-    NVIC_SystemReset();
+  NVIC_SystemReset();
 #endif
-  }
 }
 
 void Flight::on_radio_fault(uint32_t now, int32_t code) {
@@ -643,9 +687,12 @@ void Flight::on_radio_fault(uint32_t now, int32_t code) {
       // The T37S cannot lower its output power: the thermal lever is duty cycle.
       // Silence the PA for a cool-down, then resume at SAFE cadence (frame period
       // doubled while PA_OVERTEMP stays set, frame_period_ms()).
-      if ((fdir_mask_ & FDIR_PA_OVERTEMP) && !tx_inhibit_) {
+      // A commanded TXINHIBIT in force does not skip the response (C21): the cool-down
+      // extends it (never shortens a longer one), and SAFE follows as for any episode.
+      if (fdir_mask_ & FDIR_PA_OVERTEMP) {
+        const uint32_t until = now + (uint32_t)kPaCooldownS * 1000u;
+        if (!tx_inhibit_ || (int32_t)(until - tx_inhibit_until_ms_) > 0) tx_inhibit_until_ms_ = until;
         tx_inhibit_ = true;
-        tx_inhibit_until_ms_ = now + (uint32_t)kPaCooldownS * 1000u;
         fdir_flags_ |= FDIR_TX_INHIBIT;
         evr(4, 0x0604, "PA over-temperature: transmitter OFF for %u s, SAFE", (unsigned)kPaCooldownS);
         enter_fdir_safe("PA over-temperature");
@@ -686,10 +733,16 @@ void Flight::process_tc(const uint8_t* in, size_t n, bool hardline, bool crc_ok)
   }
   ++cltu_ok_;
   last_cltu_ms_ = millis();
+  no_bit_lock_ = false;
   if (o.stage == TcStage::FRAME_REJECTED) {
     ++tc_bad_;
     const uint8_t pr = o.parse;
     evr(2, 0x0100 + pr, "TC frame rejected: %s", tc_parse_result_name(o.parse));
+    return;
+  }
+  if (o.stage == TcStage::SDLS_REJECTED && o.sdls == Sdls::SDLS_NOT_RESTORED) {
+    ++tc_bad_;                                     // authentic: not a security fault (no FDIR)
+    evr(2, 0x0123, "SDLS TC refused: anti-replay counter not restored by the EGSE yet");
     return;
   }
   if (o.stage == TcStage::SDLS_REJECTED) {
@@ -722,28 +775,33 @@ void Flight::process_tc(const uint8_t* in, size_t n, bool hardline, bool crc_ok)
   switch (o.verdict) {
     case Farm1::ACCEPT:
     case Farm1::ACCEPT_BYPASS: {
-      last_valid_tc_ms_ = t;
+      note_valid_tc(t);
       contact = true;
-      if (revert_armed_) {                         // the ground followed the radio change
+      // Only an RF frame proves the ground followed the radio change; the hardline
+      // umbilical says nothing about the RF link (C19).
+      if (revert_armed_ && !hardline) {
         revert_armed_ = false;
         evr(1, 0x0210, "radio change confirmed by ground (code %u, ch %u)", (unsigned)rcfg_.rate_code,
             (unsigned)rcfg_.channel);
       }
-      const uint8_t tc_seq = o.verdict == Farm1::ACCEPT ? f.seq : kCmdVerSeqBypass;
+      // The source travels beside N(S), never inside it (every N(S) 0..255 is valid).
+      const bool ad = o.verdict == Farm1::ACCEPT;
+      const uint8_t tc_seq = ad ? f.seq : 0u;
+      const CmdSource src = ad ? CMD_SRC_AD : CMD_SRC_BD;
       const uint8_t* u = nullptr;
       size_t un = 0;
       const CmdError he = parse_tc_header(f.data, f.data_len, u, un);
-      if (he != CE_OK) cmd_reject(tc_seq, 0, he);
-      else execute_user(u, un, tc_seq);
+      if (he != CE_OK) cmd_reject(tc_seq, src, 0, he);
+      else execute_user(u, un, tc_seq, src);
       break;
     }
     case Farm1::CONTROL_UNLOCK:
-      last_valid_tc_ms_ = t;
+      note_valid_tc(t);
       contact = true;
       evr(1, 0x0201, "COP-1 UNLOCK");
       break;
     case Farm1::CONTROL_SET_VR:
-      last_valid_tc_ms_ = t;
+      note_valid_tc(t);
       contact = true;
       evr(1, 0x0202, "COP-1 SET V(R)=%u", (unsigned)farm_.vr());
       break;
@@ -805,9 +863,17 @@ void Flight::service_tx(uint32_t now) {
   // A magnetometer sample in progress completes first (<= kMagCollectTimeoutMs): the
   // RM3100s are sampled in PA-off windows.
   if (mag_phase_ == MAG_COLLECT) return;
-  const uint32_t period = hibernating_ ? (uint32_t)beacon_s_ * 1000u : period_now_ms();
+  // Hibernation: one beacon every beacon_s - the HK packet, preceded only by what still
+  // fits in kBeaconMaxFrames frames (the rest of the real-time backlog is in the SSR), the
+  // frames after the first at the normal period (PB-1, C20).
+  const bool beacon_rest = hibernating_ && beacon_frames_left_ > 0;
+  const uint32_t period = hibernating_ && !beacon_rest ? (uint32_t)beacon_s_ * 1000u : period_now_ms();
   if (now - last_tx_start_ms_ < period) return;
-  if (hibernating_) gen_hk(true);                   // the hibernation beacon is one HK packet
+  if (hibernating_ && !beacon_rest) {
+    beacon_frames_left_ = dl_.prepare_beacon(kSpPriHdrLen + kSpSecHdrLen + kHkLen, kBeaconMaxFrames);
+    gen_hk(true);                                   // the hibernation beacon HK packet
+  }
+  if (beacon_frames_left_) --beacon_frames_left_;
   send_next_frame(now);
 }
 
@@ -828,7 +894,7 @@ void Flight::send_next_frame(uint32_t now) {
   Clcw clcw;
   clcw.vcid = 0;
   clcw.no_rf_available = false;
-  clcw.no_bit_lock = (now - last_cltu_ms_) > kNoBitLockMs;
+  clcw.no_bit_lock = no_bit_lock_;                  // latched in tick_1hz (no millis() wrap)
   farm_.fill_clcw(clcw);
 
   uint8_t cadu[kCaduLen];
@@ -952,6 +1018,7 @@ void Flight::enter_hibernate(uint16_t beacon_s) {
 void Flight::exit_hibernate(const char* why) {
   if (!hibernating_) return;
   hibernating_ = false;
+  beacon_frames_left_ = 0;
   fdir_flags_ &= (uint16_t)~FDIR_HIBERNATE;
   hib_apply_pending_ = true;
   evr(2, 0x0801, "WAKE: %s", why);
@@ -960,17 +1027,17 @@ void Flight::exit_hibernate(const char* why) {
 // =============================================================================
 // Commanding (PB-2, PB-8.6 item 5)
 // =============================================================================
-void Flight::cmd_verify(uint8_t seq, uint8_t opcode, uint8_t stage, uint8_t err, uint32_t tag) {
-  CmdVerPacket p{seq, opcode, stage, err, tag};
+void Flight::cmd_verify(uint8_t seq, CmdSource source, uint8_t opcode, uint8_t stage, uint8_t err, uint32_t tag) {
+  CmdVerPacket p{seq, opcode, stage, err, tag, source};
   uint8_t b[kCmdVerLen];
   (void)emit(APID_CMDVER, b, pack_cmdver(p, b), VC_RT_ENG, true, true);   // priority (PB-1.2)
 }
 
-void Flight::cmd_reject(uint8_t tc_seq, uint8_t opcode, CmdError e) {
+void Flight::cmd_reject(uint8_t tc_seq, CmdSource source, uint8_t opcode, CmdError e) {
   ++cmd_rej_;
   last_opcode_ = opcode;
   last_status_ = e;
-  cmd_verify(tc_seq, opcode, STAGE_FAILED, e, 0);
+  cmd_verify(tc_seq, source, opcode, STAGE_FAILED, e, 0);
   evr(2, 0x0500 + e, "command 0x%02X rejected, error %u", (unsigned)opcode, (unsigned)e);
 }
 
@@ -989,15 +1056,15 @@ void Flight::enter_fdir_safe(const char* why) {
   safe_by_fdir_ = true;
 }
 
-void Flight::execute_user(const uint8_t* u, size_t n, uint8_t tc_seq) {
+void Flight::execute_user(const uint8_t* u, size_t n, uint8_t tc_seq, CmdSource source) {
   Command c;
   const CmdError pe = parse_user_data(u, n, c);
   if (pe != CE_OK) {
-    cmd_reject(tc_seq, c.opcode, pe);
+    cmd_reject(tc_seq, source, c.opcode, pe);
     return;
   }
   const uint32_t now = millis();
-  const bool stored = tc_seq == kCmdVerSeqStored;
+  const bool stored = source == CMD_SRC_STORED;
   uint8_t result = CE_OK;
   uint32_t tag = 0;
   switch (c.opcode) {
@@ -1079,19 +1146,31 @@ void Flight::execute_user(const uint8_t* u, size_t n, uint8_t tc_seq) {
       aux_timeouts_ = loop_overruns_ = 0;
       loop_max_ms_ = 0;
       break;
-    case OP_REBOOT:
+    case OP_REBOOT: {
+      // After 2 more frames (the CMDVER goes out first, PB-2.3), but never later than two
+      // frame periods plus one frame's busy time, at least kRebootMaxWaitMs: a dead radio,
+      // a refused launch or a TX inhibit sends no frame at all (fdir_1hz, C18).
       reboot_pending_ = true;
       reboot_after_frames_ = 2;
-      break;
-    case OP_MAGCC: {
-      const bool a = mag_ob_.ok() && mag_ob_.set_cycle_count(c.a16);
-      const bool b = mag_ib_.ok() && mag_ib_.set_cycle_count(c.a16);
-      if (!a && !b) result = CE_HARDWARE;
+      const uint32_t bound = 2u * period_now_ms() + busy_estimate_ms();
+      reboot_deadline_ms_ = now + (bound > kRebootMaxWaitMs ? bound : kRebootMaxWaitMs);
       break;
     }
+    case OP_MAGCC:
+      // Never between POLL and collect (C29): a CC register write clears DRDY (HSHAKE
+      // DRC0 = 1, RM3100 manual 5.6.2) and the conversion would be scaled with the new
+      // gain. Applied now when no conversion is pending, else by service_mag() at its end.
+      if (!mag_ob_.ok() && !mag_ib_.ok()) {
+        result = CE_HARDWARE;
+        break;
+      }
+      mag_cc_ = c.a16;
+      mag_cc_pending_ = true;
+      if (!mag_ob_.pending() && !mag_ib_.pending() && !apply_mag_cc()) result = CE_HARDWARE;
+      break;
     case OP_CMDLOSS:
       cmd_loss_s_ = c.a32;
-      last_valid_tc_ms_ = now;
+      note_valid_tc(now);
       break;
     case OP_FDIRMASK:
       fdir_mask_ = c.a16;
@@ -1182,8 +1261,8 @@ void Flight::execute_user(const uint8_t* u, size_t n, uint8_t tc_seq) {
   last_status_ = result;
   if (result == CE_OK) ++cmd_acc_;
   else ++cmd_rej_;
-  cmd_verify(tc_seq, c.opcode, result == CE_OK ? STAGE_EXECUTED : STAGE_FAILED, result, tag);
-  LOGF("INFO", "CMD 0x%02X seq=%u -> %s", (unsigned)c.opcode, (unsigned)tc_seq,
+  cmd_verify(tc_seq, source, c.opcode, result == CE_OK ? STAGE_EXECUTED : STAGE_FAILED, result, tag);
+  LOGF("INFO", "CMD 0x%02X src=%u seq=%u -> %s", (unsigned)c.opcode, (unsigned)source, (unsigned)tc_seq,
        result == CE_OK ? "EXECUTED" : "FAILED");
 }
 
@@ -1386,6 +1465,15 @@ void Flight::periods_in_force(uint16_t period_s[kNumPeriodic]) const {
 void Flight::tick_1hz(uint32_t now) {
   const uint32_t t = sclk_.seconds();
   busy_ms_bucket_[((now / 1000u) + 1u) % 60u] = 0;   // the slot about to be reused
+  // CLCW No Bit Lock (v2): no CLTU decoded for 5 min. Latched once set, so the 2^32 ms
+  // millis() wrap cannot clear it again (process_tc clears it).
+  if (!no_bit_lock_ && now - last_cltu_ms_ > kNoBitLockMs) no_bit_lock_ = true;
+  // Seconds since the last valid TC, saturating (the ms reference never lags > ~3 s).
+  const uint32_t whole_s = (now - tc_age_ref_ms_) / 1000u;
+  if (whole_s) {
+    tc_age_ref_ms_ += whole_s * 1000u;
+    tc_age_s_ = tc_age_s_ > 0xFFFFFFFFu - whole_s ? 0xFFFFFFFFu : tc_age_s_ + whole_s;
+  }
   sample_due_ = true;                               // taken in the next PA-off window
 
   // Downlink load plan (PB-3.3, C-27): periodic packets stretched to <= 75 % of the
@@ -1472,7 +1560,6 @@ void Flight::cfdp_hk(uint8_t& state, uint32_t& seq, uint16_t& pm) const {
 
 void Flight::gen_hk(bool beacon) {
   HkPacket p{};
-  const uint32_t now = millis();
   p.fsw_mode = mode_;
   p.sclk_partition = sclk_.partition;
   p.uptime_s = sclk_.seconds();
@@ -1487,7 +1574,7 @@ void Flight::gen_hk(bool beacon) {
   p.tc_frames_bad = tc_bad_;
   p.farm_state = farm_.state();
   p.farm_vr = farm_.vr();
-  p.cmd_loss_timer_s = (now - last_valid_tc_ms_) / 1000u;
+  p.cmd_loss_timer_s = tc_age_s_;                  // time since the last valid TC (no millis() wrap)
   p.bus_temp_cC = clamp_i16(bus_temp_c_ * 100.0f);
   p.radio_fault = radio_fault_code_;
   p.radio_fault_reports = radio_fault_reports_;
@@ -1736,6 +1823,9 @@ void Flight::fdir_1hz(uint32_t now) {
     evr(3, 0x0602, "radio change NOT confirmed by uplink - reverting to ch %u code %u",
         (unsigned)revert_cfg_.channel, (unsigned)revert_cfg_.rate_code);
   }
+  // --- commanded REBOOT that cannot wait for its 2 frames (C18) ---
+  if (reboot_pending_ && (tx_inhibit_ || !radio_cfg_ok_ || (int32_t)(now - reboot_deadline_ms_) >= 0))
+    do_reboot(tx_inhibit_ ? "TX inhibited" : !radio_cfg_ok_ ? "radio not configured" : "no frame sent in time");
   // --- TX inhibit timer ---
   if (tx_inhibit_ && (int32_t)(now - tx_inhibit_until_ms_) > 0) {
     tx_inhibit_ = false;
@@ -1747,6 +1837,8 @@ void Flight::fdir_1hz(uint32_t now) {
     if (bus_temp_c_ >= kBusTempRedC) fdir_flags_ |= FDIR_AVI_OVERTEMP;
     else if (bus_temp_c_ < kBusTempRedC - 5.0f) fdir_flags_ &= (uint16_t)~FDIR_AVI_OVERTEMP;
   }
+  // --- instruments missing since boot (or a failed bus clear): re-probe with back-off ---
+  reprobe_instruments(now);
   // --- I2C bus: bus clear + re-initialisation, at most once per 10 s ---
   if (bus_.consecutive_errors() > kI2cFdirErrors && (fdir_mask_ & FDIR_I2C_BUS) &&
       (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs)) {
@@ -1771,6 +1863,9 @@ void Flight::fdir_1hz(uint32_t now) {
   if (aru_fail_count_ > 5 && (sensor_health_ & SNS_NICLA_ME)) {
     sensor_health_ &= (uint16_t)~(SNS_NICLA_ME | kMeBits);
     fdir_flags_ |= FDIR_SENSOR_LOST;
+    // No temperature any more (bus_temp_c_ is NAN): the avionics over-temperature flag
+    // cannot be judged and is not kept latched on a stale reading (C22).
+    fdir_flags_ &= (uint16_t)~FDIR_AVI_OVERTEMP;
     evr(3, 0x0606, "Nicla Sense ME stopped responding");
   } else if (aru_fail_count_ == 0 && (fdir_flags_ & FDIR_SENSOR_LOST) && (sensor_health_ & SNS_NICLA_ME)) {
     fdir_flags_ &= (uint16_t)~FDIR_SENSOR_LOST;
@@ -1797,8 +1892,58 @@ void Flight::bus_recover(uint32_t now, const char* why) {
   recovered_once_ = true;
   last_recover_ms_ = now;
   LOGF("WARN", "I2C bus recovery (%s)", why);
-  if (!bus_.recover())
+  bus_clear_failed_ = !bus_.recover();
+  if (bus_clear_failed_)
     evr(3, 0x060A, "I2C bus clear: SDA or SCL still low after %u clocks", (unsigned)kI2cClearMaxPulses);
+}
+
+// C28: a Nicla Sense ME or RM3100 that missed its one probe at boot (a transient NACK, a
+// glitch during REVID / CMM / BIST / CC, a bus clear that failed) was lost until the next
+// reboot. Enabled units that are not ok() are probed again, paced like the AS7265X driver
+// (ReprobeTimer: 30 s doubling to 10 min), only in a quiet window: PA off, no sample or
+// self-test pending, every lamp dark. A failed bus clear is retried first.
+void Flight::reprobe_instruments(uint32_t now) {
+  if (!reprobe_.due(now)) return;
+  if (tx_state_ != TX_IDLE || mag_phase_ != MAG_IDLE || mag_sample_pending_ || bist_pending_ != 0 ||
+      spec_.lamps_lit() || spec_.lamp_state_unknown())
+    return;
+  if (bus_clear_failed_ && (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs))
+    bus_recover(now, "re-probe");
+  bool acquired = false;
+  if ((sensor_enable_ & SNS_NICLA_ME) && !aru_.ok()) {
+    if (aru_.begin(bus_)) {
+      acquired = true;
+      aru_fail_count_ = 0;
+      sensor_health_ |= SNS_NICLA_ME;
+      evr(1, 0x060B, "instrument acquired: %s", "Nicla Sense ME");
+    }
+  }
+  for (uint8_t u = 0; u < kMagUnits; ++u) {
+    Rm3100& m = u ? mag_ib_ : mag_ob_;
+    const uint16_t bit = u ? (uint16_t)SNS_RM3100_IB : (uint16_t)SNS_RM3100_OB;
+    if (!(sensor_enable_ & bit) || m.ok()) continue;
+    if (m.begin(bus_, u ? kRm3100IbAddr : kRm3100ObAddr, mag_cc_)) {
+      acquired = true;
+      sensor_health_ |= bit;
+      bist_pending_ = (uint8_t)(bist_pending_ | (1u << u));   // self-test in the next quiet window
+      bist_wait_t0_ = now;
+      evr(1, 0x060B, "instrument acquired: %s", u ? "RM3100 inboard" : "RM3100 outboard");
+    }
+  }
+  reprobe_.done(now, acquired);
+}
+
+bool Flight::apply_mag_cc() {
+  mag_cc_pending_ = false;
+  const bool a = mag_ob_.ok() && mag_ob_.set_cycle_count(mag_cc_);
+  const bool b = mag_ib_.ok() && mag_ib_.set_cycle_count(mag_cc_);
+  return a || b;
+}
+
+void Flight::note_valid_tc(uint32_t now) {
+  last_valid_tc_ms_ = now;
+  tc_age_s_ = 0;
+  tc_age_ref_ms_ = now;
 }
 
 // =============================================================================
@@ -1947,6 +2092,7 @@ bool Flight::spec_attitude(SpecAttitude& att) {
 // Magnetometers and the ARU (PB-8.6 item 3 "MAG/ARU sampling"; F-04, F-60)
 // =============================================================================
 void Flight::service_mag(uint32_t now) {
+  if (mag_phase_ == MAG_IDLE && mag_cc_pending_) (void)apply_mag_cc();   // a MAGCC deferred by a sample
   if (mag_phase_ == MAG_IDLE) {
     if (!sample_due_) return;
     sample_due_ = false;
@@ -2003,16 +2149,20 @@ void Flight::start_mag_sample() {
         mstat_body_.add(last_mag_ut_[0], last_mag_ut_[1], last_mag_ut_[2]);
       }
       aru_env_valid_ = aru_.read_env(r);
-      if (aru_env_valid_ && (r.env_flags & 4u)) bus_temp_c_ = r.t_c;
+      // Only a fresh T reading is a bus temperature; anything else is "unknown" (NAN ->
+      // HK kNaI16, FDIR skips the check) instead of the last value forever (C22).
+      bus_temp_c_ = (aru_env_valid_ && (r.env_flags & 4u)) ? r.t_c : NAN;
       aru_last_ = r;
       sensor_health_ = (uint16_t)((sensor_health_ & ~kMeBits) | SNS_NICLA_ME |
                                   me_bits(r.motion_flags, aru_env_valid_ ? r.env_flags : 0u));
     } else {
       aru_valid_ = aru_env_valid_ = false;
+      bus_temp_c_ = NAN;
       if (aru_fail_count_ < 255u) ++aru_fail_count_;
     }
   } else {
     aru_valid_ = aru_env_valid_ = false;            // disabled: no stale attitude or environment
+    bus_temp_c_ = NAN;
   }
 }
 
@@ -2079,8 +2229,48 @@ void Flight::service_cfdp(uint32_t now) {
 }
 
 // =============================================================================
-// EGSE services (PB-4.1)
+// EGSE services (PB-4.1): Router Bridge handlers and the services they run
 // =============================================================================
+// ---- Router Bridge handlers: post to the mailbox, or run directly on the loop thread ----
+bool Flight::rpc_set_partition(int p) {
+  if (rpc_.on_loop_thread()) return egse_set_partition(p);
+  int32_t r = 0;
+  return rpc_.call(RPC_SET_PARTITION, (int32_t)p, nullptr, 0, r) && r != 0;
+}
+
+bool Flight::rpc_set_sdls_sn(int sn) {
+  if (rpc_.on_loop_thread()) return egse_set_sdls_sn(sn);
+  int32_t r = 0;
+  return rpc_.call(RPC_SET_SDLS_SN, (int32_t)sn, nullptr, 0, r) && r != 0;
+}
+
+bool Flight::rpc_hardline_cltu(const char* hex, size_t len) {
+  if (rpc_.on_loop_thread()) return egse_hardline_cltu(hex, len);
+  int32_t r = 0;
+  return rpc_.call(RPC_HL_CLTU, 0, hex, len, r) && r != 0;   // > 220 characters: false at once
+}
+
+int Flight::rpc_cfdp_pdu(const char* hex, size_t len) {
+  if (rpc_.on_loop_thread()) return egse_cfdp_pdu(hex, len);
+  if (len > kRpcTextMax) return -1;                         // malformed: the loop would refuse it
+  int32_t r = 0;
+  return rpc_.call(RPC_CFDP_PDU, 0, hex, len, r) ? (int)r : 0;   // not run: busy, the EGSE retries
+}
+
+void Flight::service_rpc() {
+  const RpcRequest* q = rpc_.take();
+  if (q == nullptr) return;
+  int32_t r = 0;
+  switch (q->op) {
+    case RPC_SET_PARTITION: r = egse_set_partition((int)q->arg) ? 1 : 0; break;
+    case RPC_SET_SDLS_SN: r = egse_set_sdls_sn((int)q->arg) ? 1 : 0; break;
+    case RPC_HL_CLTU: r = egse_hardline_cltu(q->text, q->len) ? 1 : 0; break;
+    case RPC_CFDP_PDU: r = egse_cfdp_pdu(q->text, q->len); break;
+    default: break;
+  }
+  rpc_.complete(r);
+}
+
 bool Flight::egse_set_partition(int p) {
   if (p < 1 || p > 65534) {
     evr(2, 0x0122, "SDLS TM epoch %ld refused (current %u)", (long)p, (unsigned)sdls_tm_.epoch());
@@ -2104,18 +2294,18 @@ bool Flight::egse_set_sdls_sn(int sn) {
   return true;
 }
 
-bool Flight::egse_hardline_cltu(const String& hex) {
+bool Flight::egse_hardline_cltu(const char* hex, size_t len) {
   uint8_t b[110];                                   // hl_cltu: <= 220 hex characters
-  const size_t n = hex_decode(hex, b, sizeof b, 2, 220);
+  const size_t n = hex_decode(hex, len, b, sizeof b, 2, 220);
   if (n == 0) return false;
   LOGF("INFO", "hardline (umbilical) CLTU, %u octets", (unsigned)n);
   process_tc(b, n, true, true);
   return true;
 }
 
-int Flight::egse_cfdp_pdu(const String& hex) {
+int Flight::egse_cfdp_pdu(const char* hex, size_t len) {
   uint8_t pdu[kCfdpRelayMaxPduLen];
-  const size_t n = hex_decode(hex, pdu, sizeof pdu, 2 * kCfdpHdrLen, 2 * kCfdpRelayMaxPduLen);
+  const size_t n = hex_decode(hex, len, pdu, sizeof pdu, 2 * kCfdpHdrLen, 2 * kCfdpRelayMaxPduLen);
   if (n == 0) return -1;                            // bad hex or length
   // Busy (retry): VC3 lacks room for this packet, or SDLS TM waits for its epoch.
   if (!sdls_tm_.ready() || dl_.backlog(VC_FILE) + kSpPriHdrLen + kSpSecHdrLen + n > kCfdpVc3BacklogMax) return 0;
@@ -2137,7 +2327,7 @@ int Flight::egse_cfdp_pdu(const String& hex) {
 // =============================================================================
 bool Flight::notify_room(size_t payload_octets) const {
   const int room = VGQ_ROUTER_SERIAL.availableForWrite();
-  return room > 0 && (size_t)room >= payload_octets + kNotifyMargin;
+  return room > 0 && (size_t)room >= payload_octets + kNotifyMargin + kRpcResponseReserve;
 }
 
 bool Flight::send_cadu(const uint8_t* cadu) {

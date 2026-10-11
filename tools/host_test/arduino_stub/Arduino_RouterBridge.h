@@ -1,5 +1,8 @@
 #pragma once
 #include "Arduino.h"
+// The real header includes these too (Arduino_RouterBridge 0.4.3 bridge.h:30-31).
+#include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 struct BridgeStub {
   bool begin() { return true; }
   template <class F> bool provide(const char*, F) { return true; }

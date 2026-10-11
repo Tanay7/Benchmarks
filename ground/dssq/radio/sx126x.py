@@ -18,18 +18,27 @@ MCU -> Linux notifications (handlers registered by attach()):
       raw frequency-error estimate in Hz (signed, no calibration applied).
   rf_evt(line: str), '|'-separated:
       S|fw|chip|state|ch|code|pwr|flags|rx_gain_reg|rx_ok|rx_crc|rx_hdr|tx_ok|tx_fail|
-        cad_busy|cad_forced|faults|resets|txq|uptime_s|foff_hz     status, every 5 s and
-        after each configuration change. flags: b0 CAD before TX, b1 Rx boosted gain
+        cad_busy|cad_forced|faults|resets|txq|uptime_s|foff_hz[|chip_id|tcxo_mv]
+        status, every 5 s and after each configuration change. flags: b0 CAD before TX, b1 Rx boosted gain
         requested, b2 boosted gain VERIFIED (register 0x08AC read back = 0x96), b3 the
         TCXO did not start and RadioLib fell back to the crystal (VERIFY the module),
         b4 an rf_cfg / rf_foff change is waiting to be applied (radio busy), b5 an
         OpError calibration bit (DS Table 13-86 bits 0-4) was seen since the radio's
         last initialisation. foff_hz: RF offset in effect (signed Hz, rf_foff); a status
-        line without it (an older sketch) parses with freq_offset_hz = None.
+        line without it (an older sketch) parses with freq_offset_hz = None. chip_id
+        (1262 / 1268, the sketch's DSSQ_SX_CHIP) and tcxo_mv (its kSxTcxoMv, 0 = no TCXO)
+        are the compiled hardware settings (interface decision I3); the backend compares
+        them with [radio.sx126x] chip / tcxo_v and raises a HW_MISMATCH event and the
+        `hw_mismatch` status text, since editing station.toml cannot change a compiled
+        sketch. A line without them (older sketch) parses with both None: no check.
+        uptime_s is millis() / 1000 and wraps from 4294967 to 0 after 2^32 ms (49.7 days):
+        a decrease counts as an MCU reboot only when it is not that wrap, or when the
+        cumulative counters (reset only at boot) went down as well.
       C|detected|ms        result of an operator CAD (rf_cad)
       T|ok|ms|octets       an uplink transmission finished (ok = 0: TX timeout)
       E|code|text          fault / recovery event (EVENT_CODES)
-Linux -> MCU calls (Bridge.provide_safe on the MCU: executed in its loop thread):
+Linux -> MCU calls (Bridge.provide_safe on the MCU; the handler only posts the request to
+a mailbox and the sketch's loop() executes it on the loop stack, interface decision I4):
   rf_tx(hex) -> 1 queued | 0 queue full | -1 rejected (length/hex) | -2 radio down
       at most RF_TX_MAX_OCTETS octets, so the request fits the MCU's 256-octet RPC
       inbound buffer (a CLTU of a 64-octet TC frame is 90 octets).
@@ -100,11 +109,17 @@ EVENT_CODES = {1: "BUSY_TIMEOUT", 2: "SPI_ERROR", 3: "TX_TIMEOUT", 4: "INIT_FAIL
                10: "CONFIG_FAILED", 11: "MODE_RESTORED", 12: "TCXO_FALLBACK"}
 STATUS_FIELDS = ("fw", "chip", "state", "channel", "rate_code", "power_code", "flags", "rx_gain_reg",
                  "rx_ok", "rx_crc_err", "rx_hdr_err", "tx_ok", "tx_fail", "cad_busy", "cad_forced",
-                 "faults", "resets", "txq", "uptime_s", "freq_offset_hz")
+                 "faults", "resets", "txq", "uptime_s", "freq_offset_hz", "chip_id", "tcxo_mv")
+STATUS_BASE_LEN = 20                   # fields of a status line without chip_id / tcxo_mv
 _U32 = 0xFFFFFFFF
 STATUS_RANGES = {"state": (0, 4), "channel": (0, CHANNEL_MAX), "rate_code": (0, 7), "power_code": (0, 3),
                  "flags": (0, 63), "rx_gain_reg": (0, 255), "txq": (0, 16),
-                 "freq_offset_hz": (-FOFF_MAX_HZ, FOFF_MAX_HZ)}
+                 "freq_offset_hz": (-FOFF_MAX_HZ, FOFF_MAX_HZ), "chip_id": (1000, 9999), "tcxo_mv": (0, 3300)}
+# Counters the MCU zeroes only at boot: one going down confirms a reboot (uptime wrap check).
+BOOT_COUNTERS = ("rx_ok", "rx_crc_err", "rx_hdr_err", "tx_ok", "tx_fail", "cad_busy", "cad_forced",
+                 "faults", "resets")
+UPTIME_WRAP_S = (1 << 32) // 1000      # millis() / 1000 wraps from 4294967 to 0 (49.7 days)
+UPTIME_WRAP_TOL_S = 600                # status lines may be missed around the wrap
 SIGNED_STATUS_FIELDS = frozenset({"freq_offset_hz"})
 RX_GAIN_BOOSTED = 0x96                 # SX1261/2 DS Table 9-3
 _UNSIGNED_RE = re.compile(r"[0-9]{1,10}")      # ASCII digits only: str.isdigit() also accepts e.g. "²"
@@ -153,10 +168,11 @@ def parse_rf_rx(args: tuple, ert: float) -> RxPacket | None:
 
 def parse_status(fields: list[str]) -> dict | None:
     """Validates the fields of an S| status line (without the leading 'S'). A line
-    without the trailing foff_hz field (sketch before rf_foff) gives freq_offset_hz None."""
-    if len(fields) not in (len(STATUS_FIELDS), len(STATUS_FIELDS) - 1):
+    without the trailing foff_hz field (sketch before rf_foff) gives freq_offset_hz None;
+    one without chip_id / tcxo_mv (sketch before I3) gives those None."""
+    if len(fields) not in (len(STATUS_FIELDS), STATUS_BASE_LEN, STATUS_BASE_LEN - 1):
         return None
-    out: dict[str, Any] = {"freq_offset_hz": None}
+    out: dict[str, Any] = {"freq_offset_hz": None, "chip_id": None, "tcxo_mv": None}
     for name, txt in zip(STATUS_FIELDS, fields, strict=False):   # shorter list: legacy line
         if name in ("fw", "chip"):
             if not 0 < len(txt) <= 32:
@@ -176,6 +192,22 @@ def parse_status(fields: list[str]) -> dict | None:
     out["cfg_pending"] = bool(out["flags"] & 16)
     out["calib_error"] = bool(out["flags"] & 32)
     return out
+
+
+def uptime_rebooted(prev: Mapping[str, Any], st: Mapping[str, Any]) -> bool:
+    """True when status `st` after `prev` shows an MCU reboot: uptime went down and it is
+    not the 32-bit millis() wrap - or it looks like the wrap but a boot counter went down."""
+    if st["uptime_s"] >= prev["uptime_s"]:
+        return False
+    if prev["uptime_s"] >= UPTIME_WRAP_S - UPTIME_WRAP_TOL_S and st["uptime_s"] <= UPTIME_WRAP_TOL_S:
+        return any(st[k] < prev[k] for k in BOOT_COUNTERS)
+    return True
+
+
+def chip_number(chip: object) -> int | None:
+    """[radio.sx126x] chip ("SX1268" / "SX1262", any case) -> 1268 / 1262; None otherwise."""
+    m = re.fullmatch(r"SX(126[28])", str(chip).strip().upper())
+    return int(m.group(1)) if m else None
 
 
 def _check_foff(hz: object) -> int:
@@ -210,7 +242,15 @@ class Sx126xBridge(RadioBackend):
         self._max_tx_backlog = max_tx_backlog
         self._need_push = False                          # station config must be (re)sent
         self._next_push_t = 0.0
-        self._last_uptime: int | None = None
+        self._last_status: dict | None = None
+        sx = (radio_cfg or {}).get("sx126x")
+        sx = sx if isinstance(sx, Mapping) else {}
+        tcxo_v = sx.get("tcxo_v")
+        # [radio.sx126x] chip / tcxo_v the compiled sketch must match (None: not configured)
+        self.expected_chip = chip_number(sx["chip"]) if "chip" in sx else None
+        self.expected_tcxo_mv = round(float(tcxo_v) * 1000) \
+            if isinstance(tcxo_v, (int, float)) and not isinstance(tcxo_v, bool) else None
+        self.hw_mismatch: str | None = None
         self.freq_offset_hz = _check_foff(freq_offset_hz)   # offset the station must use
         self._foff_t = -float("inf")                     # when the last rf_foff reply arrived
         self._next_foff_t = 0.0                          # pacing of automatic re-sends
@@ -272,10 +312,11 @@ class Sx126xBridge(RadioBackend):
         kind, *f = line.split("|")
         with self._lock:
             if kind == "S" and (st := parse_status(f)) is not None:
-                if self._last_uptime is not None and st["uptime_s"] < self._last_uptime:
+                if self._last_status is not None and uptime_rebooted(self._last_status, st):
                     self.stats["mcu_reboots"] += 1
                     self._need_push = True                   # MCU rebooted with compiled defaults
-                self._last_uptime = st["uptime_s"]
+                self._last_status = st
+                st["hw_mismatch"] = self._check_hw(st, now)
                 self.mcu, self.mcu_t = st, now
             elif kind == "C" and len(f) == 2 and f[0] in ("0", "1") and (ms := _dec(f[1], 0, _U32)) is not None:
                 self.last_cad = {"t": now, "detected": f[0] == "1", "duration_ms": ms}
@@ -292,6 +333,25 @@ class Sx126xBridge(RadioBackend):
                     log.info("ground SX126x recovered: %s", text)
             else:
                 self.stats["evt_rejected"] += 1
+
+    def _check_hw(self, st: Mapping[str, Any], now: float) -> str | None:
+        """Compiled chip / TCXO of the station sketch (status chip_id, tcxo_mv) against
+        [radio.sx126x]; a new mismatch is logged and raised as a HW_MISMATCH event. Caller
+        holds the lock."""
+        why = []
+        if st["chip_id"] is not None and self.expected_chip is not None and st["chip_id"] != self.expected_chip:
+            why.append(f"station sketch built for SX{st['chip_id']} (DSSQ_SX_CHIP), [radio.sx126x] chip = "
+                       f"SX{self.expected_chip}")
+        if st["tcxo_mv"] is not None and self.expected_tcxo_mv is not None \
+                and st["tcxo_mv"] != self.expected_tcxo_mv:
+            why.append(f"station sketch TCXO {st['tcxo_mv']} mV (kSxTcxoMv), [radio.sx126x] tcxo_v = "
+                       f"{self.expected_tcxo_mv / 1000:g} V")
+        text = "; ".join(why) + ": rebuild the station sketch or correct station.toml" if why else None
+        if text is not None and text != self.hw_mismatch:
+            self.events.append({"t": now, "code": 0, "name": "HW_MISMATCH", "text": text[:120]})
+            log.warning("ground SX126x configuration mismatch: %s", text)
+        self.hw_mismatch = text
+        return text
 
     # ------------------------------------------------------ RPC helper
     def _count(self, key: str) -> None:
@@ -484,7 +544,8 @@ class Sx126xBridge(RadioBackend):
                 "rx_boost": st["rx_boost"], "rx_boost_verified": st["rx_boost_verified"],
                 "freq_offset_hz": st["freq_offset_hz"], "tcxo_fallback": st["tcxo_fallback"],
                 "calib_error": st["calib_error"], "cfg_pending": st["cfg_pending"],
-                "chip": st["chip"], "fw": st["fw"], "state": st["state_name"]}
+                "chip": st["chip"], "fw": st["fw"], "state": st["state_name"],
+                "chip_id": st["chip_id"], "tcxo_mv": st["tcxo_mv"], "hw_mismatch": st["hw_mismatch"]}
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -492,4 +553,5 @@ class Sx126xBridge(RadioBackend):
                     "mcu_age_s": None if self.mcu_t is None else self.clock() - self.mcu_t,
                     "stats": dict(self.stats), "tx_backlog": len(self._tx_backlog),
                     "rx_queue": len(self._rx), "last_cad": self.last_cad, "last_tx": self.last_tx,
-                    "freq_offset_hz": self.freq_offset_hz, "events": list(self.events)[-10:]}
+                    "freq_offset_hz": self.freq_offset_hz, "hw_mismatch": self.hw_mismatch,
+                    "events": list(self.events)[-10:]}

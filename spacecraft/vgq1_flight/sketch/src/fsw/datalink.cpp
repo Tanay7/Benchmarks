@@ -83,6 +83,19 @@ void Downlink::reset_vc(uint8_t v) {
   if (v < kNumDataVcs) vc_[v].reset();          // ovf_[v] is kept (counted since init())
 }
 
+uint8_t Downlink::prepare_beacon(size_t hk_len, uint8_t max_frames) {
+  const size_t dfl = data_field_len();
+  if (max_frames == 0) max_frames = 1;
+  vc_[VC_RT_SCI].reset();
+  size_t n = vc_[VC_RT_ENG].bytes() + hk_len;
+  if (dfl == 0 || n > (size_t)max_frames * dfl) {
+    vc_[VC_RT_ENG].reset();
+    n = hk_len;
+  }
+  const size_t frames = dfl ? (n + dfl - 1) / dfl : 1;
+  return (uint8_t)(frames == 0 ? 1 : frames > max_frames ? max_frames : frames);
+}
+
 uint32_t Downlink::overflows(uint8_t v) const { return v < kNumDataVcs ? ovf_[v] : 0; }
 
 void Downlink::next_cadu(const Clcw& clcw, uint8_t cadu[kCaduLen], DownlinkFrame& info) {

@@ -32,15 +32,24 @@ Security model (PB-5.6, PB-5.7)
     server without a token): a POST must be Content-Type application/json, which a browser
     cannot send cross-origin without a CORS preflight that this server never grants; when the
     browser sends Origin, its host must equal the Host header; a loopback-bound server also
-    requires a loopback Host header, so a rebound domain name cannot read or command.
+    requires a loopback Host header, so a rebound domain name cannot read or command. A
+    LAN-bound server (App Lab: 0.0.0.0) answers only a Host that is an IP literal, a
+    single-label or mDNS <name>.local name (both resolve only on the LAN), this machine's
+    host name, or an entry of [gds] http_allowed_hosts: a web page that rebinds its own DNS
+    name to the board cannot read telemetry or downloaded files through a browser on the
+    station LAN. Any other DNS name used to reach the dashboard must be listed in
+    http_allowed_hosts.
   * The page itself inserts every telemetry-derived string as text (PB-5.7); its CSP hash
     source makes the browser refuse injected scripts and inline event handlers anyway.
   * Every response: Cache-Control no-store, X-Content-Type-Options nosniff, a restrictive CSP.
     Request bodies are limited to MAX_BODY octets; JSON is validated field by field; a file
     download accepts only a name matching a strict pattern that is a regular file (not a
     symbolic link) directly inside its directory.
-  * Bounded resources: at most MAX_CLIENTS concurrent connections, a socket timeout per
-    connection, HTTP/1.0 (one request per connection).
+  * Bounded resources: at most MAX_CLIENTS concurrent connections, at most
+    MAX_CLIENTS_PER_IP of them from one address, a TOTAL deadline of REQUEST_DEADLINE_S
+    for receiving the request line, headers and body (a client trickling one octet at a
+    time cannot hold a slot), a socket timeout per send, HTTP/1.0 (one request per
+    connection).
 The request handler is a documented error boundary (PB-0.4): an unexpected exception in a
 GroundStation call is logged and answered with 500; it never stops the server thread. The
 web thread never calls the Router Bridge and never blocks on the radio (PB-5.6).
@@ -51,6 +60,8 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import io
+import ipaddress
 import json
 import logging
 import math
@@ -59,6 +70,7 @@ import re
 import shutil
 import socket
 import threading
+import time
 from collections.abc import Callable, Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,7 +91,9 @@ MAX_BODY = 131_072                  # octets of a POST body (PB-5.6: larger -> 4
 DRAIN_MAX = 4 * MAX_BODY            # an oversized body is read and discarded up to this, so the
                                     # client receives the 413 instead of a connection reset
 MAX_CLIENTS = 32                    # concurrent connections; more are closed at once
-SOCKET_TIMEOUT_S = 15.0             # per connection (a stalled client cannot hold a thread)
+MAX_CLIENTS_PER_IP = 8              # of them from one client address (one host cannot take every slot)
+REQUEST_DEADLINE_S = 10.0           # whole request (line, headers, body) must arrive within this
+SOCKET_TIMEOUT_S = 15.0             # per send of a response (a socket timeout bounds ONE operation only)
 CMD_TEXT_MAX = 1024                 # characters of one command line
 SEQ_TEXT_MAX = 65_536               # characters of a sequence file (PB-5.6)
 LIST_MAX = 1000                     # entries of /api/files and /api/tdm (newest first)
@@ -118,8 +132,8 @@ FIELD_ENUMS = {
     "HK.sdls_tc_service": "SDLS_SERVICES", "HK.sdls_tm_service": "SDLS_SERVICES",
     "HK.sdls_tm_state": "SDLS_TM_STATES", "HK.cfdp_state": "CFDP_STATES", "HK.seq_state": "SEQ_STATES",
     "HK.beacon_level": "BEACON_LEVELS", "RF.radio_model": "RADIO_MODELS", "RF.framing": "FRAMINGS",
-    "CMDVER.stage": "CMD_STAGES", "CMDVER.error_code": "CMD_ERRORS", "SPEC.spec_mode": "SPEC_MODES",
-    "SPEC.spec_class": "SPEC_CLASSES"}
+    "CMDVER.stage": "CMD_STAGES", "CMDVER.cmd_source": "CMD_SOURCES", "CMDVER.error_code": "CMD_ERRORS",
+    "SPEC.spec_mode": "SPEC_MODES", "SPEC.spec_class": "SPEC_CLASSES"}
 FIELD_BITS = {
     "HK.fdir_flags": "FDIR_BITS", "HK.sensor_health": "SENSOR_BITS", "RF.rf_flags": "RF_FLAG_BITS",
     "MAG.flags": "MAG_FLAG_BITS", "ATT.flags": "ATT_FLAG_BITS", "ENV.flags": "ENV_FLAG_BITS",
@@ -250,6 +264,7 @@ def dictionary_doc() -> dict[str, Any]:
                               "desc": str(spec["desc"]) if spec is not None else VARIABLE_DESC.get(apid, "")}
     enums = {"MODES": dic.MODES, "RESET_CAUSES": dic.RESET_CAUSES, "FARM_STATES": dic.FARM_STATES,
              "EVR_SEVERITY": dic.EVR_SEVERITY, "CMD_STAGES": dic.CMD_STAGES, "CMD_ERRORS": dic.CMD_ERRORS,
+             "CMD_SOURCES": dic.CMD_SOURCES,
              "RADIO_MODELS": dic.RADIO_MODELS, "FRAMINGS": dic.FRAMINGS, "SDLS_SERVICES": dic.SDLS_SERVICES,
              "SDLS_TM_STATES": dic.SDLS_TM_STATES, "CFDP_STATES": dic.CFDP_STATES,
              "SEQ_STATES": dic.SEQ_STATES, "BEACON_LEVELS": dic.BEACON_LEVELS,
@@ -269,8 +284,7 @@ def dictionary_doc() -> dict[str, Any]:
     return {"commands": commands, "directives": dict(dic.DIRECTIVES),
             "ground_directives": dict(dic.GROUND_DIRECTIVES), "packets": packets, "enums": enums,
             "field_enums": FIELD_ENUMS, "field_bits": FIELD_BITS,
-            "apids": {"HK": dic.APID_HK, "RF": dic.APID_RF, "CMDVER": dic.APID_CMDVER,
-                      "CMDVER_SEQ_BYPASS": dic.CMDVER_SEQ_BYPASS, "CMDVER_SEQ_STORED": dic.CMDVER_SEQ_STORED},
+            "apids": {"HK": dic.APID_HK, "RF": dic.APID_RF, "CMDVER": dic.APID_CMDVER},
             "spectral": spec_doc}
 
 
@@ -506,18 +520,35 @@ class WebApp:
     """Per-server state: the station, the security settings and the static responses."""
 
     def __init__(self, gs: StationApi, *, token: str, auth_token: str, exposed: bool, loopback_bind: bool,
-                 html_path: Path = HTML_PATH):
+                 html_path: Path = HTML_PATH, allowed_hosts: tuple[str, ...] = ()):
         self.gs = gs
         self.token = token
         self.auth_token = auth_token
         self.exposed = exposed
         self.loopback_bind = loopback_bind
+        name = socket.gethostname().strip().lower()
+        self.allowed_hosts = frozenset({*LOOPBACK_HOSTS, *(h.strip().lower() for h in allowed_hosts),
+                                        *((name, name + ".local") if name else ())})
         html = html_path.read_text(encoding="utf-8")
         self.script_hash = inline_script_hash(html)
         self.csp = dashboard_csp(self.script_hash)
         self.html = html.encode("utf-8")
         self._dict_lock = threading.Lock()
         self._dict_json: bytes | None = None
+
+    def host_allowed(self, host: str) -> bool:
+        """Host header name (no port) a browser may use to reach this server."""
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None
+        if self.loopback_bind:
+            return host in LOOPBACK_HOSTS or (ip is not None and ip.is_loopback)
+        # A rebinding page needs a public DNS name its owner controls. A single-label name or an
+        # mDNS <name>.local resolves only on the LAN itself (inside the App Lab container the host
+        # name is the container's, so the board's own <name>.local could not be listed anyway).
+        return ip is not None or host in self.allowed_hosts or (
+            bool(host) and (host.endswith(".local") or "." not in host.rstrip(".")))
 
     def dictionary_json(self) -> bytes:
         """Built once on first use (the loci take ~0.1 s), then served from memory."""
@@ -542,25 +573,64 @@ class WebServer(ThreadingHTTPServer):
     def __init__(self, addr: tuple[str, int], app: WebApp, max_clients: int = MAX_CLIENTS):
         self.app = app
         self._slots = threading.BoundedSemaphore(max_clients)
+        self.max_per_ip = max(2, min(MAX_CLIENTS_PER_IP, max_clients // 4))
+        self._per_ip: dict[str, int] = {}
+        self._per_ip_lock = threading.Lock()
         family = socket.AF_INET6 if ":" in addr[0] else socket.AF_INET
         self.address_family = family
         super().__init__(addr, _Handler)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._slots.acquire(blocking=False):
+        ip = str(client_address[0]) if isinstance(client_address, tuple) and client_address else ""
+        with self._per_ip_lock:
+            busy = self._per_ip.get(ip, 0) >= self.max_per_ip
+            if not busy:
+                self._per_ip[ip] = self._per_ip.get(ip, 0) + 1
+        if busy or not self._slots.acquire(blocking=False):
+            if not busy:
+                self._ip_done(ip)
             self.shutdown_request(request)          # saturated: refuse, never queue unboundedly
             return
         try:
             super().process_request(request, client_address)
         except BaseException:
             self._slots.release()
+            self._ip_done(ip)
             raise
+
+    def _ip_done(self, ip: str) -> None:
+        with self._per_ip_lock:
+            n = self._per_ip.get(ip, 0) - 1
+            if n > 0:
+                self._per_ip[ip] = n
+            else:
+                self._per_ip.pop(ip, None)
 
     def process_request_thread(self, request: Any, client_address: Any) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
             self._slots.release()
+            self._ip_done(str(client_address[0]) if isinstance(client_address, tuple) and client_address else "")
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Socket reader with a total deadline: each receive waits at most the time left,
+    then TimeoutError (http.server closes the connection; _read_body answers 408)."""
+
+    def __init__(self, sock: socket.socket, deadline: float):
+        self._sock = sock
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request deadline exceeded")
+        self._sock.settimeout(left)
+        return self._sock.recv_into(b)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -573,12 +643,23 @@ class _Handler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self._started = False
+        # Total request deadline (C38): every receive gets only the time left, so trickling
+        # one octet per SOCKET_TIMEOUT_S cannot keep the connection (and its slot) forever.
+        self._deadline = time.monotonic() + REQUEST_DEADLINE_S
+        self.rfile.close()                  # the makefile() reader (it holds a socket reference)
+        self.rfile = io.BufferedReader(_DeadlineReader(self.connection, self._deadline))
+
+    def _reading_done(self) -> None:
+        """The request is in: sending gets the normal per-operation timeout again."""
+        with contextlib.suppress(OSError):
+            self.connection.settimeout(SOCKET_TIMEOUT_S)
 
     def log_message(self, format: str, *args: Any) -> None:
         """Per-request access logging is off; commanding requests are audited explicitly."""
 
     # ------------------------------------------------------------ responses
     def _send(self, status: int, body: bytes, ctype: str, extra: Mapping[str, str] | None = None) -> None:
+        self._reading_done()
         self._started = True
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -605,6 +686,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(code, {"error": message or phrase})
 
     def _send_file(self, path: Path, ctype: str) -> None:
+        self._reading_done()
         with open(path, "rb") as f:
             size = os.fstat(f.fileno()).st_size
             self._started = True
@@ -656,11 +738,16 @@ class _Handler(BaseHTTPRequestHandler):
         return path
 
     def _check_host(self) -> None:
-        """DNS-rebinding defence: a loopback-bound server answers only loopback Host names."""
+        """DNS-rebinding defence (GET and POST): a loopback-bound server answers only loopback
+        Host names; a LAN-bound one an IP literal, this machine's name or [gds]
+        http_allowed_hosts (module docstring). A request without Host (HTTP/1.0 tool, not
+        a browser) is not a rebinding vector."""
         app = self.server.app
         host = self.headers.get("Host")
-        if app.loopback_bind and host is not None and _host_only(host) not in LOOPBACK_HOSTS:
-            raise RequestError(403, "Host not allowed (this server is bound to the loopback interface)")
+        if host is not None and not app.host_allowed(_host_only(host)):
+            raise RequestError(403, "Host not allowed (this server is bound to the loopback interface)"
+                               if app.loopback_bind else
+                               "Host not allowed: add the name to [gds] http_allowed_hosts")
 
     def _check_post_origin(self) -> None:
         ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
@@ -698,22 +785,28 @@ class _Handler(BaseHTTPRequestHandler):
         if not txt.isascii() or not txt.isdigit() or len(txt) > 12:
             raise RequestError(400, "bad Content-Length")
         n = int(txt)
-        if n > MAX_BODY:
-            left = min(n, DRAIN_MAX)
-            while left > 0:                              # drain, so the client reads the 413
-                chunk = self.rfile.read(min(COPY_CHUNK, left))
-                if not chunk:
-                    break
-                left -= len(chunk)
+        try:
+            if n > MAX_BODY:
+                left = min(n, DRAIN_MAX)
+                while left > 0:                          # drain, so the client reads the 413
+                    chunk = self.rfile.read(min(COPY_CHUNK, left))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
+                self.close_connection = True
+                raise RequestError(413, f"request body larger than {MAX_BODY} octets")
+            data = self.rfile.read(n) if n else b""
+        except TimeoutError:
             self.close_connection = True
-            raise RequestError(413, f"request body larger than {MAX_BODY} octets")
-        data = self.rfile.read(n) if n else b""
+            raise RequestError(408, f"request not received within {REQUEST_DEADLINE_S:.0f} s") from None
         if len(data) != n:
             raise RequestError(400, "request body shorter than its Content-Length")
+        self._reading_done()
         return data
 
     # ------------------------------------------------------------ GET
     def _get(self) -> None:
+        self._reading_done()
         self._check_host()
         app = self.server.app
         gs = app.gs
@@ -821,8 +914,9 @@ def start_web(gs: StationApi, host: str, port: int, token: str | None = None, *,
     if isinstance(port, bool) or not 0 <= int(port) <= 65535:
         raise ValueError(f"http port {port!r} outside 0..65535")
     loop = is_loopback(host)
+    allowed = cfg.get("gds", {}).get("http_allowed_hosts") or []
     app = WebApp(gs, token=tok, auth_token=auth, exposed=(not loop) if exposed is None else exposed,
-                 loopback_bind=loop, html_path=html_path)
+                 loopback_bind=loop, html_path=html_path, allowed_hosts=tuple(str(h) for h in allowed))
     srv = WebServer((host, int(port)), app, max_clients)
     threading.Thread(target=srv.serve_forever, daemon=True, name="web").start()
     bound = srv.server_address[1]

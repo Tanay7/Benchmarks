@@ -93,7 +93,7 @@ def vectors(tmp_path_factory):
     subprocess.run([str(HOST / "host_test"), str(out)], check=True, stdout=subprocess.DEVNULL)
     for f in ("cfdp_source.bin", "cfdp_pdus.txt", "cfdp_cancel_pdus.txt", "cfdp_relay_pdus.txt"):
         if not (out / f).exists():
-            pytest.skip(f"flight CFDP vector {f} not generated")
+            pytest.fail(f"host_test did not write the flight CFDP vector {f}")
     return out
 
 
@@ -720,33 +720,49 @@ def test_egse_partition_new_value_on_start_boot_and_epoch0(tmp_path, caplog):
     assert br2.called("set_partition") == [(4,)] and boot_file(tmp_path) == "4\n"
 
 
-def test_egse_partition_same_value_after_a_raised_call(tmp_path):
+def test_egse_partition_unanswered_value_is_never_offered_again(tmp_path):
     br = FakeBridge()
     br.answers["set_partition"] = [TimeoutError("t"), ConnectionError("c"), FakeAppError("router"),
-                                   RuntimeError("r"), ValueError("v"), True]
+                                   RuntimeError("r"), ValueError("v"), 1, None, True]
     eg, br, clk = make_egse(tmp_path, br)
-    for _ in range(120):                                  # back-off 1 .. 8 s between retries
+    # rule 3: an unanswered call may have been applied by the MCU, so its value is retired;
+    # with no sign of the MCU (no status) nothing more is issued, however long the outage
+    for _ in range(600):
         eg.loop_once()
-    assert br.called("set_partition") == [(1,)] * 6       # rule 3: the SAME value every time
-    assert eg.epoch_accepted == 1 and boot_file(tmp_path) == "1\n"
-    # an epoch-0 status while a request is in flight issues nothing new
-    br.answers["set_partition"] = [TimeoutError("t")] * 3
-    br.mcu("sc_boot", 0)
-    clk.advance(egse_main.EPOCH0_GRACE_S + 1)
-    br.mcu("sc_status", core_status(0))
-    eg.loop_once()
-    assert eg.epoch_pending == 2 and boot_file(tmp_path) == "2\n"
-    # a later sc_boot always issues a new value, even over a pending one
-    br.mcu("sc_boot", 3)
-    br.answers["set_partition"] = []
-    eg.loop_once()
-    assert br.called("set_partition")[-1] == (3,) and eg.epoch_accepted == 3
-    # an answer that is not a bool is not an acceptance: the same value is retried
-    br.answers["set_partition"] = [1, True]
-    br.mcu("sc_boot", 0)
-    for _ in range(10):
+    assert br.called("set_partition") == [(1,)] and eg.epoch_pending is None and eg.epoch_unanswered == 1
+    # a status that does not show the value: a NEW one after the back-off, each one once
+    for _ in range(7):
+        br.mcu("sc_status", core_status(0))
+        clk.advance(egse_main.EPOCH_RETRY_MAX_S)
         eg.loop_once()
-    assert br.called("set_partition")[-2:] == [(4,), (4,)] and eg.epoch_accepted == 4
+    assert br.called("set_partition") == [(v,) for v in range(1, 9)]   # never the same value twice
+    assert eg.epoch_accepted == 8 and eg.epoch_unanswered is None and boot_file(tmp_path) == "8\n"
+    # a status showing the unanswered value: it was applied, nothing new is needed
+    br.answers["set_partition"] = [TimeoutError("lost answer")]
+    br.mcu("sc_boot", 0)
+    eg.loop_once()
+    br.mcu("sc_status", core_status(9))
+    clk.advance(egse_main.EPOCH_RETRY_MAX_S)
+    for _ in range(3):
+        eg.loop_once()
+    assert br.called("set_partition")[-1] == (9,) and len(br.called("set_partition")) == 9
+    assert eg.epoch_accepted == 9 and eg.epoch_unanswered is None
+
+
+def test_egse_partition_backoff_bounds_the_epoch_use(tmp_path):
+    """An MCU that reports its status but never answers set_partition costs at most one
+    epoch per EPOCH_RETRY_MAX_S (65534 values last > 45 days of such a fault)."""
+    br = FakeBridge()
+    br.answers["set_partition"] = lambda p: TimeoutError("no answer")
+    eg, br, clk = make_egse(tmp_path, br)
+    t0 = clk.m
+    while clk.m - t0 < 3600:
+        br.mcu("sc_status", core_status(0))
+        for _ in range(5):                                   # 1 Hz status
+            eg.loop_once()
+    n = len(br.called("set_partition"))
+    assert 3600 / egse_main.EPOCH_RETRY_MAX_S <= n <= 3600 / egse_main.EPOCH_RETRY_MAX_S + 8
+    assert len(set(br.called("set_partition"))) == n
 
 
 def test_egse_partition_refusal_raises_counter_above_reported_epoch(tmp_path, caplog):
@@ -863,6 +879,254 @@ def test_egse_sdls_sn_persisted_and_restored(tmp_path):
     assert br.called("set_sdls_sn")[-1] == (-2147483000,)
 
 
+def test_egse_sdls_sn_never_lowered_and_fresh_install_restores_zero(tmp_path):
+    eg, br, clk = make_egse(tmp_path)                      # no SN file: restore 0, no 120 s hold
+    clk.advance(1)
+    eg.loop_once()
+    assert br.called("set_sdls_sn") == [(0,)]
+    br.mcu("sdls_sn", 500)
+    eg.loop_once()
+    assert (tmp_path / "sdls_last_sn.txt").read_text() == "500\n"
+    br.mcu("sdls_sn", 7)                                   # an MCU that restarted its window low
+    eg.loop_once()
+    assert (tmp_path / "sdls_last_sn.txt").read_text() == "500\n"
+    assert eg.stats["sn_not_lowered"] == 1
+    br.mcu("sdls_sn", -1)                                  # u32 0xFFFFFFFF as int32: higher, kept
+    eg.loop_once()
+    assert (tmp_path / "sdls_last_sn.txt").read_text() == "-1\n"
+
+
+# --- SDLS TM epoch nonce safety under every ordering of faults (contract 5, PB-6.3) --------
+#
+# GCM IV = 'TM' | epoch | 0 | sn with sn restarting at 1 whenever the MCU takes a new epoch,
+# so an epoch value that reaches two MCU boots reuses (key, IV) pairs. The EGSE cannot tell
+# which boot serves a set_partition call (a call may be served by a boot whose sc_boot is
+# still in flight, or after a timeout by a later boot), so the property it must guarantee is
+# the stronger one: every value is put into at most ONE set_partition call, ever (across EGSE
+# restarts too). The world below drives the real Egse against a model of the flight side.
+
+class SimMcu:
+    """The flight side of set_partition (Flight::egse_set_partition + SdlsTm::set_epoch,
+    sdls.cpp:132): a boot starts at epoch 0; p is accepted when 1 <= p <= 65534 and p is
+    not below the current epoch; a different p restarts sn at 0. Every protected frame uses
+    IV (epoch, ++sn) under the one K_tm_ae; nonces and the boots applying each epoch are
+    recorded."""
+
+    def __init__(self):
+        self.boot, self.epoch, self.sn = 1, 0, 0
+        self.nonces: set[tuple[int, int]] = set()
+        self.reused: list[tuple[int, tuple[int, int]]] = []
+        self.applied: dict[int, set[int]] = {}
+
+    def set_partition(self, p: int) -> bool:
+        if not 1 <= p <= 65534 or p < self.epoch:
+            return False
+        if p != self.epoch:
+            self.epoch, self.sn = p, 0
+            self.applied.setdefault(p, set()).add(self.boot)
+        return True
+
+    def frames(self, k: int) -> None:
+        for _ in range(k if self.epoch else 0):
+            self.sn += 1
+            if (self.epoch, self.sn) in self.nonces:
+                self.reused.append((self.boot, (self.epoch, self.sn)))
+            self.nonces.add((self.epoch, self.sn))
+
+    def reboot(self) -> None:
+        self.boot, self.epoch, self.sn = self.boot + 1, 0, 0
+
+
+class SimRouter:
+    """arduino-router + Bridge between EGSE process(es) and SimMcu. `modes` scripts the
+    next set_partition calls; notifications wait in `notes` (one UART: in order) until
+    delivered, and a "delay"ed request waits in `delayed` until a later boot serves it."""
+
+    MODES = ("ok", "drop", "lost_answer", "delay", "reboot_then_serve", "silent_reboot_then_serve",
+             "nonbool", "nonbool_undelivered", "app_error", "unexpected")
+
+    def __init__(self, mcu: SimMcu):
+        self.mcu = mcu
+        self.handlers: dict = {}
+        self.modes: list[str] = []
+        self.notes: list[tuple[str, object]] = []
+        self.delayed: list[int] = []
+        self.offered: list[int] = []                 # every set_partition value any EGSE sent
+
+    def provide(self, name, fn):
+        self.handlers[name] = fn
+
+    def call(self, name, *params, timeout=10):
+        if name != "set_partition":
+            return True
+        (p,) = params
+        self.offered.append(p)
+        mode = self.modes.pop(0) if self.modes else "ok"
+        if mode == "drop":
+            raise ConnectionError("router down: request not delivered")
+        if mode == "app_error":
+            raise FakeAppError("router unreachable")
+        if mode == "unexpected":
+            raise KeyError("an exception outside CALL_ERRORS (escapes to the duty boundary)")
+        if mode == "delay":
+            self.delayed.append(p)
+            raise TimeoutError("request still queued in the router")
+        if mode == "nonbool_undelivered":
+            return None
+        if mode in ("reboot_then_serve", "silent_reboot_then_serve"):
+            self.reboot(note=mode == "reboot_then_serve")   # the NEW boot serves the request
+        r = self.mcu.set_partition(p)
+        if mode == "lost_answer":
+            raise TimeoutError("answer lost")
+        return int(r) if mode == "nonbool" else r
+
+    def reboot(self, note: bool = True) -> None:
+        self.mcu.reboot()
+        if note:
+            self.notes.append(("sc_boot", 3))
+
+    def status(self) -> None:
+        self.notes.append(("sc_status", core_status(self.mcu.epoch)))
+
+    def deliver(self, n: int | None = None) -> None:
+        k = len(self.notes) if n is None else min(n, len(self.notes))
+        batch, self.notes = self.notes[:k], self.notes[k:]
+        for name, arg in batch:
+            if name in self.handlers:
+                self.handlers[name](arg)
+
+    def serve_delayed(self) -> None:
+        while self.delayed:
+            self.mcu.set_partition(self.delayed.pop(0))
+
+
+class EpochWorld:
+    def __init__(self, data: Path, monkeypatch):
+        self.data, self.clk = data, EgseClock()
+        self.mcu = SimMcu()
+        self.router = SimRouter(self.mcu)
+        self.disk_full = False
+
+        def write(path, value):                      # the real one is tested above; no fsync here
+            if self.disk_full:
+                raise OSError(28, "No space left on device")
+            path.write_text(f"{value}\n")
+
+        monkeypatch.setattr(egse_main, "atomic_write_int", write)
+        self.egse = self._new_egse()
+
+    def _new_egse(self):
+        eg = egse_main.Egse(self.data, self.router, call_errors=(*egse_main.CALL_ERRORS, FakeAppError),
+                            clock=self.clk.wall, monotonic=self.clk.mono, sleep=self.clk.sleep)
+        eg.start()
+        return eg
+
+    def step(self, ev: str) -> None:
+        r = self.router
+        if ev == "pass":
+            self.egse.loop_once()
+        elif ev == "status":
+            r.status()
+        elif ev == "deliver":
+            r.deliver()
+        elif ev == "deliver1":
+            r.deliver(1)
+        elif ev == "reboot":
+            r.reboot(note=True)
+        elif ev == "silent_reboot":                  # its sc_boot never reaches the EGSE
+            r.reboot(note=False)
+        elif ev == "restart":                        # App restart: a new process, same data/
+            self.egse = self._new_egse()
+        elif ev == "serve_delayed":
+            r.serve_delayed()
+        elif ev == "disk":
+            self.disk_full = not self.disk_full
+        elif ev.startswith("wait"):
+            self.clk.advance(float(ev[4:]))
+        elif ev.startswith("mode:"):
+            r.modes.append(ev[5:])
+        else:
+            raise AssertionError(ev)
+        self.mcu.frames(2)                           # the MCU keeps transmitting meanwhile
+        self.check()
+
+    def check(self) -> None:
+        offered = self.router.offered
+        assert len(offered) == len(set(offered)), f"a value offered twice: {offered}"
+        assert all(len(b) == 1 for b in self.mcu.applied.values()), f"epoch on two boots: {self.mcu.applied}"
+        assert not self.mcu.reused, f"GCM nonce reuse: {self.mcu.reused[:3]}"
+
+    def settle(self) -> None:
+        """No more faults: a booting MCU must end up with an epoch (liveness)."""
+        self.router.modes.clear()
+        self.disk_full = False
+        for ev in ("serve_delayed", "deliver", "wait70", "pass", "pass", "reboot", "deliver", "pass",
+                   "pass", "status", "deliver", "pass", "pass"):
+            self.step(ev)
+        assert self.mcu.epoch > 0 and not self.egse.epoch_stopped, self.egse.board_info()
+
+
+EPOCH_EVENTS = ("pass", "status", "deliver", "deliver1", "reboot", "silent_reboot", "restart", "serve_delayed",
+                "disk", "wait1", "wait11", "wait70", *(f"mode:{m}" for m in SimRouter.MODES))
+
+
+def test_epoch_nonce_safety_finding_scenarios(tmp_path, monkeypatch):
+    """The three orderings found in review, each once: (C12) set_partition applied but
+    unanswered, then a reboot whose sc_boot is lost; (C13a) the same plus a full disk at
+    the next boot; (C13b) the retry served by a NEW boot whose sc_boot is still queued."""
+    scenarios = {
+        "C12": ["mode:lost_answer", "reboot", "pass", "status", "deliver", "pass", "wait11", "silent_reboot",
+                "status", "deliver", "pass", "wait11", "status", "deliver", "pass", "wait11", "pass"],
+        "C13a": ["mode:lost_answer", "reboot", "deliver", "pass", "disk", "silent_reboot", "status",
+                 "reboot", "deliver", "pass", "wait11", "pass", "wait11", "pass", "disk", "wait11", "pass"],
+        "C13b": ["mode:lost_answer", "reboot", "deliver", "pass", "wait1", "mode:reboot_then_serve", "pass",
+                 "pass", "deliver", "pass", "pass"],
+    }
+    for name, events in scenarios.items():
+        d = tmp_path / name
+        d.mkdir()
+        w = EpochWorld(d, monkeypatch)
+        for ev in events:
+            w.step(ev)
+        w.settle()
+
+
+@pytest.mark.parametrize("seed", range(int(os.environ.get("EGSE_RANDOM_SEEDS", "60"))))
+def test_epoch_nonce_safety_random_interleavings(tmp_path, monkeypatch, seed):
+    """Randomised orderings of MCU reboots (with and without sc_boot), EGSE restarts,
+    lost requests and answers, requests served late or by the next boot, non-bool
+    answers, router errors, unexpected exceptions, full disks and clock jumps."""
+    rng = random.Random(seed)
+    w = EpochWorld(tmp_path, monkeypatch)
+    weights = dict.fromkeys(EPOCH_EVENTS, 1.0)
+    weights.update({"pass": 12, "status": 4, "deliver": 4, "wait1": 3, "restart": 0.5})
+    evs, ws = list(weights), list(weights.values())
+    for _ in range(400):
+        w.step(rng.choices(evs, ws)[0])
+    w.settle()
+
+
+EXHAUSTIVE_EVENTS = ("pass", "status", "reboot", "silent_reboot", "restart", "serve_delayed", "disk",
+                     "wait11", "mode:lost_answer", "mode:delay", "mode:reboot_then_serve",
+                     "mode:silent_reboot_then_serve", "mode:nonbool")
+
+
+def test_epoch_nonce_safety_exhaustive_short_orderings(tmp_path, monkeypatch):
+    """Every ordering of `depth` events (each followed by a status delivered and two loop
+    passes, so the EGSE reacts in between), then settle(). 13^3 orderings here; the
+    Phase C run also passed depth 4 (EGSE_EXHAUSTIVE_DEPTH=4, 28561 orderings)."""
+    depth = int(os.environ.get("EGSE_EXHAUSTIVE_DEPTH", "3"))
+    for i, seq in enumerate(itertools.product(EXHAUSTIVE_EVENTS, repeat=depth)):
+        d = tmp_path / str(i)
+        d.mkdir()
+        w = EpochWorld(d, monkeypatch)
+        for ev in seq:
+            for e in (ev, "status", "deliver", "pass", "pass"):
+                w.step(e)
+        w.settle()
+        shutil.rmtree(d)
+
+
 RELAY_REQ_SEQ = 0x80000007
 
 
@@ -918,12 +1182,14 @@ def test_egse_relay_backoff_follows_retry_delay(tmp_path):
 def test_egse_relay_refused_cancel_and_supersede(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="vgq1.egse")
     _, eg, br, _ = _relay_world(tmp_path, n=2000)
-    # -1: the MCU does not authorise it -> abandoned at once
-    br.answers["cfdp_pdu"] = [1, -1]
+    # -1: the MCU does not authorise it -> one EOF(cancel) offer, refused too -> abandoned
+    br.answers["cfdp_pdu"] = [1, -1, -1]
     br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
     for _ in range(5):
         eg.loop_once()
-    assert eg.relay is None and eg.stats["relay_abandoned"] == 1 and len(br.called("cfdp_pdu")) == 2
+    assert eg.relay is None and eg.stats["relay_abandoned"] == 1 and len(br.called("cfdp_pdu")) == 3
+    last = parse_pdu(bytes.fromhex(br.called("cfdp_pdu")[-1][0]))
+    assert isinstance(last, Eof) and last.condition == COND_CANCEL
     # cancel: a foreign seq is ignored, the matching one turns the next PDU into EOF(cancel)
     br.calls.clear()
     br.answers["cfdp_pdu"] = lambda hx: 1
@@ -958,6 +1224,89 @@ def test_egse_relay_refused_cancel_and_supersede(tmp_path, caplog):
 
 def eg_sent(pdus):
     return sum(len(parse_pdu(p).data) for p in pdus if p[0] & 0x10)
+
+
+def test_egse_relay_cancel_racing_a_pdu_still_sends_eof_cancel(tmp_path, caplog):
+    """C14: CFDPCANCEL runs in an MCU loop pass (gate -> CANCELLING) while a File Data
+    offer waits to be served; it is refused with -1 before the cfdp_cancel notification
+    reaches the EGSE. The EOF(cancel) the gate waits for must still go out."""
+    caplog.set_level(logging.INFO, logger="vgq1.egse")
+    _, eg, br, _ = _relay_world(tmp_path, n=2000)
+    gate = {"cancelling": False}
+
+    def mcu(hx):
+        pdu = parse_pdu(bytes.fromhex(hx))
+        if len(br.called("cfdp_pdu")) == 3:              # CFDPCANCEL executes just before this one
+            gate["cancelling"] = True
+            br.mcu("cfdp_cancel", str(RELAY_REQ_SEQ))     # the notification is still queued
+        if gate["cancelling"]:
+            return 1 if isinstance(pdu, Eof) else -1      # RelayGate::admit while CANCELLING
+        return 1
+
+    br.answers["cfdp_pdu"] = mcu
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
+    for _ in range(6):
+        eg.loop_once()
+    pdus = [bytes.fromhex(p[0]) for p in br.called("cfdp_pdu")]
+    eof = parse_pdu(pdus[-1])
+    queued = [p for p, a in zip(pdus, [1, 1, -1, 1], strict=True) if a == 1]
+    assert len(pdus) == 4 and isinstance(eof, Eof) and eof.condition == COND_CANCEL
+    assert eof.file_size == eg_sent(queued) and eg.stats["relay_cancelled"] == 1
+    assert eg.stats["relay_abandoned"] == 0 and "offering EOF(cancel) once" in caplog.text
+    rx = Receiver(tmp_path / "rx", clock=Clock())
+    feed(rx, queued)
+    assert only(rx)["state"] == CANCELLED and only(rx)["checksum_ok"] is True
+
+
+def test_egse_restart_closes_the_relay_the_mcu_still_holds(tmp_path, caplog):
+    """C15: after an EGSE restart the MCU's RelayGate still holds the old relay (ACTIVE:
+    every CFDPPUT refused for up to 600 s). Seen for RELAY_ORPHAN_S with no relay of that
+    seq running here, it is closed with EOF(cancel)."""
+    eg, br, clk = make_egse(tmp_path)
+    answers = [0, TimeoutError("t"), 1]
+    br.answers["cfdp_pdu"] = lambda hx: answers.pop(0) if answers else -1
+    orphan = RELAY_REQ_SEQ + 5
+
+    def status_x(**kw):
+        br.mcu("sc_status_x", x_status(**kw))
+        eg.loop_once()
+        clk.advance(5)
+
+    # a REQUESTED gate is never touched: it times out on board after 30 s (and a cfdp_req
+    # still on its way would start the relay), so 35 s of sightings send nothing
+    for _ in range(8):
+        status_x(cfdp=2, cfdp_seq=orphan)
+    assert br.called("cfdp_pdu") == []
+    status_x(cfdp=0, cfdp_seq=orphan)                     # gone: the window starts again
+    for _ in range(8):
+        status_x(cfdp=2, cfdp_seq=orphan)
+    assert br.called("cfdp_pdu") == []
+    # 40 s and more: EOF(cancel) of that seq, retried while busy / unanswered
+    for _ in range(4):
+        status_x(cfdp=2, cfdp_seq=orphan)
+        for _ in range(10):
+            eg.loop_once()
+    offers = [bytes.fromhex(p[0]) for p in br.called("cfdp_pdu")]
+    assert len(offers) == 3 and len(set(offers)) == 1
+    eof = parse_pdu(offers[0])
+    assert isinstance(eof, Eof) and eof.header.seq == orphan and eof.condition == COND_CANCEL
+    assert eg.stats["relay_orphans_closed"] == 1 and "CFDPPUT is free again" in caplog.text
+    # closed once: a late status still showing it sends nothing more
+    for _ in range(10):
+        status_x(cfdp=2, cfdp_seq=orphan)
+    assert len(br.called("cfdp_pdu")) == 3
+    # a relay this EGSE runs, an MCU (SSR) seq and an MCU reboot are never treated as orphans
+    br.calls.clear()
+    (tmp_path / "evr_20261011.jsonl").write_bytes(make_data(3000, 3))
+    br.answers["cfdp_pdu"] = lambda hx: 0                 # the relay stays busy, never ends
+    br.mcu("cfdp_req", f"1,{orphan + 1},0")
+    for _ in range(12):
+        status_x(cfdp=2, cfdp_seq=orphan + 1)
+    assert {parse_pdu(bytes.fromhex(p[0])).header.seq for p in br.called("cfdp_pdu")} == {orphan + 1}
+    br.mcu("sc_boot", 0)
+    for _ in range(12):
+        status_x(cfdp=1, cfdp_seq=12)
+    assert all(not isinstance(parse_pdu(bytes.fromhex(p[0])), Eof) for p in br.called("cfdp_pdu"))
 
 
 def test_egse_relay_eof_refused_after_unanswered_offer_is_complete(tmp_path):

@@ -215,6 +215,27 @@ int16_t sx_sensitivity_ddbm(uint8_t code, bool rx_boost, SensSource* src);
 // clamped to 1..0xFFFFFE (24 bits; 0 would disable the timeout).
 uint32_t sx_tx_timeout_raw(uint32_t airtime_us, uint32_t margin_us);
 
+// RxDutyCycle (DS 13.1.7). RadioLib startReceiveDutyCycle() programs the sleep period
+// minus (TCXO delay + 1 ms) to cover the wake-up transition; its TCXO delay is the
+// setTCXO() default 5 ms (0 with a crystal, so the real window is only longer).
+static const uint32_t kSxDutyTransitionUs = 6000;
+static const uint32_t kSxDutyDetectSym = 8;    // RadioLib's preamble-detection minimum for SF >= 7
+
+// RxDutyCycle periods for an explicit-header sender preamble of n_pre symbols, us.
+//   sleep = (n_pre - 2 x 8) Tsym: a preamble that starts just after an RX window
+//           closes still leaves 8 symbols for detection in the next one (the same
+//           catch guarantee as RadioLib's startReceiveDutyCycleAuto()).
+//   rx    = max(9 Tsym, ceil((need - programmed sleep) / 2) + 1 Tsym), where
+//           need = Tpreamble + Theader = (n_pre + 4.25 + 8) Tsym (DS 6.1.4 time on
+//           air; the explicit header is in the first 8-symbol block), so that the
+//           timer restarted on preamble detection, 2 x rxPeriod + sleepPeriod
+//           (DS 13.1.7), never expires before the header. RadioLib's Auto periods
+//           give only (n_pre + 2) Tsym - 6 ms and miss early-detected WAKEs.
+// Returns false (use continuous RX) when duty cycling is impossible or the 24-bit
+// period fields (15.625 us steps, DS Table 13-12) would overflow.
+// (Pure: host-tested; used by drivers/sx126x.cpp for hibernation.)
+bool sx_duty_cycle_us(uint8_t sf, uint32_t bw_hz, uint16_t n_pre, uint32_t& rx_us, uint32_t& sleep_us);
+
 // ---- Model-generic figures (used by Radio and by the tests) ------------------------
 uint32_t radio_airtime_ms(uint8_t model, uint8_t rate_code, size_t n);
 uint32_t radio_bitrate_bps(uint8_t model, uint8_t rate_code);
@@ -279,11 +300,18 @@ class E22StreamParser {
 
 // E22 transmission tracking from the AUX line (pure; owned by E22Radio):
 // AUX falls once the module has data to send; if that edge is not seen within
-// kE22AuxEdgeMs it is assumed missed. The transmission ends when AUX rises again
-// (TX_DONE) or after kE22AuxTimeoutMs (TX_TIMEOUT). value = elapsed ms.
+// kE22AuxEdgeMs it is assumed missed. AUX rising again does NOT prove the end of the
+// transmission: both EBYTE manuals (E22-400T33D v1.05 and E22-400T37S v1.5, 5.6.2) say
+// AUX = 1 only means the internal buffer has been handed to the RF chip, and "the last
+// packet of data may be being transmitted" - with one CADU per module packet that is
+// the whole frame. TX_DONE therefore needs AUX high AND at least `min_busy_ms` (the
+// model's busy time of the frame, radio_airtime_ms()) since start(), so the measured
+// busy time that drives the 50 % duty floor, the frame period and the PA-off windows
+// is never shorter than the frame's air time. TX_TIMEOUT after kE22AuxTimeoutMs.
+// value = elapsed ms.
 class E22TxTracker {
  public:
-  void start(uint32_t now);
+  void start(uint32_t now, uint32_t min_busy_ms = 0);
   bool active() const { return phase_ != IDLE; }
   RadioEvent poll(uint32_t now, bool aux_high, int32_t& value);
 
@@ -291,6 +319,7 @@ class E22TxTracker {
   enum Phase : uint8_t { IDLE, WAIT_BUSY, WAIT_DONE };
   Phase phase_ = IDLE;
   uint32_t t0_ = 0;
+  uint32_t min_busy_ms_ = 0;
 };
 
 // =============================================================================

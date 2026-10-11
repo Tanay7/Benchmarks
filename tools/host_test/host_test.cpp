@@ -188,6 +188,101 @@ int main(int argc, char** argv) {
     CHECK(farm.on_frame(f) == Farm1::CONTROL_SET_VR && farm.vr() == 42, "FARM: Set V(R)=42");
   }
 
+  // ---- FARM-1 state table edges (CCSDS 232.1-B §6; W = 10 -> PW = NW = 5) --------------
+  {
+    uint8_t d[3] = {0};
+    auto ad = [&](Farm1& fm, uint8_t ns) {
+      TcFrame f;
+      f.data = d; f.data_len = 1; f.bypass = false; f.control = false; f.seq = ns;
+      return fm.on_frame(f);
+    };
+    auto unlock = [&](Farm1& fm) {
+      TcFrame f;
+      d[0] = 0x00;
+      f.data = d; f.data_len = 1; f.bypass = true; f.control = true; f.seq = 0;
+      return fm.on_frame(f);
+    };
+    auto set_vr = [&](Farm1& fm, uint8_t vr) {
+      TcFrame f;
+      d[0] = 0x82; d[1] = 0x00; d[2] = vr;
+      f.data = d; f.data_len = 3; f.bypass = true; f.control = true; f.seq = 0;
+      return fm.on_frame(f);
+    };
+    auto bd = [&](Farm1& fm) {
+      TcFrame f;
+      f.data = d; f.data_len = 1; f.bypass = true; f.control = false; f.seq = 0;
+      return fm.on_frame(f);
+    };
+    Clcw c;
+    Farm1 a(10);
+    CHECK(ad(a, 0) == Farm1::ACCEPT && a.vr() == 1, "FARM table: N(S)=V(R)=0 accepted");
+    CHECK(ad(a, 5) == Farm1::DISCARD_RETRANSMIT, "FARM table: N(S)=V(R)+PW-1 -> retransmit (positive window)");
+    a.fill_clcw(c);
+    CHECK(c.retransmit && !c.lockout, "FARM table: CLCW Retransmit set by the gap");
+    CHECK(ad(a, 6) == Farm1::DISCARD_LOCKOUT && a.state() == Farm1::S3_LOCKOUT,
+          "FARM table: N(S)=V(R)+PW -> lockout (outside the positive window)");
+    CHECK(set_vr(a, 7) == Farm1::CONTROL_SET_VR && a.vr() == 1 && a.state() == Farm1::S3_LOCKOUT,
+          "FARM table: Set V(R) has no effect in Lockout");
+    CHECK(unlock(a) == Farm1::CONTROL_UNLOCK && a.state() == Farm1::S1_OPEN, "FARM table: Unlock leaves Lockout");
+    a.fill_clcw(c);
+    CHECK(!c.retransmit && !c.lockout && !c.wait, "FARM table: Unlock clears Lockout, Wait and Retransmit");
+
+    Farm1 b(10);
+    CHECK(set_vr(b, 10) == Farm1::CONTROL_SET_VR && b.vr() == 10, "FARM table: Set V(R)=10 in Open");
+    CHECK(ad(b, 5) == Farm1::DISCARD_NEG_WINDOW && b.state() == Farm1::S1_OPEN,
+          "FARM table: N(S)=V(R)-NW -> discarded (negative window)");
+    CHECK(ad(b, 4) == Farm1::DISCARD_LOCKOUT && b.state() == Farm1::S3_LOCKOUT,
+          "FARM table: N(S)=V(R)-NW-1 -> lockout");
+
+    Farm1 g(10);
+    (void)set_vr(g, 10);
+    CHECK(ad(g, 12) == Farm1::DISCARD_RETRANSMIT, "FARM table: gap at V(R)=10");
+    CHECK(set_vr(g, 0) == Farm1::CONTROL_SET_VR && g.vr() == 0, "FARM table: Set V(R)=0 in Open");
+    g.fill_clcw(c);
+    CHECK(!c.retransmit, "FARM table: Set V(R) clears Retransmit");
+    // Modulo-256 wrap: V(R)=255 accepts N(S)=255 and moves to 0.
+    (void)set_vr(g, 255);
+    CHECK(ad(g, 255) == Farm1::ACCEPT && g.vr() == 0 && ad(g, 254) == Farm1::DISCARD_NEG_WINDOW,
+          "FARM table: N(S)=255 accepted, V(R) wraps to 0, 254 is a duplicate");
+
+    // FARM-B counter: every Type-B frame (BD and BC), modulo 4, reported in the CLCW.
+    Farm1 h(10);
+    h.fill_clcw(c);
+    bool fb = c.farm_b_counter == 0;
+    for (unsigned k = 1; k <= 5; ++k) {
+      CHECK(bd(h) == Farm1::ACCEPT_BYPASS, "FARM table: Type-BD accepted (bypass)");
+      h.fill_clcw(c);
+      fb = fb && c.farm_b_counter == (k & 3u);
+    }
+    (void)unlock(h);                                   // a BC frame counts too
+    h.fill_clcw(c);
+    CHECK(fb && c.farm_b_counter == (6u & 3u) && h.vr() == 0, "FARM table: FARM-B counter = Type-B frames mod 4");
+  }
+
+  // ---- TC frame flags (C07): Bypass 0 / Control 1 is not a defined frame type -----------
+  {
+    auto frame = [](bool bypass, bool control, uint8_t* fr) {
+      const uint8_t payload[] = {0x18, 0xC0, 0xC0, 0x00, 0x00, 0x00, 0x01};
+      const uint16_t len = (uint16_t)(kTcPriHdrLen + sizeof(payload) + 2);
+      put_u16(fr, (uint16_t)((bypass ? 0x2000u : 0u) | (control ? 0x1000u : 0u) | (kSpacecraftId & 0x3FF)));
+      put_u16(fr + 2, (uint16_t)(len - 1));
+      fr[4] = 0;
+      std::memcpy(fr + 5, payload, sizeof(payload));
+      put_u16(fr + len - 2, crc16_ccitt(fr, len - 2));
+      return (size_t)len;
+    };
+    uint8_t fr[16];
+    TcFrame tf;
+    size_t n = frame(false, true, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_BAD_HEADER, "TC frame Bypass=0 Control=1 (no such type) -> BAD_HEADER");
+    n = frame(false, false, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_OK && !tf.bypass && !tf.control, "TC frame Type-AD (00) accepted");
+    n = frame(true, false, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_OK && tf.bypass && !tf.control, "TC frame Type-BD (10) accepted");
+    n = frame(true, true, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_OK && tf.bypass && tf.control, "TC frame Type-BC (11) accepted");
+  }
+
   // ---- Multiplexer -> frames -> CADUs ---------------------------------------------------
   {
     TmFramer framer;

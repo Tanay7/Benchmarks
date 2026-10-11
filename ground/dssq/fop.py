@@ -6,20 +6,37 @@ spacecraft's frame period is >= 2x its radio busy time, leaving a quiet window).
 
 FOP-1 essentials implemented
   * V(S) numbering of Type-AD frames, initialised from the CLCW report value N(R)
-  * acknowledgement from N(R): frames with N(S) < N(R) (mod 256) are confirmed
+  * acknowledgement from N(R): frames with NN(R) <= N(S) < N(R) (mod 256) are confirmed,
+    where NN(R) is the previous valid N(R)
+  * CLCW validity: an N(R) outside NN(R)..V(S) (a FARM reset by a spacecraft reboot, or a
+    SET V(R) from another station) acknowledges nothing; it raises an alert and suspends
+    AD service (232.1-B-2 FOP-1 "invalid N(R)")
   * go-back-N retransmission when the CLCW Retransmit flag is set or timer T1 expires
-  * transmission limit -> alert and suspend (operator decides)
+  * transmission limit -> alert: every unacknowledged frame is purged (SUSPENDED), AD
+    service is suspended and V(S) is re-initialised from the next CLCW (operator decides)
   * Lockout detection -> suspend AD service until the operator sends UNLOCK
-  * Type-BD (bypass) and Type-BC (UNLOCK, SET V(R)) frames
+  * Type-BD (bypass) and Type-BC (UNLOCK, SET V(R)) frames. As in FOP-1 "initiate AD
+    service with Unlock / Set V(R)", submitting either directive purges the Sent Queue
+    (its frames carry N(S) values the re-initialised FARM would discard or lock out on);
+    V(S) is then taken from the next CLCW (UNLOCK) or set to the commanded V(R) when the
+    SET V(R) frame is radiated. No AD frame is radiated (and no CLCW is checked against
+    V(S)) while the CLCW reports Lockout or a directive still waits for its uplink window or
+    for its confirmation.
 Frames are TC (232.0-B-4) or USLP TC frames (732.1-B-2) per station.toml [link]
 tc_framing; the CLCW and the FARM rules are the same for both (USLP N(S) = VCF count).
 
 Command life cycle shown on all displays:
   QUEUED -> RADIATED(n) -> ACCEPTED (FARM, via CLCW) -> EXECUTED / FAILED (CMDVER)
                        \-> TIMEOUT / SUSPENDED
-A CMDVER with tc_seq 0xFE reports a command dispatched by the ON-BOARD stored sequence: it
-is not a reply to anything the FOP sent and never touches the COP-1 bookkeeping (the GDS
-logs it as "stored sequence: opcode 0xXX EXECUTED/FAILED").
+CMDVER carries the command source separately from tc_seq (interface decision I1, decoded
+as `cmd_source`): 0 = AD frame (tc_seq = its N(S), matched by N(S) + opcode), 1 = BD frame
+or hardline (matched to the oldest open BD record with that opcode; a hardline command of
+the same opcode cannot be told apart), 2 = the ON-BOARD stored sequence, which is not a
+reply to anything the FOP sent and never touches the COP-1 bookkeeping.
+Bypass frames are confirmed by the 2-bit FARM-B counter: the k-th bypass frame radiated
+since the last CLCW is confirmed only once the counter has advanced by at least k
+(one increment confirms one frame); a SET V(R) additionally needs the reported V(R) to
+lie between the commanded value and V(S), an UNLOCK a CLCW without Lockout.
 
 Timers: T1 and the verification timeout are set by the GDS to max(configured, 2 x P) and
 max(configured, 4 x P), P = the spacecraft's longest expected frame period (Phase B PB-3.2:
@@ -40,7 +57,7 @@ from .ccsds.tc import build_cltu, build_tc_frame
 from .ccsds.tm import Clcw
 from .ccsds.uslp import FIXED_HDR_LEN, TC_TFDF_HDR_LEN
 from .cmdparse import ParsedCommand, tc_packet
-from .dictionary import CMD_ERRORS, CMDVER_SEQ_BYPASS, CMDVER_SEQ_STORED
+from .dictionary import CMD_ERRORS, CMD_SOURCE_AD, CMD_SOURCE_BD
 
 MAX_RECORDS = 500
 FINAL_STATES = frozenset({"EXECUTED", "FAILED", "TIMEOUT", "SUSPENDED"})
@@ -91,6 +108,7 @@ class CommandRecord:
     t_done: float | None = None
     detail: str = ""
     farm_b_at_tx: int | None = None    # bypass frames are confirmed by the FARM-B counter
+    farm_b_pos: int = 1                # k-th bypass frame since that CLCW: needs k increments
     history: list = field(default_factory=list)
 
     def set(self, state: str, detail: str = "", t: float | None = None):
@@ -121,6 +139,9 @@ class Fop1:
         self.verify_timeout_s = verify_timeout_s
         self.vs: int | None = None          # None until initialised from a CLCW
         self.nr = 0
+        self.nnr = 0                        # NN(R): last valid N(R) (expected acknowledgement)
+        self.nr_invalid = False             # alert raised for an N(R) outside NN(R)..V(S)
+        self._bypass_since_clcw = 0
         self.lockout = False
         self.suspended = False
         self.retransmit_req = False
@@ -161,6 +182,21 @@ class Fop1:
         r.cltu = build_cltu(frame)
         return True
 
+    def _purge_sent(self, now: float, why: str) -> None:
+        """FOP-1 purge of the Sent Queue: every unacknowledged AD frame is given up."""
+        for r in self.sent:
+            if r.state not in FINAL_STATES:
+                r.set("SUSPENDED", why, now)
+        if self.sent:
+            self.events.append((now, f"FOP: {len(self.sent)} unacknowledged frame(s) purged ({why})"))
+        self.sent = []
+        self.retransmit_req = False
+
+    def _init_vs(self, value: int) -> None:
+        self.vs = value
+        self.nnr = value
+        self.nr_invalid = False
+
     @property
     def uplink_blocked(self) -> bool:
         return bool(self.sdls is not None and getattr(self.sdls, "uplink_blocked", False))
@@ -175,7 +211,11 @@ class Fop1:
             self.bypass_q.append(r)
         else:
             self.queue.append(r)
-        if cmd.kind == "BC" and cmd.mnemonic == "UNLOCK":
+        if cmd.kind == "BC":
+            # Initiate AD service with Unlock / Set V(R): the Sent Queue's frames carry N(S)
+            # values the re-initialised FARM would discard (or lock out on), so they go.
+            self._purge_sent(now, f"purged by {cmd.mnemonic} (AD service re-initialised)")
+            self.vs = None                  # UNLOCK: from the next CLCW; SETVR: when radiated
             self.suspended = False
         return r
 
@@ -184,52 +224,95 @@ class Fop1:
         now = now or time.time()
         self.last_clcw = c
         self.nr = c.report_value
-        if (self.vs is None or (not self.sent and not self.queue)) and self.vs != c.report_value:
-            self.vs = c.report_value              # (re)initialise AD service from CLCW
+        self._bypass_since_clcw = 0
+        setvr_out = any(r.cmd.mnemonic == "SETVR" and r.state == "RADIATED" for r in self.all)
+        if (self.vs is None or (not self.sent and not self.queue and not setvr_out)) \
+                and self.vs != c.report_value:
+            self._init_vs(c.report_value)         # (re)initialise AD service from CLCW
         if c.lockout and not self.lockout:
             self.events.append((now, "FARM LOCKOUT reported - AD service suspended, send UNLOCK"))
             self.suspended = True
         if not c.lockout and self.lockout:
             self.events.append((now, "FARM lockout cleared"))
-            self.vs = c.report_value
+            self._purge_sent(now, "purged: FARM lockout cleared (AD service re-initialised)")
+            self._init_vs(c.report_value)
             self.suspended = False
         self.lockout = c.lockout
         self.retransmit_req = c.retransmit
-        # Bypass / control frames: the FARM-B counter (2 bits) increments on receipt.
+        # Bypass / control frames: the FARM-B counter (2 bits) increments once per accepted
+        # BD/BC frame, so the k-th frame radiated since its base CLCW needs k increments.
         for r in self.all:
             if r.cmd.kind in ("BD", "BC") and r.state == "RADIATED" and r.farm_b_at_tx is not None \
-                    and c.farm_b_counter != r.farm_b_at_tx:
+                    and (c.farm_b_counter - r.farm_b_at_tx) & 3 >= r.farm_b_pos:
+                if r.cmd.kind == "BC" and not self._directive_effective(r, c):
+                    continue                      # not (yet) visible in the CLCW: stays RADIATED
                 r.t_accepted = now
                 if r.cmd.kind == "BC":
                     r.t_done = now
                     r.set("EXECUTED", f"FARM-B {r.farm_b_at_tx}->{c.farm_b_counter}, V(R)={c.report_value}", now)
                 else:
                     r.set("ACCEPTED", "FARM-B counter advanced", now)
-        # Acknowledge frames with N(S) < N(R) (mod 256, within the window)
+        if self.vs is None or self._directive_pending():
+            return                                # AD service (re)initialising: nothing to check
+        # CLCW validity (FOP-1): NN(R) <= N(R) <= V(S), modulo 256.
+        if (self.nr - self.nnr) & 0xFF > (self.vs - self.nnr) & 0xFF:
+            if not self.nr_invalid:
+                self.events.append((now, f"invalid CLCW N(R)={self.nr} (expected {self.nnr}..{self.vs}) - "
+                                         "spacecraft FARM reset or SET V(R) by another station? AD service "
+                                         "suspended: resynchronise with SETVR or UNLOCK"))
+            self.nr_invalid = True
+            self.suspended = True
+            return
+        self.nr_invalid = False
+        # Acknowledge frames with NN(R) <= N(S) < N(R)
+        acked = (self.nr - self.nnr) & 0xFF
         still = []
         for r in self.sent:
-            d = (self.nr - (r.ns or 0)) & 0xFF
-            if r.ns is not None and d != 0 and d <= 128:
+            if r.ns is not None and (r.ns - self.nnr) & 0xFF < acked:
                 if r.state in ("RADIATED", "QUEUED"):
                     r.t_accepted = now
                     r.set("ACCEPTED", f"FARM V(R)={self.nr}", now)
             else:
                 still.append(r)
         self.sent = still
+        self.nnr = self.nr
+
+    def _directive_pending(self) -> bool:
+        """A COP-1 directive is waiting for its window or for its CLCW confirmation."""
+        return any(q.cmd.kind == "BC" for q in self.bypass_q) or \
+            any(r.cmd.kind == "BC" and r.state == "RADIATED" for r in self.all)
+
+    def _directive_effective(self, r: CommandRecord, c: Clcw) -> bool:
+        """The CLCW shows the directive's effect: UNLOCK -> no Lockout; SET V(R) n -> the
+        reported V(R) lies in n..V(S) (AD frames radiated after it may already count)."""
+        if r.cmd.mnemonic == "UNLOCK":
+            return not c.lockout
+        if r.cmd.mnemonic == "SETVR":
+            vr = int(r.cmd.args.get("vr", -1))
+            top = self.vs if self.vs is not None else vr
+            return (c.report_value - vr) & 0xFF <= (top - vr) & 0xFF
+        return True
 
     # ------------------------------------------------------------- telemetry
     def on_cmdver(self, v: dict, now: float | None = None):
-        """Matches a CMDVER packet to the oldest open record with that opcode/N(S).
-        Stored-sequence verifications (tc_seq 0xFE) are not COP-1 traffic: None."""
+        """Matches a CMDVER packet to its record by the command source (I1): AD frame ->
+        the open AD record with that N(S) and opcode; BD frame / hardline -> the oldest open
+        BD record with that opcode. Stored-sequence verifications (and an unknown source)
+        are not COP-1 traffic: None."""
         now = now or time.time()
         st = v.get("stage")
         stage = {2: "EXECUTED", 3: "FAILED"}.get(st) if isinstance(st, int) else None
-        tc_seq = v.get("tc_seq")
-        if not stage or tc_seq == CMDVER_SEQ_STORED:
+        src, tc_seq, opcode = v.get("cmd_source"), v.get("tc_seq"), v.get("opcode")
+        if not stage:
             return None
-        cands = [r for r in self.all if r.cmd.opcode == v.get("opcode")
-                 and r.state in ("RADIATED", "ACCEPTED")
-                 and (tc_seq == CMDVER_SEQ_BYPASS or r.ns is None or r.ns == tc_seq)]
+        if src == CMD_SOURCE_AD:
+            cands = [r for r in self.all if r.cmd.kind == "AD" and r.cmd.opcode == opcode
+                     and r.state in ("RADIATED", "ACCEPTED") and r.ns is not None and r.ns == tc_seq]
+        elif src == CMD_SOURCE_BD:
+            cands = [r for r in self.all if r.cmd.kind == "BD" and r.cmd.opcode == opcode
+                     and r.state in ("RADIATED", "ACCEPTED")]
+        else:
+            return None
         if not cands:
             return None
         r = cands[0]
@@ -271,9 +354,13 @@ class Fop1:
             r.transmissions += 1
             r.t_radiated = now
             r.farm_b_at_tx = self.last_clcw.farm_b_counter if self.last_clcw else None
+            self._bypass_since_clcw += 1
+            r.farm_b_pos = self._bypass_since_clcw
             r.set("RADIATED", "bypass frame (confirm via CLCW FARM-B counter)", now)
             out.append(r.cltu)
-        if self.vs is None or self.suspended:
+            if r.cmd.mnemonic == "SETVR":
+                self._init_vs(int(r.cmd.args["vr"]))   # FOP-1: V(S) := the commanded V(R)
+        if self.vs is None or self.suspended or self.lockout or self._directive_pending():
             return out
         # retransmission (go-back-N)
         need_rtx = self.retransmit_req or any(now - r.t_radiated > self.t1_s for r in self.sent
@@ -283,10 +370,15 @@ class Fop1:
                 if len(out) >= max_frames:
                     break
                 if r.transmissions >= self.tx_limit:
+                    # FOP-1 alert: the whole Sent Queue goes (go-back-N retransmitted the
+                    # later frames with this one; kept, they would re-suspend after UNLOCK and
+                    # new frames would be numbered past the FARM's V(R)). V(S) is taken again
+                    # from the next CLCW.
                     r.set("SUSPENDED", f"transmission limit {self.tx_limit} reached", now)
                     self.events.append((now, f"FOP suspended: cmd #{r.id} not acknowledged"))
+                    self._purge_sent(now, f"transmission limit {self.tx_limit} reached (cmd #{r.id})")
+                    self.vs = None
                     self.suspended = True
-                    self.sent.remove(r)
                     return out
                 # fresh SDLS sequence number on every transmission (anti-replay)
                 if not self._build(r, r.ns or 0, False, False):

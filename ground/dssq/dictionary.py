@@ -99,8 +99,12 @@ CMD_STAGES = {1: "ACCEPTED", 2: "EXECUTED", 3: "FAILED"}
 # CmdError (PB-2.2); 4 is retired. BUSY = resource in use or not ready yet: retry later.
 CMD_ERRORS = {0: "OK", 1: "UNKNOWN_OPCODE", 2: "BAD_LENGTH", 3: "BAD_ARGUMENT",
               5: "HARDWARE", 6: "BAD_MAGIC", 7: "BUSY"}
-CMDVER_SEQ_BYPASS = 0xFF            # CMDVER tc_seq: carried by a bypass (BD) frame
-CMDVER_SEQ_STORED = 0xFE            # CMDVER tc_seq: dispatched by the stored sequence
+# CMDVER `stage` octet (interface decision I1): b1..0 the stage (CMD_STAGES), b7..6 the
+# command source (CMD_SOURCES), b5..2 spare (0; decoded as stage_spare so decode/encode
+# stay lossless). tc_seq is the carrying AD frame's N(S) and is significant only for source
+# AD: every N(S) 0..255 is a valid sequence number (no in-band sentinels).
+CMD_SOURCE_AD, CMD_SOURCE_BD, CMD_SOURCE_STORED = 0, 1, 2
+CMD_SOURCES = {CMD_SOURCE_AD: "AD", CMD_SOURCE_BD: "BD/HARDLINE", CMD_SOURCE_STORED: "STORED"}
 
 RADIO_MODELS = {1: "E22-400T33D", 2: "E22-400T37S", 3: "SX126x"}   # RF radio_model
 FRAMINGS = {0: "TM", 1: "USLP"}                                     # RF framing
@@ -254,9 +258,11 @@ PACKETS: dict[int, dict[str, Any]] = {
         ("rf_flags", "B", None, "", "b0 Rx boosted gain verified, b1 LBT/CAD on", None),
     ]},
     APID_CMDVER: {"name": "CMDVER", "desc": "Command verification", "fields": [
-        ("tc_seq", "B", None, "", "N(S) of the TC frame (255 bypass, 254 stored sequence)", None),
+        ("tc_seq", "B", None, "", "N(S) of the carrying AD frame (significant for cmd_source AD only)",
+         None),
         ("opcode", "B", None, "", "Opcode", None),
-        ("stage", "B", None, "", "Verification stage", None),
+        ("stage", "B", None, "", "b1..0 verification stage (CMD_STAGES), b7..6 command source "
+                                 "(CMD_SOURCES); decoded as stage + stage_spare + cmd_source (BITFIELDS)", None),
         ("error_code", "B", None, "", "Error code (CMD_ERRORS)", None),
         ("ground_tag", "I", None, "", "Echoed ground tag (PING)", None),
     ]},
@@ -302,6 +308,12 @@ PACKETS: dict[int, dict[str, Any]] = {
         ("gas", "I", None, "ohm", "BME688 gas resistance", None),
         ("accuracy", "B", None, "", "BSEC accuracy 0..3 (meaningful when flags b1 set)", None),
     ]},
+}
+
+# Raw fields that pack several values (PB-1.6 / I1): decom replaces the raw field by the
+# listed sub-fields (name, lsb, width), which cover every bit; encode() packs them back.
+BITFIELDS: dict[int, dict[str, tuple[tuple[str, int, int], ...]]] = {
+    APID_CMDVER: {"stage": (("stage", 0, 2), ("stage_spare", 2, 4), ("cmd_source", 6, 2))},
 }
 
 # Fields whose every raw value is a reading: the NA sentinel does NOT apply (module docstring).

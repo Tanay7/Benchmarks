@@ -16,6 +16,7 @@
 
 #include "config.h"          // model strap pin plan (contract 33); pure C++, no Arduino types
 #include "drivers/radio.h"
+#include "fsw/datalink.h"     // frame_period_ms(): the duty floor fed by the measured busy time
 #include "host_test.h"
 
 using namespace vgq;
@@ -230,6 +231,25 @@ HOST_TEST(radio_e22_tx_tracker) {
         "AUX low up to the 30 s limit");
   CHECK(t.poll(30001, false, v) == RadioEvent::TX_TIMEOUT && v == 30001 && !t.active(), "AUX timeout -> TX_TIMEOUT");
   CHECK(t.poll(40000, true, v) == RadioEvent::NONE, "idle tracker reports nothing");
+
+  // C24 (manual 5.6.2): AUX may rise once the UART data reached the RF chip while the
+  // frame is still on air. With the model's busy time as the floor, an early AUX rise
+  // (here at the 246 ms UART time of a 236-octet CADU) is not the end of the frame.
+  const uint32_t model = radio_airtime_ms(VGQ_RADIO_E22_T33D, 2, 236);
+  CHECK(model > 700, "E22 model busy time of one CADU exceeds the UART time");
+  t.start(0, model);
+  CHECK(t.poll(10, false, v) == RadioEvent::NONE && t.poll(246, true, v) == RadioEvent::NONE &&
+            t.poll(model - 1, true, v) == RadioEvent::NONE,
+        "early AUX rise: no TX_DONE before the modelled air time");
+  CHECK(t.poll(model, true, v) == RadioEvent::TX_DONE && v == (int32_t)model && !t.active(),
+        "TX_DONE at the modelled air time, busy = model");
+  t.start(0, model);
+  CHECK(t.poll(10, false, v) == RadioEvent::NONE && t.poll(model + 300, true, v) == RadioEvent::TX_DONE &&
+            v == (int32_t)(model + 300),
+        "AUX later than the model: measured time kept");
+  // The 50 % duty floor (kMaxTxDutyPermille) then sees at least the air time.
+  CHECK(frame_period_ms(model, MODE_SAFE, false, 0) >= 2 * model,
+        "frame period with the floored busy time keeps the PA under 50 % duty");
 }
 
 // ---- SX126x LoRa profiles and maths ---------------------------------------------------------
@@ -320,6 +340,37 @@ HOST_TEST(radio_sx126x_airtime) {
         "TX timeout, profile 1 CADU: 1665718 steps (26.03 s)");
   CHECK(sx_tx_timeout_raw(UINT32_MAX, 0) == 0xFFFFFEu && sx_tx_timeout_raw(0, 0) == 1u,
         "TX timeout clamped to 1..0xFFFFFE");
+}
+
+// ---- SX126x RxDutyCycle periods for hibernation (C58: was untested inside sx126x.cpp) -------
+HOST_TEST(radio_sx126x_duty_cycle) {
+  bool all = true, catch_ok = true;
+  for (uint8_t code = 0; code < 8; ++code) {
+    const LoraProfile* p = sx_profile(code);
+    uint32_t rx = 0, sl = 0;
+    const bool ok = p && sx_duty_cycle_us(p->sf, p->bw_hz, kSxWakePreambleSym, rx, sl);
+    if (!ok) { all = false; continue; }
+    const uint64_t ts = lora_symbol_us(p->sf, p->bw_hz);
+    // sleep = (n_pre - 16) Tsym; rx >= 9 Tsym; the restarted timer 2 rx + programmed sleep
+    // covers preamble + header, (n_pre + 12.25) Tsym (DS 13.1.7, 6.1.4).
+    const uint64_t need = ((4u * (uint64_t)kSxWakePreambleSym + 49u) * ts + 3u) / 4u;
+    catch_ok = catch_ok && sl == (kSxWakePreambleSym - 16u) * ts && rx >= 9u * ts &&
+               2u * (uint64_t)rx + sl - kSxDutyTransitionUs >= need;
+  }
+  CHECK(all && catch_ok, "SX126x duty cycle: every profile, 32-symbol WAKE preamble: sleep (n-16) Tsym, rx >= 9 Tsym, "
+                         "2 rx + sleep covers preamble + header");
+  uint32_t rx = 0, sl = 0;
+  CHECK(!sx_duty_cycle_us(7, 125000, 16, rx, sl) && !sx_duty_cycle_us(12, 31250, 16, rx, sl),
+        "SX126x duty cycle: n_pre <= 16 refused (no detection margin)");
+  // SF7 / 125 kHz: Tsym 1024 us; n_pre 17 -> sleep 1024 us <= 6 ms transition: refused.
+  CHECK(!sx_duty_cycle_us(7, 125000, 17, rx, sl), "SX126x duty cycle: sleep shorter than the wake-up transition refused");
+  // 24-bit period field (15.625 us steps, max 262.14 s): SF12 / 31.25 kHz (Tsym 131.072 ms)
+  // with 2000 symbols of sleep (262.144 s) exceeds it by 16 us; 1999 symbols do not.
+  CHECK(!sx_duty_cycle_us(12, 31250, 2016, rx, sl) && sx_duty_cycle_us(12, 31250, 2015, rx, sl) &&
+            sl == 1999u * 131072u,
+        "SX126x duty cycle: periods beyond the 24-bit field refused, just below accepted");
+  CHECK(!sx_duty_cycle_us(4, 125000, 32, rx, sl) && !sx_duty_cycle_us(12, 0, 32, rx, sl),
+        "SX126x duty cycle: invalid SF / bandwidth refused");
 }
 
 HOST_TEST(radio_sx126x_limits) {

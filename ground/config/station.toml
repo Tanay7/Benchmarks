@@ -135,7 +135,8 @@ mode = "ADVISE"             # OFF | ADVISE | AUTO
 target_margin_db = 6.0
 period_s = 60.0
 holdoff_s = 600.0
-min_rate = 2                # E22: 2 (codes 0-1 are aliases of 2.4k); SX126x: set 0
+# min_rate = 2              # absent = the radio model's slowest distinct code: E22 2 (codes 0-1
+                            # are aliases of 2.4k), SX126x 0 (profile 0, the most sensitive)
 max_rate = 4
 revert_s = 180              # spacecraft auto-revert window for coordinated changes (60..3600)
 
@@ -150,6 +151,8 @@ http_host = "127.0.0.1"     # 0.0.0.0 exposes the dashboard (and COMMANDING) to 
 http_port = 8080
 http_token = ""             # REQUIRED if http_host is not loopback (X-DSSQ-Token header);
                             # the App creates one in <App>/data/http_token
+http_allowed_hosts = []     # LAN server: DNS names (no port) the dashboard may be reached by, besides
+                            # IP addresses, single-label and <name>.local names (DNS-rebinding guard)
 los_timeout_s = 90.0        # minimum; the GDS uses max(this, 3 x the spacecraft frame period)
 frontpanel = true           # VENTUNO Q MCU station I/O (CardKB, LEDs, buzzer) via arduino-router
 rcu = true                  # VENTUNO Q MCU drives the ground E22 M0/M1/AUX (jumpers removed)

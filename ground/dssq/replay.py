@@ -6,7 +6,9 @@
     python -m dssq.replay --cadu-file ... --config config/station.toml --packets --values
     python -m dssq.replay --cadu-file ... --cfdp-dir /tmp/files              # rebuild CFDP files
 
-Every codeblock goes through the same chain as the live GDS (Phase B PB-7 F-45): ASM check,
+Every codeblock goes through the same chain as the live GDS (Phase B PB-7 F-45): ASM check
+(the frame synchronizer's lock tolerance, <= LOCK_TOL bit errors: the archive keeps the ASM
+exactly as received, uncorrected, and the ASM is not protected by RS),
 de-randomizer, Reed-Solomon, TM/USLP frame parser ([link] tm_framing), SDLS TM
 ProcessSecurity (AE decrypt + tag + (epoch, sn) anti-replay, null SA flagged UNPROTECTED;
 [sdls] tm_service / key_file / accept_null), packet extraction per data VC 0..3, OID
@@ -40,6 +42,7 @@ from .ccsds.packets import PacketExtractor, SpacePacket
 from .ccsds.tm import FrameLossTracker, TransferFrame, decode_codeblock
 from .decom import Decommutator
 from .dictionary import APID_CFDP
+from .framesync import LOCK_TOL
 
 FRAMINGS = ("AUTO", "TM", "USLP")
 MAX_RAW_FILE = 1 << 30            # a CADU recording larger than 1 GiB is refused (memory bound)
@@ -74,16 +77,21 @@ class Pipeline:
         self.idents: Counter[str] = Counter()
         self.cfdp_events: list[dict[str, Any]] = []
         self.rs_symbols = 0
+        self.asm_bit_errors = 0
         self.lost_frames = 0
+        self._protected = False
 
     def _open(self, f: TransferFrame) -> TransferFrame | None:
-        """SDLS ProcessSecurity of one data-VC frame; None when it must not be decoded."""
+        """SDLS ProcessSecurity of one data-VC frame; None when it must not be decoded.
+        Sets self._protected (the frame passed AE verification) for the packet extractor."""
+        self._protected = False
         if not f.secured:
             self.verdicts["NONE"] += 1
             return f
         if self.key_loaded:
             plain, res = self.sec.open_frame(f)
             self.verdicts[res.verdict] += 1
+            self._protected = plain is not None and res.verdict == "OK"
             return plain
         # No key: only a null-SA frame (SPI 0, IV and MAC all zero) can be read.
         spi = int.from_bytes(f.sec_header[:2], "big")
@@ -98,9 +106,11 @@ class Pipeline:
         if len(cadu) != CADU_LEN:
             self.frames["bad: CADU length"] += 1
             return []
-        if cadu[:len(ASM)] != ASM:
+        asm_errors = bin(int.from_bytes(cadu[:len(ASM)], "big") ^ int.from_bytes(ASM, "big")).count("1")
+        if asm_errors > LOCK_TOL:
             self.frames["bad: ASM"] += 1
             return []
+        self.asm_bit_errors += asm_errors
         r = decode_codeblock(cadu[len(ASM):], *self.geometry, framing=self.framing)
         if not r.ok or r.frame is None:
             self.frames["bad: " + r.reason] += 1
@@ -123,7 +133,8 @@ class Pipeline:
             self.frames["no packet channel"] += 1
             return []
         out: list[tuple[int, SpacePacket]] = []
-        for p in ex.push(opened.vcfc, opened.fhp, opened.data):
+        # Same SDLS continuity rule as the live GDS (I2): SpacePacket.protected per packet.
+        for p in ex.push(opened.vcfc, opened.fhp, opened.data, protected=self._protected):
             self.packets[self.decom.packet_name(p.apid)] += 1
             if p.apid == APID_CFDP and self.cfdp is not None:
                 self.cfdp_events += self.cfdp.receive(p.user_data, ert)
@@ -201,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, struct.error) as e:      # TOMLDecodeError is a ValueError
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print(f"\n{n} CADUs, {pipe.rs_symbols} RS symbols corrected, {pipe.lost_frames} frames lost")
+    print(f"\n{n} CADUs, {pipe.asm_bit_errors} ASM bit errors, {pipe.rs_symbols} RS symbols corrected, "
+          f"{pipe.lost_frames} frames lost")
     print("frames:", dict(pipe.frames))
     print("SDLS verdicts:", dict(pipe.verdicts))
     print("packets by name:", dict(pipe.packets))

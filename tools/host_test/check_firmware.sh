@@ -22,9 +22,8 @@
 # the patched copy:
 #   * every RadioLib translation unit (arduino-cli compiles them all), UNO Q and
 #     VENTUNO Q, -Wall -Wextra (the library is not held to -Wshadow);
-#   * flight drivers/sx126x.cpp with VGQ_RADIO=3 for the SX1268 and the SX1262;
-#     while config.h does not define the SX126x wiring yet, the contract 1.1 pins
-#     and the default module constants are supplied by a prelude;
+#   * flight drivers/sx126x.cpp with VGQ_RADIO=3 for the SX1268 and the SX1262, with
+#     the SX126x wiring and module constants from config.h (a missing definition fails);
 #   * the station sketch with DSSQ_RADIO_SX126X=1, VENTUNO Q, both chips;
 #   * the flight build matrix below with VGQ_RADIO=3 (SX1268, SX1262).
 # Flight build matrix (PB-8.5): sketch.ino and fsw/flight.cpp for every build switch
@@ -155,25 +154,9 @@ DRV="$SK/src/drivers"
 check "$DRV/e22.cpp" " [VGQ_RADIO=2]" "${UNOQ[@]}" -DVGQ_RADIO=2
 check "$DRV/radio.cpp" " [host, no Arduino]" -DVGQ_HOST_BUILD -I"$SK/src"
 if [[ -n "$RADIOLIB" ]]; then
-  WIRING=()
-  wtag=""
-  if ! grep -q "PIN_SX_NSS" "$SK/src/config.h"; then
-    cat >"$TMP/sx_wiring.h" <<'EOF'
-// check_firmware.sh stand-in for the config.h SX126x section (contract 1.1 / 2.2 defaults).
-#include <stdint.h>
-static const int PIN_SX_NSS = 10, PIN_SX_BUSY = 4, PIN_SX_DIO1 = 5, PIN_SX_NRST = 6;
-static const int PIN_SX_RXEN = 8, PIN_SX_TXEN = 9;
-static const float kSxTcxoV = 1.8f;
-static const bool kSxDio2RfSwitch = false;
-static const int8_t kSxPaGainDb = 11;
-static const float kSxOcpMa = 140.0f;
-EOF
-    WIRING=(-include "$TMP/sx_wiring.h")
-    wtag=", contract 1.1 wiring"
-  fi
   for chip in 1268 1262; do
-    check "$DRV/sx126x.cpp" " [VGQ_RADIO=3, SX$chip$wtag]" "${UNOQ[@]}" -DVGQ_RADIO=3 -DVGQ_SX126X_CHIP=$chip \
-      ${WIRING[@]+"${WIRING[@]}"} -isystem "$RADIOLIB"
+    check "$DRV/sx126x.cpp" " [VGQ_RADIO=3, SX$chip]" "${UNOQ[@]}" -DVGQ_RADIO=3 -DVGQ_SX126X_CHIP=$chip \
+      -isystem "$RADIOLIB"
   done
   check_library "$RADIOLIB" "UNO Q" "${UNOQ[@]}"
   check_library "$RADIOLIB" "VENTUNO Q" "${VENTUNOQ[@]}"

@@ -16,10 +16,12 @@
   subprocess run of the Phase D App layout with a fake arduino.app_utils (PB-6.2 (b)).
 """
 import base64
+import contextlib
 import hashlib
 import http.client
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -156,7 +158,9 @@ def make_server(tmp_path):
 
     def make(**kw):
         stub = StubStation(tmp_path, token=kw.pop("token", ""), auth=kw.pop("auth", ""))
-        srv = web.start_web(stub, "127.0.0.1", 0, **kw)
+        if "allowed_hosts" in kw:
+            stub.cfg["gds"]["http_allowed_hosts"] = kw.pop("allowed_hosts")
+        srv = web.start_web(stub, kw.pop("host", "127.0.0.1"), 0, **kw)
         servers.append(srv)
         return srv.server_address[1], stub, srv
 
@@ -384,7 +388,9 @@ def test_error_boundary_and_bounded_resources(make_server):
     stub.fail = False
     assert request(port, "GET", "/api/state")[0] == 200                         # the server thread survived
     idle = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(2)]
-    time.sleep(0.3)
+    deadline = time.time() + 5
+    while time.time() < deadline and srv._slots._value:                         # both idle ones hold a slot
+        time.sleep(0.01)
     third = socket.create_connection(("127.0.0.1", port), timeout=5)
     try:
         third.sendall(b"GET /api/state HTTP/1.0\r\n\r\n")
@@ -398,7 +404,12 @@ def test_error_boundary_and_bounded_resources(make_server):
     for s in idle:
         s.close()
     deadline = time.time() + 5
-    while time.time() < deadline and request(port, "GET", "/api/state")[0] != 200:
+    while time.time() < deadline:
+        try:                                     # until the slots are released the server refuses by
+            if request(port, "GET", "/api/state")[0] == 200:     # closing: RemoteDisconnected / reset
+                break
+        except (ConnectionError, http.client.HTTPException):
+            pass
         time.sleep(0.05)
     assert request(port, "GET", "/api/state")[0] == 200
     hold = socket.create_connection(("127.0.0.1", port), timeout=5)            # a stalled client
@@ -407,6 +418,57 @@ def test_error_boundary_and_bounded_resources(make_server):
     srv.server_close()
     hold.close()
     assert time.monotonic() - t0 < 1.5                                          # Runner.close() budget
+
+
+def test_slow_clients_cannot_hold_the_slots(make_server, monkeypatch):
+    """C38: a client trickling its request octet by octet keeps no slot past the request
+    deadline (the per-receive socket timeout alone never expires while octets arrive)."""
+    monkeypatch.setattr(web, "REQUEST_DEADLINE_S", 1.0)
+    port, _stub, _srv = make_server(max_clients=2)
+    slow = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(2)]
+    for s in slow:
+        s.sendall(b"POST /api/cmd HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: 100000\r\n\r\n")
+    t0 = time.monotonic()
+    answers, ok = [], False
+    try:
+        while time.monotonic() - t0 < 4.0:
+            for s in slow:
+                with contextlib.suppress(OSError):
+                    s.sendall(b" ")                                              # one octet at a time
+            try:
+                ok = request(port, "GET", "/api/state")[0] == 200
+            except (ConnectionError, http.client.HTTPException):
+                ok = False
+            if ok:
+                break
+            time.sleep(0.2)
+        for s in slow:
+            with contextlib.suppress(OSError):
+                answers.append(s.recv(4096))
+    finally:
+        for s in slow:
+            s.close()
+    assert ok and time.monotonic() - t0 < 3.0                                    # slots freed by the deadline
+    assert any(a.startswith(b"HTTP/1.0 408") for a in answers), answers
+
+
+def test_lan_server_refuses_foreign_host_names(make_server):
+    """C39: a 0.0.0.0-bound server answers an IP literal, a LAN-only name (single label,
+    <name>.local), its own host name or a configured name; a rebound public DNS name is
+    refused on GET and POST."""
+    port, stub, _ = make_server(host="0.0.0.0", token="t0k", allowed_hosts=["station.example.org"])
+    me = socket.gethostname()
+    for host in ("evil.example", f"evil.example:{port}", "station.example.org.evil.example", "local.evil.example"):
+        st, _, body = request(port, "GET", "/api/state", headers={"Host": host})
+        assert st == 403 and "http_allowed_hosts" in strict_json(body)["error"], host
+        st, _, _ = request(port, "POST", "/api/cmd", {"text": "NOOP"}, {"Host": host, "X-DSSQ-Token": "t0k"})
+        assert st == 403, host
+    for host in (f"127.0.0.1:{port}", f"192.168.1.5:{port}", "[fe80::1]:8080", f"{me}:{port}",
+                 "ventunoq.local:8080", "ventunoq", "STATION.example.org", "localhost"):
+        assert request(port, "GET", "/api/state", headers={"Host": host})[0] == 200, host
+    assert not [c for c in stub.calls if c[0] == "submit_command"]
+    from dssq.config import is_loopback
+    assert is_loopback("127.0.0.2") and is_loopback("::1") and not is_loopback("0.0.0.0")
 
 
 def test_prometheus_exposition_format():
@@ -672,6 +734,34 @@ def test_dashboard_reads_every_snapshot_key(sim_station):
     assert [k for k in sci["spectral"] if not re.search(rf"\.{k}\b|\"{k}\"", script)] == []
     for w in ("1m", "10m", "pass"):                                             # 3 windows x 8 metrics
         assert set(snap["rx"]["windows"][w]) <= set(re.findall(r'\["(\w+)", "[^"]+", "[^"]*", \d\]', script))
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
+def test_dashboard_compares_fusion_and_triad_in_one_frame(tmp_path):
+    """C47: q_fus is device -> ENU, q_triad NED -> body (flight spec_attitude); the page
+    brings both to body -> NED. A level spacecraft heading 30 deg, perfect sensors: both
+    give yaw 30, pitch 0, roll 0, and the angle between them is 0 (it showed 180)."""
+    script = _page()[1]
+    parts = [re.search(rf"^function {n}\(.*?^}}$", script, re.S | re.M).group(0) for n in ("q2e", "qmul")]
+    parts += [re.search(r"^const Q_ENU_TO_NED = .*?;$", script, re.M).group(0)]
+    parts += [re.search(rf"^function {n}\(.*?$", script, re.M).group(0) for n in ("fusToNed", "triadToNed")]
+    h = math.radians(15.0)
+    q_ned = [math.cos(h), 0.0, 0.0, math.sin(h)]                                # body -> NED, heading 30 deg
+    # device -> ENU of that attitude (the BHI260 / Android world: x East, y North, z Up)
+    q_fus = [0.0, math.sqrt(0.5) * (q_ned[0] + q_ned[3]), math.sqrt(0.5) * (q_ned[0] - q_ned[3]), 0.0]
+    assert q_fus == pytest.approx([0.0, 0.8660254, 0.5, 0.0])
+    q_tri = [q_ned[0], -q_ned[1], -q_ned[2], -q_ned[3]]                          # NED -> body (triad_ned)
+    js = "\n".join(parts) + f"""
+const f = fusToNed({q_fus}), t = triadToNed({q_tri});
+const dot = Math.abs(f.reduce((s, v, i) => s + v * t[i], 0));
+console.log(JSON.stringify({{ef: q2e(...f), et: q2e(...t), angle: 2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI}}));
+"""
+    (tmp_path / "q.js").write_text(js)
+    out = json.loads(subprocess.run(["node", str(tmp_path / "q.js")], capture_output=True, text=True,
+                                    timeout=60, check=True).stdout)
+    assert out["angle"] == pytest.approx(0.0, abs=1e-3)
+    for e in (out["ef"], out["et"]):
+        assert e == pytest.approx([30.0, 0.0, 0.0], abs=1e-6)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")

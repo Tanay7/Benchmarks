@@ -130,9 +130,17 @@ enum RfFlag : uint8_t {           // RF.flags (PB-1.4) = Radio::rf_flags()
   RF_F_LBT      = 0x02,           // LBT / CAD before every transmission
 };
 
-// CMDVER tc_seq values that are not an N(S) (PB-1.6).
-static const uint8_t kCmdVerSeqBypass = 0xFF;   // Type-BD frame (or the hardline)
-static const uint8_t kCmdVerSeqStored = 0xFE;   // dispatched by the stored-sequence table
+// CMDVER command source (PB-1.6, interface decision I1): bits 7..6 of the `stage`
+// octet, the stage itself in bits 1..0. It is carried outside tc_seq because an AD
+// frame's N(S) takes every value 0..255 (FARM-1 counts modulo 256, CCSDS 232.1-B), so
+// no tc_seq value is free to mean "not an AD frame".
+enum CmdSource : uint8_t {
+  CMD_SRC_AD     = 0,             // Type-AD frame: tc_seq = its N(S)
+  CMD_SRC_BD     = 1,             // Type-BD frame (RF or the hardline umbilical): tc_seq 0
+  CMD_SRC_STORED = 2,             // dispatched by the stored-sequence table: tc_seq 0
+};
+static const uint8_t kCmdVerStageMask = 0x03;
+static const uint8_t kCmdVerSourceShift = 6;
 
 // ---- Fixed-length packets ---------------------------------------------------------------
 struct HkPacket {                 // APID 0x010, 78 octets (PB-1.3; offsets in comments)
@@ -209,11 +217,12 @@ struct RfPacket {                 // APID 0x011, 49 octets (PB-1.4)
 };
 
 struct CmdVerPacket {             // APID 0x013, 8 octets
-  uint8_t  tc_seq;                // N(S) of the carrying AD frame, kCmdVerSeqBypass, kCmdVerSeqStored
+  uint8_t  tc_seq;                // N(S) of the carrying AD frame; significant for CMD_SRC_AD only
   uint8_t  opcode;
-  uint8_t  stage;                 // 2 executed, 3 failed (CmdStage)
+  uint8_t  stage;                 // bits 1..0: 2 executed, 3 failed (CmdStage); bits 7..6: source
   uint8_t  error_code;            // CmdError
   uint32_t ground_tag;            // echoed PING tag (RTLT measurement)
+  uint8_t  source;                // CmdSource, packed into the stage octet (not an octet of its own)
 };
 
 struct TimeCorrPacket {           // APID 0x014, 10 octets

@@ -99,7 +99,7 @@ class BridgeLink:
 
     def _invoke(self, fn: Callable[..., Any], *args: Any, **kw: Any) -> Any:
         if self.kind == "app_utils" and time.monotonic() < self._down_until:
-            raise ConnectionError("arduino-router unreachable (retrying)")
+            raise ConnectionError(f"arduino-router unreachable (not tried again for {APP_RETRY_S:.0f} s)")
         try:
             return fn(*args, **kw)
         except self._app_errors as e:            # AppError: the router could not be reached

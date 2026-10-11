@@ -3,8 +3,16 @@
 #   sudo cp ground/deploy/dssq-gds.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now dssq-gds
 #   journalctl -u dssq-gds -f
-# Adjust User / WorkingDirectory to where the repository is. The GDS needs only the Python
-# standard library (>= 3.11; Ubuntu 24.04 ships 3.12): no virtual environment, no pip.
+# deploy/install_station.sh does all of this (--service) for the checkout it lives in;
+# by hand, adjust User / WorkingDirectory / ExecStart to where the repository is.
+# The GDS itself needs only the Python standard library (>= 3.11; Ubuntu 24.04 ships 3.12),
+# but in host mode the front panel (CardKB, annunciators), the Radio Control Unit and the
+# SX126x radio need arduino.router_bridge (PyPI arduino-router-bridge 0.5.1 + msgpack),
+# which App Lab's container has and the board's host Python does not. ExecStart therefore
+# uses the virtual environment ground/.venv that install_station.sh creates (Ubuntu 24.04
+# refuses pip into the system Python). Without the package the GDS still runs, logs WARN
+# "router bridge unavailable" and those three functions stay disabled (an SX126x station
+# then has no radio at all).
 #
 # Do NOT run this service and the "DSS-Q Ground Station" App Lab App at the same time: the
 # Router Bridge lets ONE Linux client provide a given method name (front panel, RCU, SX126x
@@ -20,7 +28,7 @@ Wants=network-online.target
 [Service]
 User=arduino
 WorkingDirectory=/home/arduino/Benchmarks/ground
-ExecStart=/usr/bin/python3 -m dssq.gds --config config/station.toml
+ExecStart=/home/arduino/Benchmarks/ground/.venv/bin/python -m dssq.gds --config config/station.toml
 Restart=on-failure
 RestartSec=5
 # Runner.close() finishes within 4 s after SIGTERM (TDM, archive and SDLS state flushed).

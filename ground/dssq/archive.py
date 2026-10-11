@@ -10,6 +10,11 @@ file delivered by CFDP, Phase B F-47; those are stored with vcid 2 like an SSR p
 An archive created by an earlier version gains the column on open (ALTER TABLE).
 
 The archive is not thread-safe by itself: the GDS calls it under its state lock only.
+
+Writes are best-effort: an I/O error (disk full: OSError ENOSPC, or sqlite3 "database or
+disk is full") is counted in `write_errors` with `last_error` and never raised, so a full
+disk stops the recording, not the live downlink, FOP-1 or commanding. The GDS reports the
+count (rate-limited WARN event, YELLOW alarm, health).
 """
 from __future__ import annotations
 
@@ -46,6 +51,8 @@ class Archive:
         self.root = Path(root)
         self.db: sqlite3.Connection | None = None
         self._last_commit = time.time()
+        self.write_errors = 0
+        self.last_error: str | None = None
         if not enabled:
             return
         self.root.mkdir(parents=True, exist_ok=True)
@@ -56,6 +63,14 @@ class Archive:
             self.db.execute("ALTER TABLE packets ADD COLUMN source TEXT DEFAULT 'RF'")
         self.db.commit()
 
+    @contextlib.contextmanager
+    def _best_effort(self) -> Iterator[None]:
+        try:
+            yield
+        except (OSError, sqlite3.Error) as e:
+            self.write_errors += 1
+            self.last_error = f"{type(e).__name__}: {e}"[:300]
+
     def _day(self) -> Path:
         d = self.root / datetime.now(UTC).strftime("%Y%m%d")
         d.mkdir(exist_ok=True)
@@ -65,16 +80,16 @@ class Archive:
         if not self.enabled:
             return
         r = RSSI_NA if rssi is None else max(-0x8000, min(0x7FFE, round(rssi)))
-        with open(self._day() / "cadu.bin", "ab") as f:
-            f.write(struct.pack(">qhH", int(ert * 1e9), r, len(cadu)))
-            f.write(cadu)
+        with self._best_effort(), open(self._day() / "cadu.bin", "ab") as f:
+            f.write(struct.pack(">qhH", int(ert * 1e9), r, len(cadu)) + cadu)
 
     def frame(self, **kw: Any) -> None:
         if self.db:
-            self.db.execute("INSERT INTO frames VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (kw.get("ert"), kw.get("mcfc"), kw.get("vcid"), kw.get("vcfc"),
-                             kw.get("fhp"), kw.get("rs"), kw.get("rssi"), kw.get("snr"),
-                             int(kw.get("ok", 1)), kw.get("reason", "")))
+            with self._best_effort():
+                self.db.execute("INSERT INTO frames VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (kw.get("ert"), kw.get("mcfc"), kw.get("vcid"), kw.get("vcfc"),
+                                 kw.get("fhp"), kw.get("rs"), kw.get("rssi"), kw.get("snr"),
+                                 int(kw.get("ok", 1)), kw.get("reason", "")))
             self._maybe_commit()
 
     def packet(self, ert: float, scet: float | None, apid: int, name: str, seq: int, sclk: float | None,
@@ -82,40 +97,45 @@ class Archive:
                source: str = "RF") -> None:
         if not self.db:
             return
-        self.db.execute("INSERT INTO packets (ert, scet, apid, name, seq, sclk, partition, vcid, raw, source) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (ert, scet, apid, name, seq, sclk, partition, vcid, raw, source))
         rows = [(ert, scet, name, k, float(v), limits.get(k, "OK")) for k, v in values.items()
                 if isinstance(v, (int, float)) and not isinstance(v, bool)]
-        self.db.executemany("INSERT INTO params VALUES (?,?,?,?,?,?)", rows)
+        with self._best_effort():
+            self.db.execute("INSERT INTO packets (ert, scet, apid, name, seq, sclk, partition, vcid, raw, source) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (ert, scet, apid, name, seq, sclk, partition, vcid, raw, source))
+            self.db.executemany("INSERT INTO params VALUES (?,?,?,?,?,?)", rows)
         self._maybe_commit()
 
     def event(self, t: float, level: str, source: str, text: str) -> str:
         line = f"{datetime.fromtimestamp(t, UTC).isoformat(timespec='seconds')} " \
                f"{level:5s} {source:8s} {text}"
         if self.enabled:
-            with open(self._day() / "events.log", "a", encoding="utf-8") as f:
+            with self._best_effort(), open(self._day() / "events.log", "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         if self.db:
-            self.db.execute("INSERT INTO events VALUES (?,?,?,?)", (t, level, source, text))
+            with self._best_effort():
+                self.db.execute("INSERT INTO events VALUES (?,?,?,?)", (t, level, source, text))
             self._maybe_commit()
         return line
 
     def command(self, rec: Mapping[str, Any]) -> None:
         if self.db:
-            self.db.execute("INSERT INTO commands VALUES (?,?,?,?,?)",
-                            (time.time(), rec["id"], rec["text"], rec["state"], rec["detail"]))
+            with self._best_effort():
+                self.db.execute("INSERT INTO commands VALUES (?,?,?,?,?)",
+                                (time.time(), rec["id"], rec["text"], rec["state"], rec["detail"]))
             self._maybe_commit()
 
     def _maybe_commit(self) -> None:
         if self.db and time.time() - self._last_commit > COMMIT_INTERVAL_S:
-            self.db.commit()
-            self._last_commit = time.time()
+            self._last_commit = time.time()             # a failing commit is retried a period later
+            with self._best_effort():
+                self.db.commit()
 
     def flush(self) -> None:
         """Commits the database and forces today's raw files to disk (shutdown path)."""
         if self.db:
-            self.db.commit()
+            with self._best_effort():
+                self.db.commit()
         if not self.enabled:
             return
         day = self.root / datetime.now(UTC).strftime("%Y%m%d")
@@ -133,7 +153,8 @@ class Archive:
         """Commit and close; idempotent."""
         db, self.db = self.db, None
         if db is not None:
-            db.commit()
+            with self._best_effort():
+                db.commit()
             db.close()
 
 

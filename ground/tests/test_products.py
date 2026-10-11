@@ -539,7 +539,11 @@ def test_xtce_references_resolve_and_containers_match_the_dictionary(xtce_root):
         crit = cont.find(f"{X}BaseContainer/{X}RestrictionCriteria/{X}Comparison")
         assert int(crit.get("value")) == apid == by_name[spec["name"]]
         refs = [e.get("parameterRef") for e in cont.find(f"{X}EntryList")]
-        assert refs == [f[0] for f in spec["fields"]]
+        want = []
+        for f in spec["fields"]:                                  # a packed octet: its sub-fields, MSB first
+            subs = dd.BITFIELDS.get(apid, {}).get(f[0])
+            want += [n for n, _lsb, _w in sorted(subs, key=lambda x: -x[1])] if subs else [f[0]]
+        assert [r for r in refs if "_reserved_" not in r] == want
     mcs = xtce_root.findall(f"{X}CommandMetaData/{X}MetaCommandSet/{X}MetaCommand")
     assert len(mcs) == len(dd.COMMANDS) + 1
     for mc in mcs[1:]:
@@ -591,6 +595,11 @@ def test_xtce_decodes_every_packet_exactly_like_the_decommutator(xtce_root):
             assert vals[(root, "cuc_fine")][1] == pytest.approx(t.fine / 65536.0, abs=0)
             ref = decom.decode(SpacePacket.parse(pkt))
             for f, raw in zip(spec["fields"], raws, strict=True):
+                subs = dd.BITFIELDS.get(apid, {}).get(f[0])
+                if subs:                                                   # packed octet (I1): per sub-field
+                    for sub, lsb, width in subs:
+                        assert vals[(sys_path, sub)][0] == (raw >> lsb) & ((1 << width) - 1) == ref[sub]
+                    continue
                 raw_x, val_x = vals[(sys_path, f[0])]
                 assert raw_x == raw or (f[1] == "f" and math.isnan(raw) and math.isnan(raw_x))
                 decoder = f[6] if len(f) > 6 else None

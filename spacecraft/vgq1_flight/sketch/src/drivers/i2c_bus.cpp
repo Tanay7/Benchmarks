@@ -15,7 +15,7 @@ void I2cBus::begin(TwoWire& w, uint32_t clock_hz, int pin_sda, int pin_scl) {
   // directly; begin() below re-muxes them to I2C.
   begin_clear_ok_ = (sda_ >= 0 && scl_ >= 0) ? bus_clear() : true;
   w_->begin();
-  w_->setClock(clock_);
+  w_->setClock(clock_);                 // load-bearing: clears PE = resets the I2C block (header step 4)
 }
 
 void I2cBus::restore_clock() { if (w_) w_->setClock(clock_); }
@@ -53,7 +53,11 @@ bool I2cBus::write_raw(uint8_t addr, const uint8_t* buf, size_t n) {
 bool I2cBus::read(uint8_t addr, uint8_t reg, uint8_t* buf, size_t n) {
   w_->beginTransmission(addr);
   (void)w_->write(reg);
-  if (w_->endTransmission(false) != 0) { note(false); return false; }   // repeated start
+  // Register-pointer write. ArduinoCore-zephyr ignores the stop argument (Wire.cpp
+  // endTransmission: ARG_UNUSED(stopBit), i2c_write() ends with STOP), so this is a
+  // complete write and the read below a separate transaction - no repeated start. Every
+  // target on this bus accepts that (RM3100 manual 4.5.2 shows P before the read).
+  if (w_->endTransmission(false) != 0) { note(false); return false; }
   return read_raw(addr, buf, n);
 }
 
@@ -115,7 +119,7 @@ bool I2cBus::recover() {
   w_->end();
   const bool ok = (sda_ >= 0 && scl_ >= 0) ? bus_clear() : true;
   w_->begin();
-  w_->setClock(clock_);
+  w_->setClock(clock_);                 // load-bearing: clears PE = resets the I2C block (header step 4)
   consec_ = 0;
   ++recoveries_;
   return ok;

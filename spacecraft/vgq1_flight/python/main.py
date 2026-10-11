@@ -7,7 +7,8 @@
 #  Duties (each one a bounded step of the App Lab user loop, PB-6.3):
 #    * SCLK partition = SDLS TM epoch (CCSDS 355.0-B-2 AES-GCM nonce safety,
 #      contract 5): a NEW persisted boot-counter value on every MCU boot, at EGSE
-#      start and whenever the MCU reports epoch 0; never an old value again.
+#      start and whenever the MCU reports epoch 0; every value goes into at most
+#      ONE set_partition call, ever (an unanswered call is never repeated).
 #    * SDLS TC anti-replay restore: the last sequence number the MCU reported
 #      (sdls_sn) is persisted and given back after every MCU boot.
 #    * CADU archive: every CADU handed to the radio, data/cadu_YYYYMMDD.bin
@@ -18,7 +19,9 @@
 #      sc_status_x notifications.
 #    * CFDP relay (CCSDS 727.0-B-5 class 1, contract 7): CFDPPUT source 1 (this
 #      event log) or 2 (the latest CADU archive) is built here with cfdp_tx.py
-#      and handed to the MCU PDU by PDU (cfdp_pdu RPC, VC 3).
+#      and handed to the MCU PDU by PDU (cfdp_pdu RPC, VC 3). A relay the MCU
+#      still holds after an EGSE restart is closed with EOF(cancel), so CFDPPUT
+#      is not blocked until the MCU's 600 s relay timeout.
 #    * Hardline ("umbilical") commanding: CLTU hex lines appended to
 #      data/hardline_queue.txt (python -m dssq.cltu on the ground side) go to the
 #      flight command path through hl_cltu, bypassing RF.
@@ -75,7 +78,9 @@ BOARD_PERIOD_S = 10.0                      # status board on the console
 LOG_REPEAT_S = 60.0                        # a repeated warning/traceback at most once per minute
 HARDLINE_PAUSE_S = 2.0                     # after an unconfirmed hl_cltu call
 RELAY_STALL_S = 600.0                      # = flight kCfdpRelayTimeoutMs: the MCU forgets the relay
+RELAY_ORPHAN_S = 40.0                      # > flight kRelayStartTimeoutMs 30 s + one 5 s sc_status_x
 EPOCH0_GRACE_S = 10.0                      # a status queued before an accepted set_partition
+EPOCH_RETRY_MAX_S = 60.0                   # longest wait before a NEW value replaces an unanswered one
 REFUSAL_WAIT_S = 2.5                       # >= two 1 Hz sc_status after a refused epoch
 
 # ---- Protocol limits (PB-4.1) ------------------------------------------------------------
@@ -373,8 +378,8 @@ class Egse:
             "cadus": 0, "evrs": 0, "status_core": 0, "status_x": 0, "boots": 0, "inbox_dropped": 0,
             "bad_notifications": 0, "write_errors": 0, "epochs_issued": 0, "epoch_refusals": 0,
             "relay_started": 0, "relay_completed": 0, "relay_cancelled": 0, "relay_failed": 0,
-            "relay_abandoned": 0,
-            "relay_pdus": 0, "relay_busy": 0, "hardline_sent": 0, "hardline_failed": 0,
+            "relay_abandoned": 0, "relay_orphans_closed": 0,
+            "relay_pdus": 0, "relay_busy": 0, "hardline_sent": 0, "hardline_failed": 0, "sn_not_lowered": 0,
         }
         self.vc_counts: dict[str, int] = {}
         self.duty_errors: dict[str, int] = dict.fromkeys(self.DUTIES, 0)
@@ -393,7 +398,10 @@ class Egse:
         self._nd_seen: dict[str, int] = {}
         # SCLK partition / SDLS TM epoch (PB-6.3 rules 1-6)
         self.boot_count: int | None = 0        # None: the counter file is unreadable -> blocked
-        self.epoch_pending: int | None = None   # value persisted and offered to the MCU
+        self.epoch_pending: int | None = None   # persisted, NOT yet put into any set_partition call
+        self.epoch_unanswered: int | None = None   # put into a call that got no definite answer
+        self._epoch_alive = False               # a status not showing it arrived after that call
+        self._offered_max = 0                   # highest value this process ever put into a call
         self.epoch_accepted: int | None = None
         self._epoch_attempt, self._epoch_next = 0, 0.0
         self._epoch_ok_t: float | None = None
@@ -412,6 +420,11 @@ class Egse:
         self._relay_attempt, self._relay_next = 0, 0.0
         self._relay_progress_t = 0.0
         self._relay_unanswered = False          # the current PDU's last offer raised
+        # a relay the MCU's RelayGate still holds but this EGSE does not run (PB-2.5)
+        self._orphan_seq: int | None = None
+        self._orphan_first = self._orphan_last = 0.0
+        self._orphan_closed: int | None = None
+        self._orphan_attempt, self._orphan_next = 0, 0.0
         # hardline
         self.hl_queue: deque[str] = deque()
         self._hl_next = 0.0
@@ -662,6 +675,13 @@ class Egse:
         if epoch is None or not 0 <= epoch <= 0xFFFF:
             return
         self._latest_epoch = epoch
+        if self.epoch_unanswered is not None:
+            if epoch == self.epoch_unanswered:
+                # The unanswered call was applied (it can only have reached one boot: the
+                # value was in that one call). Nothing new is needed until a reboot.
+                self._epoch_taken(epoch, "reported by the MCU's status after an unanswered call")
+            else:
+                self._epoch_alive = True         # the MCU is listening but does not hold it
         if epoch > 0:
             self._epoch0_reissues = 0
             if self.boot_count is not None and epoch > self.boot_count and epoch <= EPOCH_MAX:
@@ -680,8 +700,12 @@ class Egse:
     def _epoch0_wanted(self, now: float) -> bool:
         """Rule 2: epoch 0 with no request in flight -> a new value; not for a status that
         was queued before the last accepted set_partition, and not endlessly if the MCU
-        accepts epochs but keeps reporting 0 (a fault the operator must see)."""
+        accepts epochs but keeps reporting 0 (a fault the operator must see). A value still
+        waiting to be offered serves the MCU anyway; after an unanswered call this very
+        status has marked the MCU alive, so _duty_partition issues the NEW value (rule 3)."""
         if self.epoch_stopped or self.epoch_pending is not None or self._reissue_at is not None:
+            return False
+        if self.epoch_unanswered is not None:
             return False
         if self._issue_retry_at is not None:
             return False
@@ -710,6 +734,24 @@ class Egse:
                 log.warning("%d %s not forwarded by the MCU since its boot (+%d): the notification "
                             "budget or the router UART was full", n, what, delta)
             self._nd_seen[key] = n
+        self._watch_orphan(st, now)
+
+    def _watch_orphan(self, st: Mapping[str, object], now: float) -> None:
+        """An EGSE restart (App restart, crash, Linux reboot) during a relay leaves the MCU's
+        RelayGate holding the transaction: ACTIVE refuses every CFDPPUT (SSR export
+        included) until CfdpRelayMonitor expires it after 600 s. The gate shows in
+        sc_status_x as cfdp 2 + cfdp_seq; seen continuously for RELAY_ORPHAN_S with no relay
+        of that seq running here, it can only be ACTIVE or CANCELLING (REQUESTED times out
+        after 30 s), and _close_orphan_relay ends it with EOF(cancel)."""
+        state, seq = _int(st, "cfdp"), _int(st, "cfdp_seq")
+        running = self.relay.seq if self.relay is not None else None
+        if state != 2 or seq is None or not 0x80000000 <= seq <= 0xFFFFFFFF or seq == running:
+            self._orphan_seq = None
+            return
+        if seq != self._orphan_seq:
+            self._orphan_seq, self._orphan_first = seq, now
+            self._orphan_attempt, self._orphan_next = 0, 0.0
+        self._orphan_last = now
 
     def _do_evr(self, evr: object, t: float, now: float) -> None:
         if not isinstance(evr, dict):   # posted only by the handlers above
@@ -731,13 +773,25 @@ class Egse:
         self._epoch0_reissues = 0
         self._latest_epoch = 0                  # a booted MCU has no epoch until it is given one
         self._reissue_at = None
-        if self.relay is not None:              # the MCU's RelayGate is RAM only (PB-2.5)
+        self._orphan_seq = None                 # the MCU's RelayGate is RAM only (PB-2.5)
+        if self.relay is not None:
             self._relay_end("abandoned", logging.WARNING, "the MCU rebooted (its relay authorisation is gone)")
         self._issue_epoch("MCU boot")           # rule 1: always a NEW value, also over a pending one
         self._load_sn("MCU boot")
 
     def _do_sn(self, sn: object, t: float, now: float) -> None:
         if not isinstance(sn, int):   # posted only by the handlers above
+            return
+        # Never lower the stored counter: an MCU that booted without a restore (the 120 s hold
+        # expired, or the file was unreadable) restarts its window low, and persisting those
+        # values would reopen the replay window on the next boot. The SN is a u32 carried as
+        # int32, so the comparison is unsigned.
+        try:
+            stored = read_int_file(self.data / SN_FILE)
+        except CounterFileError:
+            stored = None
+        if stored is not None and (stored & 0xFFFFFFFF) > (sn & 0xFFFFFFFF):
+            self.stats["sn_not_lowered"] += 1
             return
         try:
             atomic_write_int(self.data / SN_FILE, sn)   # stored as received (int32), never interpreted
@@ -769,6 +823,7 @@ class Egse:
             log.error("CFDPPUT source %d seq %#010x refused: %s", source, seq, e)
             return
         self.relay = tx
+        self._orphan_seq = None
         self._relay_attempt, self._relay_next = 0, now
         self._relay_progress_t, self._relay_unanswered = now, False
         self.stats["relay_started"] += 1
@@ -802,7 +857,8 @@ class Egse:
 
     def _issue_epoch(self, reason: str) -> None:
         """Rules 1, 2, 5: boot_count + 1, persisted BEFORE it is offered, so a value can
-        reach the MCU at most once per key (GCM IV = 'TM' | epoch | 0 | sn)."""
+        reach the MCU at most once per key (GCM IV = 'TM' | epoch | 0 | sn): a restarted
+        EGSE starts above every value any earlier process put into a call."""
         if self.epoch_stopped or self.boot_count is None:
             self._log_limited("epoch_blocked", logging.ERROR, "epoch not issued (%s): %s", reason,
                               self.epoch_stopped or "boot counter unreadable")
@@ -819,12 +875,15 @@ class Egse:
         except OSError as e:
             self.stats["write_errors"] += 1
             self._issue_retry_at = self._mono() + backoff_s(4)
+            # epoch_pending is left as it is: it only ever holds a value that was never put
+            # into a call (_duty_partition clears it before calling), so even after an MCU
+            # boot it is new to every boot and safe to offer.
             log.error("cannot persist boot counter %d (%s): epoch NOT issued, retrying", n, e)
             return
         self._issue_retry_at = None
         self.boot_count = n
         self.epoch_pending = n
-        self._epoch_attempt, self._epoch_next = 0, self._mono()
+        self.epoch_unanswered, self._epoch_alive = None, False   # superseded: never offered again
         self.stats["epochs_issued"] += 1
         log.info("SCLK partition / SDLS TM epoch %d issued (%s)", n, reason)
 
@@ -837,30 +896,41 @@ class Egse:
                     and self._latest_epoch > self.boot_count:
                 self._persist_boot_count(min(self._latest_epoch, EPOCH_MAX), "after a refused epoch")
             self._issue_epoch("after a refused epoch")
+        u = self.epoch_unanswered
+        if u is not None and self.epoch_pending is None and self._epoch_alive and now >= self._epoch_next \
+                and self._issue_retry_at is None and self._reissue_at is None:
+            self._issue_epoch(f"set_partition({u}) got no answer and the MCU's status does not show it")
         value = self.epoch_pending
-        if value is None or now < self._epoch_next:
+        if value is None:
             return
+        if value <= self._offered_max:
+            # Cannot happen (values only grow and a pending one was never offered); kept as
+            # the last line of defence of the invariant the nonce safety rests on.
+            self.epoch_pending = None
+            self.epoch_stopped = "internal error: an epoch would have been offered twice"
+            log.error("epoch %d NOT offered: %d was offered already (internal error)", value, self._offered_max)
+            return
+        # Rule 3: the value leaves `pending` BEFORE the call, so whatever happens below (an
+        # answer, a timeout, an unexpected exception) it is never put into a second call. An
+        # unanswered call may still have been applied - its answer lost, or the request served
+        # late by a LATER boot whose sc_boot is still on its way - and one value reaching two
+        # boots restarts sn under the same (key, epoch): GCM nonce reuse.
+        self.epoch_pending = None
+        self._offered_max = value
+        self.epoch_unanswered, self._epoch_alive = value, False
         try:
             r = self.bridge.call("set_partition", value, timeout=CALL_TIMEOUT_S)
         except self.call_errors as e:
-            # Rule 3: no answer -> the SAME value later (already persisted, never used for
-            # anything else; the MCU treats an equal epoch as a no-op).
-            self._epoch_attempt += 1
-            self._epoch_next = self._mono() + backoff_s(self._epoch_attempt)
-            self._log_limited("set_partition", logging.WARNING, "set_partition(%d) got no answer "
-                              "(%s: %s); retrying the same value", value, type(e).__name__, e)
+            self._epoch_unanswered_call(value, f"got no answer ({type(e).__name__}: {e})")
             return
         # The flight handler returns a C++ bool, which the MCU's MsgPack packer encodes as a
         # msgpack bool (Packer::packBool, 0xC2 / 0xC3): it arrives here as True / False.
         if r is True:
-            self.epoch_pending = None
-            self.epoch_accepted = value
-            self._epoch_ok_t = self._mono()
-            self._refusals = 0
-            log.info("MCU accepted SCLK partition / SDLS TM epoch %d", value)
+            self._epoch_taken(value, "accepted")
         elif r is False:
             # Rule 3a: an explicit refusal is never retried with the same value.
-            self.epoch_pending = None
+            self.epoch_unanswered = None
+            self._epoch_attempt = 0
             self._refusals += 1
             self.stats["epoch_refusals"] += 1
             log.error("MCU refused epoch %d (current %s): boot counter regressed", value,
@@ -871,10 +941,26 @@ class Egse:
             else:
                 self._reissue_at = self._mono() + REFUSAL_WAIT_S
         else:
-            self._epoch_attempt += 1
-            self._epoch_next = self._mono() + backoff_s(self._epoch_attempt)
-            self._log_limited("set_partition_answer", logging.ERROR, "set_partition(%d) answered %r "
-                              "(a bool expected); retrying the same value", value, r)
+            self._epoch_unanswered_call(value, f"answered {r!r} (a bool expected)")
+
+    def _epoch_taken(self, value: int, how: str) -> None:
+        self.epoch_unanswered, self._epoch_alive = None, False
+        self.epoch_accepted = value
+        self._epoch_ok_t = self._mono()
+        self._epoch_attempt = 0
+        self._refusals = 0
+        log.info("SCLK partition / SDLS TM epoch %d %s", value, how)
+
+    def _epoch_unanswered_call(self, value: int, what: str) -> None:
+        """Rule 3: no definite answer. The value is retired; a NEW one follows once a status
+        shows the MCU does not hold it, after a back-off (1 s doubling to EPOCH_RETRY_MAX_S)
+        that bounds the epochs a persistent fault can use to one per minute (65534 values
+        last > 45 days of it). With no status at all (router down) nothing is used up: the
+        MCU cannot be reached either."""
+        self._epoch_attempt += 1
+        self._epoch_next = self._mono() + min(2.0 ** min(self._epoch_attempt - 1, 6), EPOCH_RETRY_MAX_S)
+        self._log_limited("set_partition", logging.WARNING, "set_partition(%d) %s: the value is never "
+                          "offered again; a new one follows when a status shows the MCU lacks it", value, what)
 
     # ------------------------------------------------------------------ SDLS TC SN restore
     def _load_sn(self, reason: str) -> None:
@@ -885,8 +971,11 @@ class Egse:
                       "authoritative", e, reason)
             return
         if sn is None:
-            log.info("no %s yet: nothing to restore (%s)", SN_FILE, reason)
-            return
+            # Fresh install: no TC was ever accepted under this data folder. Restoring 0 (the
+            # MCU's power-on value) ends the flight's restore hold at once instead of refusing
+            # authentic TCs for its 120 s timeout.
+            log.info("no %s yet: restoring 0 (%s)", SN_FILE, reason)
+            sn = 0
         if not INT32_MIN <= sn <= INT32_MAX:
             log.error("%s holds %d, outside int32: not restored", SN_FILE, sn)
             return
@@ -931,12 +1020,40 @@ class Egse:
                         f"EOF condition {cond} queued{note}, {tx.sent} of {tx.size} octets, "
                         f"checksum {tx.checksum:08x}")
 
+    def _close_orphan_relay(self, now: float) -> None:
+        """EOF(cancel) for an orphaned relay (see _watch_orphan), offered until the MCU
+        answers 1 (gate -> NONE; the ground records CANCELLED) or -1 (not held after all)."""
+        seq = self._orphan_seq
+        if seq is None or seq == self._orphan_closed or now < self._orphan_next \
+                or self._orphan_last - self._orphan_first < RELAY_ORPHAN_S:
+            return
+        pdu = cfdp_tx.build_eof(seq, cfdp_tx.COND_CANCEL, 0, 0)   # nothing known of what was sent
+        try:
+            r = self.bridge.call("cfdp_pdu", pdu.hex(), timeout=CALL_TIMEOUT_S)
+        except self.call_errors:
+            r = 0                                  # no answer: offered again like a busy one
+        answer = r if isinstance(r, int) and not isinstance(r, bool) else None
+        if answer == 0:
+            self._orphan_next = self._mono() + cfdp_tx.retry_delay_s(self._orphan_attempt)
+            self._orphan_attempt += 1
+            return
+        self._orphan_closed, self._orphan_seq = seq, None
+        if answer == 1:
+            self.stats["relay_orphans_closed"] += 1
+            log.warning("CFDP relay seq %#010x was still held by the MCU with no EGSE transfer running "
+                        "(EGSE restarted during it?): closed with EOF(cancel), CFDPPUT is free again", seq)
+        else:
+            log.info("CFDP relay seq %#010x: EOF(cancel) for an orphaned relay answered %r: not held", seq, r)
+
     def _duty_cfdp(self, now: float) -> None:
         """One offer of the current relay PDU per pass (PB-6.3): 1 queued -> next PDU,
-        0 busy -> same PDU after cfdp_tx.retry_delay_s(), -1 refused -> abandoned, no answer
-        -> same PDU after the back-off."""
+        0 busy -> same PDU after cfdp_tx.retry_delay_s(), -1 refused -> one EOF(cancel)
+        offer, then abandoned; no answer -> same PDU after the back-off."""
         tx = self.relay
-        if tx is None or now < self._relay_next:
+        if tx is None:
+            self._close_orphan_relay(now)
+            return
+        if now < self._relay_next:
             return
         pdu = tx.current()
         if pdu is None:                            # cannot stay here: advance() past the EOF ends it
@@ -976,6 +1093,17 @@ class Egse:
             tx.advance()
             self._relay_finished(tx, " (refused on a re-offer after an unanswered one: most probably "
                                      "queued by the first)")
+            return
+        if answer == -1 and not eof:
+            # A CFDPCANCEL executed in an MCU loop pass just before this call was served: the
+            # RelayGate is CANCELLING and admits only the EOF (PB-2.5), while the cfdp_cancel
+            # notification is still on its way. Turn the transfer into EOF(cancel) and offer
+            # that once: admitted -> the ground records CANCELLED; refused too -> the gate does
+            # not hold this transaction at all, abandoned below on that second -1.
+            tx.cancel()
+            self._relay_attempt, self._relay_next, self._relay_unanswered = 0, now, False
+            log.warning("CFDP relay seq %#010x: the MCU refused a PDU (answer -1, cancelled on board?): "
+                        "offering EOF(cancel) once", tx.seq)
             return
         self._relay_end("abandoned", logging.ERROR,
                         f"the MCU refused a PDU (answer {r!r}): not the authorised transaction, or "
@@ -1051,6 +1179,7 @@ class Egse:
             "age_x": "-" if self._t_x is None else f"{now - self._t_x:.0f}",
             "epoch": (f"{self.epoch_accepted if self.epoch_accepted is not None else '-'}"
                       f"{' pending ' + str(self.epoch_pending) if self.epoch_pending is not None else ''}"
+                      f"{' unanswered ' + str(self.epoch_unanswered) if self.epoch_unanswered is not None else ''}"
                       f"{' STOPPED: ' + self.epoch_stopped if self.epoch_stopped else ''}"),
             "cadus": self.stats["cadus"],
             "vc_counts": "{" + ", ".join(f"{k}: {v}" for k, v in sorted(self.vc_counts.items())) + "}",

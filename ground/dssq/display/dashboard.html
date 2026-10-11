@@ -271,7 +271,7 @@ input[type=number]{width:90px}
 <section data-tab="SCIENCE" class="hidden">
   <div class="grid">
     <div class="panel wide"><h3>Magnetometers <small>RM3100 outboard / inboard (boom) and BMM150 body; dual-sensor separation of the spacecraft field assumes a 1/r&#179; dipole (est.)</small></h3><div class="tw"><table id="si-mag"></table></div></div>
-    <div class="panel"><h3>Attitude <small>BHI260 fusion vs TRIAD; Euler ZYX (yaw, pitch, roll)</small></h3><div class="tw"><table id="si-att"></table></div></div>
+    <div class="panel"><h3>Attitude <small>BHI260 fusion vs TRIAD, both converted to body&#8594;NED; Euler ZYX (yaw, pitch, roll)</small></h3><div class="tw"><table id="si-att"></table></div></div>
     <div class="panel"><h3>Environment <small>Nicla Sense ME: BMP390 pressure, BME688 T / RH / gas, BSEC</small></h3><div class="tw"><table id="si-env"></table></div></div>
   </div>
 </section>
@@ -1064,8 +1064,10 @@ function renderHeader() {
   const w1 = stat("1m", "rssi");
   setText("h-rssi", w1.n ? fx(w1.mean, 4) + " ± " + fx(w1.sem, 4) + " dBm" : NA);
   const pk = rf.packet || {};
-  setText("h-snr", num(pk.snr_db) ? fx(pk.snr_db, 2) + " dB" : fu(rf.snr_est_db, 2, "dB est."));
-  setText("h-margin", fu(rf.margin_est_db, 2, "dB"));
+  // After LOS the last packet's SNR / margin are history, not the link: shown as "—" (the
+  // RECEIVER page keeps the last values with their time).
+  setText("h-snr", st.los ? NA : num(pk.snr_db) ? fx(pk.snr_db, 2) + " dB" : fu(rf.snr_est_db, 2, "dB est."));
+  setText("h-margin", st.los ? NA : fu(rf.margin_est_db, 2, "dB"));
   setText("h-fer", fsci(fr.fer));
   setText("h-frames", fint(fr.ok) + " / lost " + fint(fr.lost));
   const t = S.time || {};
@@ -1136,7 +1138,8 @@ function renderOverview() {
     tile("Signal", st.los ? "LOS" : "AOS", st.los ? "since frame " + dur(st.since_last_frame_s) : "pass " + dur(st.pass_duration_s), st.los ? "bad" : "ok"),
     tile("RSSI 1-min mean", w1.n ? fx(w1.mean, 4) : NA, w1.n ? "± " + fx(w1.sem, 4) + " dBm (n=" + w1.n + ")" : "dBm", "", "last " + fu(rf.rssi_dbm, 4, "dBm") + " (resolution " + fu(rf.rssi_resolution_db, 1, "dB") + ")"),
     tile("SNR est. 1-min", sn.n ? fx(sn.mean, 4) : NA, "dB ± " + fx(sn.sem, 4) + (num((rf.packet || {}).snr_db) ? " · meas " + fx(rf.packet.snr_db, 2) : "")),
-    tile("Margin est.", fx(m, 2), "dB vs " + fu(rf.sensitivity_dbm, 1, "dBm") + " (" + (rf.sensitivity_source || NA) + ")", num(m) ? (m < 3 ? "bad" : m < 6 ? "warn" : "ok") : ""),
+    st.los ? tile("Margin est.", NA, num(m) ? "LOS · last " + fx(m, 2) + " dB, " + dur(st.since_last_frame_s) + " ago" : "LOS", "")
+      : tile("Margin est.", fx(m, 2), "dB vs " + fu(rf.sensitivity_dbm, 1, "dBm") + " (" + (rf.sensitivity_source || NA) + ")", num(m) ? (m < 3 ? "bad" : m < 6 ? "warn" : "ok") : ""),
     tile("Frames", fint(fr.ok), "lost " + fint(fr.lost) + " · FER " + fsci(fr.fer)),
     tile("Throughput", fx(fr.info_rate_bps, 1), "bit/s info · " + fx(fr.frames_per_min, 2) + " frames/min"),
     tile("RS decoder", fint(dec.symbols_corrected), "sym corrected · uncorrectable " + fint(dec.uncorrectable), dec.uncorrectable ? "warn" : ""),
@@ -1162,7 +1165,8 @@ function renderOverview() {
     ["Last HK / RF / MAG / SPEC", [age("HK"), age("RF"), age("MAG"), age("SPEC")].join(" · ")],
     ["Sequence / MAGCAL", (d.seq_state || NA) + " / OB " + fyn((d.magcal || {}).ob_active) + " IB " + fyn((d.magcal || {}).ib_active)],
   ]);
-  logLines("ov-alarms", S.alarm_reasons || [], r => h("div", {cls: /RED|LOS|URGENT|ALARM|regress|unavailable|down/.test(r) ? "bad" : "warn", text: r}));
+  const nRed = num(S.alarm_red_count) ? S.alarm_red_count : 0;    // reasons [0, nRed) are RED (PB-5.5)
+  logLines("ov-alarms", (S.alarm_reasons || []).map((r, i) => [r, i < nRed]), ([r, red]) => h("div", {cls: red ? "bad" : "warn", text: r}));
   logLines("ov-events", (S.events || []).slice(-16).reverse(), e => h("div", {cls: lvlCls(e.level), text: tod(e.t) + " " + e.source + " " + e.text}));
   table("ov-cmds", ["#", "command", "state", "radiate→done"], ((S.cop || {}).recent || []).slice(-8).reverse().map(r =>
     ["#" + r.id, V(r.text, "l wrap"), cmdState(r.state), fu(r.rtlt_s, 1, "s")]));
@@ -1320,7 +1324,7 @@ function renderReceiver() {
     ["Longest expected frame period est.", fu(R.frame_period_max_s_est, 3, "s")],
     {section: "station"},
     ["Backend", N([R.backend_available ? "available" : "UNAVAILABLE", R.backend_error ? badge(R.backend_error, "bad") : null])],
-    ["Radio Control Unit", R.rcu ? "active" : "off"],
+    ["Radio Control Unit", R.packet_mode ? "n/a (SX126x: no M0/M1/AUX)" : R.rcu ? "active" : "off"],
     ["Configured (station.toml)", R.configured ? "CH" + R.configured.channel + " code " + R.configured.air_rate + " pwr " + R.configured.power + " LBT " + fyn(R.configured.lbt) : NA],
     ["Allowed channels", (R.allowed_channels || []).join(" ")],
     ["Coordinated change", R.link_change ? R.link_change.kind + " → " + R.link_change.value + ": " + R.link_change.state : "none"],
@@ -1368,7 +1372,8 @@ function renderReceiver() {
     ["Foreign / bad header", fint(dec.foreign_or_bad_header)], ["RS rescued (CRC-failed packets) / failed", fint(dec.rs_rescued) + " / " + fint(dec.rs_rescue_failed)],
     ["Rice errors", V(fint(dec.rice_errors), dec.rice_errors ? "warn" : "")], ["Decom errors", fint(dec.decom_errors)],
     ["SDLS rejected", Object.entries(rej).map(([k, v]) => k + " " + v).join(" · ") || NA]]);
-  table("rx-frames", null, [["Frames OK / lost", fint(fr.ok) + " / " + fint(fr.lost)], ["Frame error rate", V(fsci(fr.fer), num(fr.fer) ? (fr.fer > 0.1 ? "bad" : fr.fer > 0.01 ? "warn" : "ok") : "")],
+  table("rx-frames", null, [["Frames OK / lost", fint(fr.ok) + " / " + fint(fr.lost)], ["Frame error rate (since start)", V(fsci(fr.fer), num(fr.fer) ? (fr.fer > 0.1 ? "bad" : fr.fer > 0.01 ? "warn" : "ok") : "")],
+    ["Frame error rate, 10 min (link manager; inter-pass gaps excluded)", V(fsci(fr.fer_10m), num(fr.fer_10m) ? (fr.fer_10m > 0.1 ? "bad" : fr.fer_10m > 0.01 ? "warn" : "ok") : "")],
     ["Idle (OID) frames", fint(fr.oid_frames) + " (" + fpct(fr.idle_frame_pct) + ")"], ["Channel efficiency (packet / data-field octets)", fpct(fr.channel_efficiency_pct)],
     ["Frames per minute", fx(fr.frames_per_min, 2)], ["Information rate (60 s)", fu(fr.info_rate_bps, 2, "bit/s")], ["CADU rate on air (60 s)", fu(fr.cadu_rate_bps, 2, "bit/s")],
     ["Passes / this pass", fint((rx.state || {}).passes) + " / " + dur((rx.state || {}).pass_duration_s)], ["Time in lock", fpct((rx.state || {}).time_in_lock_pct)],
@@ -1382,11 +1387,14 @@ function renderReceiver() {
   const sx = R.sx126x;
   if (sx) {
     const mc = sx.mcu || {};
-    const sr2 = [["Bridge connected", fyn(sx.connected)], ["Status age", fu(sx.mcu_age_s, 1, "s")]];
+    const sr2 = [["Bridge connected", fyn(sx.connected)], ["Status age", fu(sx.mcu_age_s, 1, "s")],
+      // I3: the compiled chip / TCXO of the station sketch against [radio.sx126x] chip / tcxo_v
+      ["Chip / TCXO (sketch)", N([(num(mc.chip_id) ? "SX" + mc.chip_id : NA) + " / " + (num(mc.tcxo_mv) ? (mc.tcxo_mv ? fx(mc.tcxo_mv / 1000, 2) + " V" : "crystal") : NA),
+        sx.hw_mismatch ? badge("MISMATCH: " + sx.hw_mismatch, "bad") : num(mc.chip_id) ? badge("matches station.toml", "ok") : null])]];
     const order = [["state_name", "State"], ["fw", "Firmware"], ["chip", "Chip"], ["channel", "Channel"], ["rate_code", "Rate code"], ["power_code", "Power code"],
       ["rx_ok", "rx_ok"], ["rx_crc_err", "rx_crc"], ["rx_hdr_err", "rx_hdr"], ["tx_ok", "tx_ok"], ["tx_fail", "tx_fail"], ["cad_busy", "cad_busy"],
       ["cad_forced", "cad_forced"], ["faults", "faults"], ["resets", "resets"], ["txq", "TX queue"], ["uptime_s", "MCU uptime (s)"], ["freq_offset_hz", "RF offset in effect (Hz)"]];
-    const seen = new Set();
+    const seen = new Set(["chip_id", "tcxo_mv", "hw_mismatch"]);
     for (const [k, label] of order) if (k in mc) { seen.add(k); sr2.push([label, typeof mc[k] === "number" ? fint(mc[k]) : String(mc[k])]); }
     if ("rx_gain_reg" in mc || "rx_boost_verified" in mc) {
       seen.add("rx_gain_reg"); seen.add("rx_boost_verified");
@@ -1531,10 +1539,12 @@ function renderSpacecraft() {
   const T = S.tlm || {}, cv = (T.CMDVER || {}).values, tc = (T.TIMECORR || {}).values, rs = (T.RFSCAN || {}).values;
   const orows = [];
   if (cv) {
-    const seqTxt = cv.tc_seq === (DICT ? DICT.apids.CMDVER_SEQ_STORED : 254) ? "stored sequence (0xFE)" : cv.tc_seq === (DICT ? DICT.apids.CMDVER_SEQ_BYPASS : 255) ? "bypass (0xFF)" : "N(S) " + cv.tc_seq;
-    orows.push({section: "CMDVER " + iso(T.CMDVER.ert)}, ["Command", opName(cv.opcode) + " (" + hex(cv.opcode) + ")"], ["Carried by", seqTxt],
-      ["Stage / error", V(((S.cmd_stages || {})[cv.stage] || enumName("CMD_STAGES", cv.stage)) + " / " + ((S.cmd_errors || {})[cv.error_code] || enumName("CMD_ERRORS", cv.error_code)),
-        cv.stage === 3 ? "bad" : "ok")], ["Ground tag", fx(cv.ground_tag, 0)]);
+    // I1: the decoder splits the stage octet into stage and cmd_source; tc_seq is the N(S) of an AD frame only.
+    const stg = cv.stage, src = cv.cmd_source;
+    const srcTxt = ((S.cmd_sources || {})[src] || (nil(src) ? NA : "source " + src)) + (src === 0 ? " frame, N(S) " + cv.tc_seq : "");
+    orows.push({section: "CMDVER " + iso(T.CMDVER.ert)}, ["Command", opName(cv.opcode) + " (" + hex(cv.opcode) + ")"], ["Carried by", srcTxt],
+      ["Stage / error", V(((S.cmd_stages || {})[stg] || enumName("CMD_STAGES", stg)) + " / " + ((S.cmd_errors || {})[cv.error_code] || enumName("CMD_ERRORS", cv.error_code)),
+        stg === 3 ? "bad" : "ok")], ["Ground tag", fx(cv.ground_tag, 0)]);
   }
   if (tc) orows.push({section: "TIMECORR " + iso(T.TIMECORR.ert)}, ["Reference count", fx(tc.ref_mcfc, 0)], ["SCLK", tc.sclk_coarse + " s + " + tc.sclk_fine + "/65536"], ["Air-rate code / ref air time", fx(tc.air_rate_code, 0) + " / " + fu(tc.ref_airtime_ms, 0, "ms")]);
   if (rs) orows.push({section: "RFSCAN " + iso(T.RFSCAN.ert)}, ["Channels", "CH" + rs.first_ch + "..CH" + (rs.first_ch + rs.count - 1)], ["Duration", fu(rs.duration_ms, 0, "ms")],
@@ -1563,7 +1573,7 @@ function renderSpectrometer() {
     ["Mode", (sp.mode_name || NA) + (fl.active ? " (active, on-off)" : "")], ["Flags", hex(fl.raw) + " " + ["valid", "agc", "active", "saturated", "attitude"].filter(k => fl[k]).join(" ")],
     ["Gain", (num(ex.gain_x) ? ex.gain_x + "x" : NA) + " (code " + fx(ex.gain_code, 0) + (fl.agc ? ", AGC" : "") + ")"],
     ["Integration", fu(ex.integration_ms, 2, "ms") + " (N = " + fx(ex.int_cycles, 0) + ": (N+1) × 2.78 ms)"], ["Full scale", fint(ex.full_scale, "counts")],
-    ["Frames merged", fx(ex.n_frames, 0)], ["Lamps actually driven", lit.length ? lit.map(l => l + " " + fu(led[l], 1, "mA")).join(", ") : "none (passive)"],
+    ["Frames merged", fx(ex.n_frames, 0)], ["Lamps actually driven", !Array.isArray(fl.lamps) ? NA : lit.length ? lit.map(l => l + " " + fu(led[l], 1, "mA")).join(", ") : "none (passive)"],
     ["Exposure note", ex.note || NA], ["Die temperatures AS72651/2/3", (sp.temperature_c || []).map(v => fu(v, 0, "°C")).join(" / ")],
     ["Boresight zenith / azimuth", fu(bs.zenith_deg, 2, "°") + " / " + fu(bs.azimuth_deg, 2, "°")],
     ["Onboard class / confidence", (ob.class || NA) + " / " + fu(ob.confidence, 0, "%")], ["Onboard spectral change", fu(ob.change_deg, 2, "°")],
@@ -1610,7 +1620,7 @@ function renderSpectrometer() {
   table("sp-col", null, [["Label / method", (co.label || NA) + " · " + (co.method || NA)], ["XYZ", [co.X, co.Y, co.Z].map(v => fsig(v, 5)).join(" / ")],
     ["x, y", fx(co.x, 4) + " ± " + fx(co.x_sigma, 4) + ", " + fx(co.y, 4) + " ± " + fx(co.y_sigma, 4)], ["u, v (CIE 1960)", fx(co.u, 4) + ", " + fx(co.v, 4)],
     ["CCT", V(fu(co.cct_k, 0, "K"), co.cct_valid ? "" : "warn", co.cct_valid ? "" : "outside the CIE validity (|Duv| > 0.05)")], ["Duv", fsign(co.duv, 4, "")],
-    ["McCamy cross-check", fu(co.cct_mccamy_k, 0, "K") + (co.mccamy_in_range ? "" : " (outside 2000-12500 K)") + ", difference " + fpct(co.cct_mccamy_diff_pct)],
+    ["McCamy cross-check", fu(co.cct_mccamy_k, 0, "K") + (num(co.cct_mccamy_k) && co.mccamy_in_range === false ? " (outside 2000-12500 K)" : "") + ", difference " + fpct(co.cct_mccamy_diff_pct)],
     ["Reason", co.reason || NA]]);
   const cl = sp.classification || {}, clob = cl.onboard || {};
   table("sp-cls", ["", "ground (" + (cl.label || "heuristic") + ")", "onboard"], [["Class", cl.class || NA, clob.class || NA], ["Confidence", fu(cl.confidence, 0, "%"), fu(clob.confidence, 0, "%")],
@@ -1746,6 +1756,28 @@ function q2e(w, x, y, z) {
   const roll = Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
   return [yaw, pitch, roll].map(r => r * 180 / Math.PI);
 }
+// Hamilton product, scalar first.
+function qmul(a, b) {
+  return [a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3], a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+          a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1], a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]];
+}
+// The two ATT quaternions use different conventions (flight spec_attitude): q_fus = BHI260
+// device -> ENU (Android world; device frame taken as the body frame), q_triad = TRIAD
+// NED -> body (attitude.h triad_ned). Both are brought to body -> NED before any Euler angle
+// or comparison: fusion left-multiplied by ENU -> NED (180 deg about (1,1,0)/sqrt2), TRIAD
+// conjugated. The fusion world frame is still a VERIFY item (T-SC-09).
+const Q_ENU_TO_NED = [0, Math.SQRT1_2, Math.SQRT1_2, 0];
+function fusToNed(q) { return qmul(Q_ENU_TO_NED, q); }
+function triadToNed(q) { return [q[0], -q[1], -q[2], -q[3]]; }
+// ATT b6 TRIAD_RM3100 is set for any fresh RM3100, calibrated or not (flight MagCalStore::apply
+// copies the raw vector when no calibration is active): the label comes from HK magcal_state.
+function rmCalLabel() {
+  const mc = ((S.decoded || {}).magcal) || {}, ob = mc.ob_active, ib = mc.ib_active;
+  if (ob === true && ib === true) return "RM3100 (boom, MAGCAL active)";
+  if (ob === false && ib === false) return V("RM3100 (boom, UNCALIBRATED: no MAGCAL loaded)", "warn");
+  if (ob == null || ib == null) return "RM3100 (boom; MAGCAL state unknown, no HK yet)";
+  return "RM3100 (boom; MAGCAL outboard " + (ob ? "on" : "off") + ", inboard " + (ib ? "on" : "off") + ")";
+}
 function renderScience() {
   const T = S.tlm || {}, m = (T.MAG || {}).values, a = (T.ATT || {}).values, e = (T.ENV || {}).values;
   const cfg = (SCI && SCI.cfg) || {};
@@ -1767,13 +1799,14 @@ function renderScience() {
   if (a) {
     const fus = ["w", "x", "y", "z"].map(k => a["q_fus_" + k]), tri = ["w", "x", "y", "z"].map(k => a["q_triad_" + k]);
     const fb = bits("ATT_FLAG_BITS", a.flags);
-    const e1 = fus.every(num) ? q2e(...fus) : null, e2 = tri.every(num) ? q2e(...tri) : null;
+    const fusN = fus.every(num) ? fusToNed(fus) : null, triN = tri.every(num) ? triadToNed(tri) : null;
+    const e1 = fusN ? q2e(...fusN) : null, e2 = triN ? q2e(...triN) : null;
     let diff = NA;
-    if (e1 && e2) { const nf = Math.hypot(...fus) || 1, nt = Math.hypot(...tri) || 1; const dot = Math.abs(fus.reduce((s, v, i) => s + v * tri[i], 0) / (nf * nt)); diff = fu(2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI, 3, "°"); }
-    table("si-att", ["", "BHI260 fusion", "TRIAD"], [["Quaternion w x y z", fus.map(v => fx(v, 4)).join(" "), tri.map(v => fx(v, 4)).join(" ")],
-      ["Yaw / pitch / roll (ZYX)", e1 ? e1.map(v => fx(v, 2)).join(" / ") + " °" : NA, e2 ? e2.map(v => fx(v, 2)).join(" / ") + " °" : NA],
+    if (fusN && triN) { const nf = Math.hypot(...fusN) || 1, nt = Math.hypot(...triN) || 1; const dot = Math.abs(fusN.reduce((s, v, i) => s + v * triN[i], 0) / (nf * nt)); diff = fu(2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI, 3, "°"); }
+    table("si-att", ["", "BHI260 fusion", "TRIAD"], [["Quaternion w x y z (as sent)", fus.map(v => fx(v, 4)).join(" ") + " (device→ENU)", tri.map(v => fx(v, 4)).join(" ") + " (NED→body)"],
+      ["Yaw / pitch / roll (body→NED, ZYX)", e1 ? e1.map(v => fx(v, 2)).join(" / ") + " °" : NA, e2 ? e2.map(v => fx(v, 2)).join(" / ") + " °" : NA],
       ["Valid", fyn(fb.includes("QUAT")), fyn(fb.includes("TRIAD"))], ["Fusion accuracy estimate", fu(a.q_fus_acc, 3, "rad") + (num(a.q_fus_acc) ? " (" + fx(a.q_fus_acc * 180 / Math.PI, 2) + "°)" : ""), NA],
-      ["Fusion vs TRIAD angle", diff, ""], ["TRIAD magnetometer", NA, fb.includes("TRIAD_RM3100") ? "RM3100 (calibrated, boom)" : "BMM150 (body)"],
+      ["Fusion vs TRIAD angle (both body→NED)", diff, ""], ["TRIAD magnetometer", NA, fb.includes("TRIAD_RM3100") ? rmCalLabel() : "BMM150 (body)"],
       ["BMM150 scale", fb.includes("MAG_SCALE") ? "read from the BHI260" : "firmware fallback 1/16 µT/LSB", ""],
       ["Acceleration (g)", [a.acc_x, a.acc_y, a.acc_z].map(v => fx(v, 3)).join(" ") + (num(a.acc_x) ? "  |a| " + fx(Math.hypot(a.acc_x, a.acc_y, a.acc_z), 3) : ""), ""],
       ["Rate (°/s)", [a.gyro_x, a.gyro_y, a.gyro_z].map(v => fx(v, 1)).join(" "), ""],
@@ -1795,7 +1828,7 @@ function renderScience() {
 function renderMagcal() {
   const mc = S.magcal || {};
   setText("mc-note", "Site total field [science] field_ut: " + (num(mc.field_ut) ? fx(mc.field_ut, 3) + " µT" : "NOT SET (the fit refuses without it)") +
-          ". Collect while the spacecraft rotates through all directions (26 direction bins); samples come from real-time VC1 MAG packets only.");
+          ". Collect while the spacecraft rotates through all directions (26 direction bins); samples come from real-time VC1 MAG packets with nsamples = 1 only (command PKTRATE MAG 1 first: an averaged vector of a rotating spacecraft biases the fit).");
   const units = mc.units || {};
   if (!$("mc-tab-0")) {                // cards built once; only their tables change
     fill("mc-units", ["0", "1"].map(u => h("div", {cls: "panel"}, h("h3", {text: "Unit " + u + " — " + (u === "0" ? "outboard RM3100" : "inboard RM3100")}),
@@ -1807,6 +1840,7 @@ function renderMagcal() {
   for (const u of ["0", "1"]) {
     const d = units[u] || {}, cv = d.coverage || {}, fit = d.fit;
     const rows = [["Collecting", V(fyn(d.collecting), d.collecting ? "ok" : "")], ["Samples / rejected / duplicates", fint(cv.n) + " / " + fint(cv.rejected) + " / " + fint(cv.duplicates)],
+      ["Averaged MAG packets skipped", V(fint(d.averaged_skipped), d.averaged_skipped ? "warn" : "")],
       ["Coverage", N([bar(num(cv.coverage) ? cv.coverage * 100 : 0), " " + fint(cv.bins_hit) + " / " + fint(cv.bins) + " bins (" + ffrac(cv.coverage) + ")"])],
       ["Centre (µT)", Array.isArray(cv.centre_ut) ? cv.centre_ut.map(v => fx(v, 3)).join(", ") : NA]];
     if (fit) {

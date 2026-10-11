@@ -64,6 +64,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ccsds/cfdp.h"
@@ -81,6 +82,7 @@
 #include "fsw/autonomy.h"
 #include "fsw/commands.h"
 #include "fsw/datalink.h"
+#include "fsw/rpc_mailbox.h"
 #include "fsw/spectral.h"
 #include "fsw/ssr.h"
 #include "fsw/tlm_packets.h"
@@ -544,9 +546,9 @@ std::vector<std::string> build_stream(const std::string& out, const char* file, 
   const RfPacket rf = rf_known((uint8_t)fr);
   n = pack_rf(rf, ud);
   e->emit(APID_RF, ud, n, VC_RT_ENG, "RF", rf_expect(rf));
-  const CmdVerPacket cv{kCmdVerSeqStored, OP_SPECMODE, STAGE_EXECUTED, CE_OK, 0};
+  const CmdVerPacket cv{0, OP_SPECMODE, STAGE_EXECUTED, CE_OK, 0, CMD_SRC_STORED};
   n = pack_cmdver(cv, ud);
-  e->emit(APID_CMDVER, ud, n, VC_RT_ENG, "CMDVER", "tc_seq=254,opcode=26,stage=2,error_code=0,ground_tag=0",
+  e->emit(APID_CMDVER, ud, n, VC_RT_ENG, "CMDVER", "tc_seq=0,opcode=26,stage=2,cmd_source=2,error_code=0,ground_tag=0",
           true, true);
   const TimeCorrPacket tcp{17, 4000, 1234, 1, 950};
   n = pack_timecorr(tcp, ud);
@@ -865,8 +867,19 @@ HOST_TEST(packet_layouts_v3) {
         "ENV: 24 octets at PB-1.11 offsets");
   CHECK(pack_mag(mag_known(0x3F), b) == kMagLen && pack_att(att_known(0x7F), b) == kAttLen &&
             pack_timecorr(TimeCorrPacket{1, 2, 3, 4, 5}, b) == kTimeCorrLen &&
-            pack_cmdver(CmdVerPacket{kCmdVerSeqStored, 1, 2, 0, 9}, b) == kCmdVerLen && b[0] == 0xFE,
-        "MAG 46, ATT 37, TIMECORR 10, CMDVER 8 (stored-sequence tc_seq 0xFE)");
+            pack_cmdver(CmdVerPacket{0, 1, STAGE_EXECUTED, 0, 9, CMD_SRC_STORED}, b) == kCmdVerLen && b[0] == 0 &&
+            b[2] == 0x82,
+        "MAG 46, ATT 37, TIMECORR 10, CMDVER 8 (stored sequence: stage octet 0x82 = source 2 | EXECUTED)");
+  // I1 / C02: the command source is carried in the stage octet (bits 7..6), so every N(S)
+  // stays a plain N(S); 254 and 255 were once the stored / bypass sentinels.
+  bool cmdver_ok = true;
+  for (unsigned ns = 0; ns < 256; ++ns) {
+    pack_cmdver(CmdVerPacket{(uint8_t)ns, 1, STAGE_EXECUTED, 0, 0, CMD_SRC_AD}, b);
+    cmdver_ok = cmdver_ok && b[0] == ns && b[2] == STAGE_EXECUTED;
+  }
+  pack_cmdver(CmdVerPacket{0, 1, STAGE_FAILED, CE_BUSY, 0, CMD_SRC_BD}, b);
+  CHECK(cmdver_ok && b[0] == 0 && b[2] == 0x43 && b[3] == CE_BUSY,
+        "CMDVER: AD N(S) 0..255 all source 0 (no sentinel); BD FAILED = stage octet 0x43");
   const int8_t nz[kRfscanMaxChannels + 1] = {0};
   CHECK(pack_rfscan(0, 0, 1, nz, b) == 0 && pack_rfscan(0, kRfscanMaxChannels + 1, 1, nz, b) == 0 &&
             pack_rfscan(0, 3, 1, nullptr, b) == 0 && pack_rfscan(0, kRfscanMaxChannels, 1, nz, b) == 88,
@@ -917,10 +930,19 @@ HOST_TEST(tlm_vectors) {
   env_na.co2eq_ppm = kNaU32; env_na.bvoc_cppm = kNaU16; env_na.gas_ohm = kNaU32; env_na.accuracy = 0;
   line("ENV", APID_ENV, pack_env(env_na, pl),
        "flags=4,p=None,t=22.34,rh=None,iaq=None,iaq_s=None,co2eq=None,bvoc=None,gas=None,accuracy=0");
-  const CmdVerPacket cv{kCmdVerSeqStored, OP_PING, STAGE_EXECUTED, CE_OK, 0xDEADBEEF};
-  line("CMDVER", APID_CMDVER, pack_cmdver(cv, pl), "tc_seq=254,opcode=9,stage=2,error_code=0,ground_tag=3735928559");
-  const CmdVerPacket cv2{0x12, OP_CFDPPUT, STAGE_FAILED, CE_BUSY, 0};
-  line("CMDVER", APID_CMDVER, pack_cmdver(cv2, pl), "tc_seq=18,opcode=23,stage=3,error_code=7,ground_tag=0");
+  // CMDVER (I1): stage and cmd_source decoded as separate fields; N(S) 254 / 255 from AD
+  // frames must decode as source 0 (AD), not as the retired stored / bypass sentinels.
+  const CmdVerPacket cv{0, OP_PING, STAGE_EXECUTED, CE_OK, 0xDEADBEEF, CMD_SRC_STORED};
+  line("CMDVER", APID_CMDVER, pack_cmdver(cv, pl),
+       "tc_seq=0,opcode=9,stage=2,cmd_source=2,error_code=0,ground_tag=3735928559");
+  const CmdVerPacket cv2{0x12, OP_CFDPPUT, STAGE_FAILED, CE_BUSY, 0, CMD_SRC_AD};
+  line("CMDVER", APID_CMDVER, pack_cmdver(cv2, pl), "tc_seq=18,opcode=23,stage=3,cmd_source=0,error_code=7,ground_tag=0");
+  const CmdVerPacket cv3{254, OP_NOOP, STAGE_EXECUTED, CE_OK, 0, CMD_SRC_AD};
+  line("CMDVER", APID_CMDVER, pack_cmdver(cv3, pl), "tc_seq=254,opcode=1,stage=2,cmd_source=0,error_code=0,ground_tag=0");
+  const CmdVerPacket cv4{255, OP_NOOP, STAGE_EXECUTED, CE_OK, 0, CMD_SRC_AD};
+  line("CMDVER", APID_CMDVER, pack_cmdver(cv4, pl), "tc_seq=255,opcode=1,stage=2,cmd_source=0,error_code=0,ground_tag=0");
+  const CmdVerPacket cv5{0, OP_TXINHIBIT, STAGE_FAILED, CE_BAD_ARGUMENT, 0, CMD_SRC_BD};
+  line("CMDVER", APID_CMDVER, pack_cmdver(cv5, pl), "tc_seq=0,opcode=16,stage=3,cmd_source=1,error_code=3,ground_tag=0");
   const int8_t noise[5] = {-118, -121, -97, -128, -120};
   line("RFSCAN", APID_RFSCAN, pack_rfscan(20, 5, 812, noise, pl),
        "first_ch=20,count=5,duration_ms=812,noise=-118;-121;-97;None;-120");
@@ -1319,6 +1341,44 @@ HOST_TEST(downlink_scheduler) {
   dl->next_cadu(clcw, cadu, fi);
   CHECK(waited && null_sa && !fi.oid && fi.vcid == 1 && fi.security == DL_SEC_AE && tm.frames_protected() == 1,
         "Downlink SDLS: OID while WAIT_EPOCH (no data popped), null SA after the timeout, AE once an epoch arrives");
+
+  // Hibernation beacon (C20): stale real-time backlog never delays the beacon HK.
+  const size_t kBeaconHk = kSpPriHdrLen + kSpSecHdrLen + kHkLen;   // 90 octets
+  uint8_t hkp[kSpPriHdrLen + kSpSecHdrLen + kHkLen];
+  build_idle_packet(hkp, sizeof hkp, 0);
+  put_u16(hkp, 0x0810);
+  uint8_t small[85];                                               // the HIBERNATE EVR + CMDVER
+  build_idle_packet(small, sizeof small, 0);
+  put_u16(small, 0x0810);
+  // (a) AE geometry (158): VC1 science backlog > 500 and the HIBERNATE EVR/CMDVER on VC0.
+  dl->init(FRAMING_TM, &tm, "");
+  for (int k = 0; k < 7; ++k) dl->push(1, pkt, sizeof pkt);
+  dl->push(0, small, sizeof small, true);
+  dl->next_cadu(clcw, cadu, fi);                                   // last frame before hibernation: VC0
+  dl->push(0, small, sizeof small, true);
+  const uint8_t nb = dl->prepare_beacon(kBeaconHk, 2);
+  dl->push(0, hkp, sizeof hkp, true);
+  std::string border;
+  for (uint8_t k = 0; k < nb; ++k) {
+    dl->next_cadu(clcw, cadu, fi);
+    border += (char)('0' + fi.vcid);
+  }
+  CHECK(nb == 2 && border == "00" && dl->backlog(0) == 0 && dl->backlog(1) == 0,
+        ("Downlink beacon: VC1 backlog dropped, EVR + CMDVER + HK (175 octets, AE) out in 2 VC0 frames (" + border +
+         ")").c_str());
+  // (b) VC0 holds more than two frames: dropped (it is in the SSR), the HK goes in one frame.
+  dl->init(FRAMING_TM, &tm, "");
+  for (int k = 0; k < 7; ++k) dl->push(0, pkt, sizeof pkt);
+  const uint8_t nb2 = dl->prepare_beacon(kBeaconHk, 2);
+  dl->push(0, hkp, sizeof hkp, true);
+  dl->next_cadu(clcw, cadu, fi);
+  CHECK(nb2 == 1 && fi.vcid == 0 && !fi.oid && dl->backlog(0) == 0,
+        "Downlink beacon: a stale 700-octet VC0 backlog is dropped, the HK is the beacon frame");
+  // (c) clear TM (188): EVR + CMDVER + HK fit one frame.
+  dl->init(FRAMING_TM, nullptr, "");
+  dl->push(0, small, sizeof small, true);
+  CHECK(dl->prepare_beacon(kBeaconHk, 2) == 1 && dl->backlog(0) == sizeof small,
+        "Downlink beacon: what fits with the HK in one frame is kept");
 }
 
 HOST_TEST(tc_accept_chain) {
@@ -1747,4 +1807,108 @@ HOST_TEST(integration_streams) {
   std::fclose(f);
   CHECK(total > 4 * 30,
         ("wrote integration_expect.txt (" + num((long long)total) + " records) and 4 CADU streams").c_str());
+}
+
+// ---- Router Bridge RPC mailbox (C50 / I4): the handler never runs on the caller's thread --
+// A std::thread plays Arduino_RouterBridge's "bridge" thread; this thread is the loop.
+HOST_TEST(rpc_mailbox) {
+  RpcMailbox mb;
+  const uint32_t kWait = 200;                         // the flight uses kRpcWaitMs (6 s)
+  mb.begin(kWait);
+  CHECK(mb.started() && mb.on_loop_thread(), "RPC mailbox: begin() records the loop thread");
+  const auto loop_id = std::this_thread::get_id();
+
+  // 1. Normal request: posted by the bridge thread, executed by the loop, result returned.
+  bool ok = false, other = true;
+  int32_t r = 0;
+  std::thread br([&] {
+    other = !mb.on_loop_thread();
+    ok = mb.call(RPC_HL_CLTU, 0, "0A1B", 4, r);
+  });
+  const RpcRequest* q = nullptr;
+  for (int i = 0; i < 2000 && q == nullptr; ++i) {
+    q = mb.take();
+    if (q == nullptr) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const bool got = q != nullptr && q->op == RPC_HL_CLTU && q->len == 4 && std::memcmp(q->text, "0A1B", 4) == 0;
+  const bool on_loop = std::this_thread::get_id() == loop_id;
+  if (q) mb.complete(7);
+  br.join();
+  CHECK(got && on_loop && other && ok && r == 7,
+        "RPC mailbox: arguments copied, request executed on the loop thread, result 7 returned to the caller");
+
+  // 2. The loop never takes it: withdrawn after the wait and never executed later.
+  ok = true;
+  std::thread br2([&] { ok = mb.call(RPC_SET_PARTITION, 5, nullptr, 0, r); });
+  br2.join();
+  CHECK(!ok && mb.take() == nullptr, "RPC mailbox: unanswered request withdrawn, never executed afterwards");
+
+  // 3. The loop took it but runs longer than one wait: the caller waits for completion.
+  r = 0;
+  std::thread br3([&] { ok = mb.call(RPC_CFDP_PDU, 0, "00", 2, r); });
+  q = nullptr;
+  for (int i = 0; i < 2000 && q == nullptr; ++i) {
+    q = mb.take();
+    if (q == nullptr) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(kWait + 100));
+  if (q) mb.complete(-1);
+  br3.join();
+  CHECK(q != nullptr && ok && r == -1, "RPC mailbox: a request taken by the loop is completed, not withdrawn");
+
+  // 4. Abandoned while running: the slot stays owned until complete(); the next call
+  //    then gets its own (fresh) answer, not the stale one.
+  std::thread br4([&] { ok = mb.call(RPC_SET_SDLS_SN, 1, nullptr, 0, r); });
+  q = nullptr;
+  for (int i = 0; i < 2000 && q == nullptr; ++i) {
+    q = mb.take();
+    if (q == nullptr) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  br4.join();                                         // gives up after two waits
+  const bool abandoned = q != nullptr && !ok;
+  bool ok5 = false;
+  int32_t r5 = 0;
+  std::thread br5([&] { ok5 = mb.call(RPC_SET_SDLS_SN, 2, nullptr, 0, r5); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  mb.complete(111);                                   // the abandoned request ends
+  const RpcRequest* q5 = nullptr;
+  for (int i = 0; i < 2000 && q5 == nullptr; ++i) {
+    q5 = mb.take();
+    if (q5 == nullptr) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const bool second = q5 != nullptr && q5->arg == 2;
+  if (q5) mb.complete(222);
+  br5.join();
+  CHECK(abandoned && second && ok5 && r5 == 222, "RPC mailbox: after an abandoned request the next one gets its own answer");
+
+  // 5. Oversize text is refused at once (no post), as the loop's hex check would.
+  char big[kRpcTextMax + 1];
+  std::memset(big, '0', sizeof big);
+  CHECK(!mb.call(RPC_HL_CLTU, 0, big, sizeof big, r) && mb.take() == nullptr,
+        "RPC mailbox: text over 220 characters refused without a post");
+  RpcMailbox idle;
+  CHECK(!idle.call(RPC_SET_PARTITION, 1, nullptr, 0, r) && idle.take() == nullptr,
+        "RPC mailbox: nothing is posted before begin()");
+}
+
+// ---- C63: packet-length guards with exact-size heap buffers (ASan) ------------------------
+HOST_TEST(packet_length_guards) {
+  // build_idle_packet needs a primary header plus at least one data octet (133.0-B-2).
+  uint8_t* six = new uint8_t[kSpPriHdrLen];
+  const size_t n6 = build_idle_packet(six, kSpPriHdrLen, 0);
+  delete[] six;
+  uint8_t* seven = new uint8_t[kSpPriHdrLen + 1];
+  const size_t n7 = build_idle_packet(seven, kSpPriHdrLen + 1, 0);
+  delete[] seven;
+  CHECK(n6 == 0 && n7 == kSpPriHdrLen + 1, "idle packet: 6 octets refused, 7 built, no over-write");
+  // SSR playback into a buffer one octet shorter than the next packet: nothing copied.
+  Ssr s;
+  uint8_t pkt[50];
+  build_idle_packet(pkt, sizeof pkt, 0);
+  s.record(pkt, sizeof pkt);
+  CHECK(s.start_playback(), "SSR: playback of one 50-octet packet starts");
+  uint8_t* small = new uint8_t[sizeof pkt - 1];
+  const uint16_t got = s.next_playback(small, sizeof pkt - 1);
+  delete[] small;
+  CHECK(got == 0 && !s.playing(), "SSR next_playback: cap below the packet length -> 0, no over-write");
 }

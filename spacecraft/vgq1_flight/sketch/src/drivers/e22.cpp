@@ -152,7 +152,7 @@ bool E22Radio::transmit(const uint8_t* data, size_t n, uint32_t now) {
   if (mode_ != NORMAL && !set_mode(NORMAL)) return false;
   // Non-blocking: the core's UART TX ring (1 KiB) takes a whole <= 240-octet frame.
   if (serial_.write(data, n) == 0) return false;
-  tx_.start(now);
+  tx_.start(now, airtime_ms(n));                    // AUX may rise while the frame is on air (5.6.2)
   tx_launch_ms_ = now;
   return true;
 }

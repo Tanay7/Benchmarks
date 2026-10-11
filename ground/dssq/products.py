@@ -813,7 +813,8 @@ _TM_ENUMS: dict[tuple[str, str], Mapping[int, str]] = {
     ("HK", "sdls_tm_state"): dd.SDLS_TM_STATES, ("HK", "cfdp_state"): dd.CFDP_STATES,
     ("HK", "seq_state"): dd.SEQ_STATES, ("HK", "beacon_level"): dd.BEACON_LEVELS,
     ("RF", "radio_model"): dd.RADIO_MODELS, ("RF", "framing"): dd.FRAMINGS,
-    ("CMDVER", "stage"): dd.CMD_STAGES, ("CMDVER", "error_code"): dd.CMD_ERRORS,
+    ("CMDVER", "stage"): dd.CMD_STAGES, ("CMDVER", "cmd_source"): dd.CMD_SOURCES,
+    ("CMDVER", "error_code"): dd.CMD_ERRORS,
     ("SPEC", "spec_mode"): spectral.MODE_NAMES, ("SPEC", "spec_class"): spectral.CLASS_NAMES}
 
 
@@ -941,6 +942,47 @@ def _tm_param_type(pts: ET.Element, packet: str, fld: Sequence[object], apid: in
     return tname
 
 
+def _tm_bitfield(pts: ET.Element, ps: ET.Element, packet: str, apid: int, fld: Sequence[object],
+                 subs: Sequence[tuple[str, int, int]]) -> list[str]:
+    """A raw field that packs several values (dictionary.BITFIELDS, e.g. the CMDVER stage
+    octet, I1): one parameter per sub-field, most significant first as on the wire, and a
+    reserved parameter for every gap, exactly as dssq.decom splits it. Returns the names."""
+    code = str(fld[1])
+    bits, signed, is_float = _CODES[code]
+    if signed or is_float or fld[2] is not None or fld[5] is not None:
+        raise ValueError(f"{packet}.{fld[0]}: only an unscaled unsigned integer can carry bit fields")
+    out: list[str] = []
+    top = bits
+    for name, lsb, width in [*sorted(subs, key=lambda x: -x[1]), ("", 0, 0)]:
+        if lsb + width < top:                                     # reserved bits above this sub-field
+            rname = _name(f"{fld[0]}_reserved_b{top - 1}_{lsb + width}")
+            t = _el(pts, "IntegerParameterType", name=f"{rname}_Type", signed="false", sizeInBits="8")
+            t.set("shortDescription", f"{packet} {fld[0]} octet bits {top - 1}..{lsb + width}: reserved")
+            _int_encoding(t, top - lsb - width, False)
+            _el(ps, "Parameter", name=rname, parameterTypeRef=f"{rname}_Type")
+            out.append(rname)
+        if not width:
+            break
+        sname = _name(name)
+        enum = _TM_ENUMS.get((packet, name))
+        desc = f"{packet} {fld[0]} octet bits {lsb + width - 1}..{lsb}: {name}"
+        if enum is not None:
+            t = _el(pts, "EnumeratedParameterType", name=f"{sname}_Type")
+            _describe(t, desc)
+            _int_encoding(t, width, False)
+            el = _el(t, "EnumerationList")
+            for value, label in sorted(enum.items()):
+                _el(el, "Enumeration", value=str(value), label=str(label))
+        else:
+            t = _el(pts, "IntegerParameterType", name=f"{sname}_Type", signed="false", sizeInBits="8")
+            _describe(t, desc)
+            _int_encoding(t, width, False)
+        _el(ps, "Parameter", name=sname, parameterTypeRef=f"{sname}_Type")
+        out.append(sname)
+        top = lsb
+    return out
+
+
 def _tm_header(root: ET.Element) -> None:
     """Root TelemetryMetaData: CCSDS 133.0-B-2 primary header + CUC secondary header
     (CCSDS 301.0-B-4, P-field 0x2E implicit: 4 coarse + 2 fine octets) as abstract container."""
@@ -988,6 +1030,10 @@ def _tm_packet_system(root: ET.Element, apid: int, spec: Mapping[str, object]) -
     for fld in fields:
         if not isinstance(fld, tuple) or len(fld) < 6:
             raise ValueError(f"{pname}: field tuple {fld!r} must have >= 6 elements")
+        subs = dd.BITFIELDS.get(apid, {}).get(str(fld[0]))
+        if subs:
+            names += _tm_bitfield(pts, ps, pname, apid, fld, subs)
+            continue
         tname = _tm_param_type(pts, pname, fld, apid)
         names.append(_name(str(fld[0])))
         _el(ps, "Parameter", name=names[-1], parameterTypeRef=tname)

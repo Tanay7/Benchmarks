@@ -138,6 +138,10 @@ TcParseResult tc_parse(const uint8_t* b, size_t len, TcFrame& f, bool open_tfdf)
   if (f.length > len || f.length < kTcPriHdrLen + 2 || f.length > kTcMaxFrameLen) return TC_BAD_LENGTH;
   const uint16_t crc = crc16_ccitt(b, f.length - 2);
   if (crc != get_u16(b + f.length - 2)) return TC_BAD_FECF;
+  // Bypass / Control Command flags: only Type-AD (00), Type-BD (10) and Type-BC (11) are
+  // defined (CCSDS 232.0-B 4.1.2.3); 01 is refused, as the USLP branch refuses PCC on a
+  // sequence-controlled frame.
+  if (!f.bypass && f.control) return TC_BAD_HEADER;
   f.data = b + kTcPriHdrLen;
   f.data_len = (uint16_t)(f.length - kTcPriHdrLen - 2);
   return TC_OK;

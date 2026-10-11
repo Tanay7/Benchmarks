@@ -42,6 +42,7 @@
 #include "autonomy.h"
 #include "commands.h"
 #include "datalink.h"
+#include "rpc_mailbox.h"
 #include "sclk.h"
 #include "spectral.h"
 #include "ssr.h"
@@ -58,20 +59,33 @@ class Flight {
   void setup(const char* bridge_failures);
   void loop();
 
-  // ---- EGSE (Linux side) services, run in the loop thread via provide_safe (PB-4.1) ----
+  // ---- EGSE (Linux side) services: Router Bridge RPC handlers (PB-4.1) ----
+  // sketch.ino's provide_safe() handlers call these. They may run on the library's
+  // "bridge" thread (rpc_mailbox.h: Arduino_RouterBridge 0.4.3 executes provide_safe
+  // handlers there, not only in __loopHook), so they only post into the mailbox and wait
+  // for the loop, which runs the egse_* service below on its own stack; on the loop
+  // thread itself they run it directly. rpc_begin() first, before any registration.
+  void rpc_begin() { rpc_.begin(); }
   // set_partition: SCLK partition = SDLS TM epoch. false if p is not 1..65534 or the
   // epoch is lower than the current one (nonce safety); the same value is a no-op.
-  bool egse_set_partition(int p);
+  bool rpc_set_partition(int p);
   // set_sdls_sn: restores the TC anti-replay counter (int32 two's complement of the u32
-  // SN); it can only rise. Always true.
-  bool egse_set_sdls_sn(int sn);
+  // SN); it can only rise. Always true once executed.
+  bool rpc_set_sdls_sn(int sn);
   // hl_cltu: one CLTU, 2..220 hex characters, through the same acceptance chain as RF.
-  bool egse_hardline_cltu(const String& hex);
+  bool rpc_hardline_cltu(const char* hex, size_t len);
   // cfdp_pdu: one EGSE-built CFDP PDU (20..220 hex characters): 1 queued on VC3, 0 busy
   // (retry), -1 refused (malformed, or not the authorised relay transfer).
-  int egse_cfdp_pdu(const String& hex);
+  int rpc_cfdp_pdu(const char* hex, size_t len);
 
  private:
+  // The services themselves, loop thread only (service_rpc() or a handler run there).
+  bool egse_set_partition(int p);
+  bool egse_set_sdls_sn(int sn);
+  bool egse_hardline_cltu(const char* hex, size_t len);
+  int egse_cfdp_pdu(const char* hex, size_t len);
+  void service_rpc();                                   // one mailbox request, if any
+
   enum TxState : uint8_t { TX_IDLE = 0, TX_WAIT_DONE = 1 };
   enum ScanState : uint8_t { SCAN_IDLE = 0, SCAN_SET, SCAN_SETTLE, SCAN_WAIT_REPLY };
   enum MagPhase : uint8_t { MAG_IDLE = 0, MAG_WAIT = 1, MAG_COLLECT = 2 };
@@ -103,13 +117,16 @@ class Flight {
   void service_scan(uint32_t now);
   void scan_store(int32_t dbm, uint32_t now);
   void enter_hibernate(uint16_t beacon_s);
+  void do_reboot(const char* why);                      // commanded REBOOT: drain, NVIC_SystemReset
   void exit_hibernate(const char* why);
   void process_tc(const uint8_t* in, size_t n, bool hardline, bool crc_ok);
 
   // ---- commanding ----
-  void execute_user(const uint8_t* u, size_t n, uint8_t tc_seq);
-  void cmd_reject(uint8_t tc_seq, uint8_t opcode, CmdError e);
-  void cmd_verify(uint8_t seq, uint8_t opcode, uint8_t stage, uint8_t err, uint32_t tag);
+  // tc_seq: N(S) of the carrying AD frame (0 otherwise); source: CmdSource of the command,
+  // passed by each call site (CMDVER stage bits 7..6, PB-1.6 / I1).
+  void execute_user(const uint8_t* u, size_t n, uint8_t tc_seq, CmdSource source);
+  void cmd_reject(uint8_t tc_seq, CmdSource source, uint8_t opcode, CmdError e);
+  void cmd_verify(uint8_t seq, CmdSource source, uint8_t opcode, uint8_t stage, uint8_t err, uint32_t tag);
   void set_mode(uint8_t m, const char* why);
   void enter_fdir_safe(const char* why);
   uint8_t cmd_cfdp_put(const Command& c);
@@ -145,6 +162,9 @@ class Flight {
   void service_bist(uint32_t now);
   void run_bist_unit(uint8_t unit);
   void bus_recover(uint32_t now, const char* why);
+  void reprobe_instruments(uint32_t now);               // C28: units missing since boot
+  bool apply_mag_cc();                                  // MAGCC between samples (C29)
+  void note_valid_tc(uint32_t now);                     // command-loss timer and HK age
 
   // ---- CFDP (PB-2.5) ----
   void service_cfdp(uint32_t now);
@@ -239,6 +259,10 @@ class Flight {
   uint16_t radio_fault_reports_ = 0;
   bool reboot_pending_ = false;
   uint8_t reboot_after_frames_ = 0;
+  // REBOOT normally resets after 2 more frames (the CMDVER goes out first, PB-2.3); this
+  // deadline bounds the wait when no frame can be sent (dead radio, TX inhibit).
+  uint32_t reboot_deadline_ms_ = 0;
+  uint8_t beacon_frames_left_ = 0;       // hibernation beacon: frames still due (<= 2)
 
   // ---- uplink ----
   uint32_t last_rx_flash_ms_ = 0, last_noise_ms_ = 0;
@@ -247,6 +271,10 @@ class Flight {
   uint16_t cltu_ok_ = 0, cltu_bad_ = 0, tc_ok_ = 0, tc_bad_ = 0;
   uint32_t tc_rescued_ = 0;              // CRC-failed uplink packets accepted (contract 20)
   uint32_t last_valid_tc_ms_ = 0, last_cltu_ms_ = 0;
+  // Latched in tick_1hz / process_tc rather than recomputed from a millis() difference,
+  // which repeats every 2^32 ms (49.7 days without uplink, C23).
+  bool no_bit_lock_ = false;
+  uint32_t tc_age_s_ = 0, tc_age_ref_ms_ = 0;   // HK cmd_loss_timer_s: s since the last valid TC
   uint32_t cmd_loss_s_ = kDefaultCmdLossS;
   uint16_t cmd_acc_ = 0, cmd_rej_ = 0;
   uint8_t last_opcode_ = 0, last_status_ = 0;
@@ -268,7 +296,11 @@ class Flight {
   bool mag_pending_[kMagUnits] = {false, false};
   float rm_ut_[kMagUnits][3] = {{0, 0, 0}, {0, 0, 0}};   // latest raw RM3100 field, sensor axes
   bool rm_fresh_[kMagUnits] = {false, false};            // the latest attempt succeeded
-  float bus_temp_c_ = NAN;               // Nicla Sense ME temperature (spacecraft bus)
+  float bus_temp_c_ = NAN;               // Nicla Sense ME temperature (spacecraft bus); NAN = no fresh reading
+  uint16_t mag_cc_ = 200;                // RM3100 cycle count in force (MAGCC; begin() default)
+  bool mag_cc_pending_ = false;          // MAGCC waits for the end of a sample
+  ReprobeTimer reprobe_;                 // re-acquisition of instruments missing since boot
+  bool bus_clear_failed_ = false;        // the last bus clear left SDA/SCL low
   AruReading aru_last_;
   bool aru_valid_ = false, aru_env_valid_ = false;
   float last_mag_ut_[3] = {0, 0, 0};     // latest BMM150 sample (ATT, TRIAD fallback)
@@ -293,6 +325,7 @@ class Flight {
   uint16_t cfdp_last_pm_ = 0;
 
   // ---- EGSE notifications (PB-0.4) ----
+  RpcMailbox rpc_;                       // Router Bridge thread -> loop (rpc_mailbox.h)
   bool large_sent_ = false;              // one large notification per pass
   uint8_t evr_notes_pass_ = 0, evr_notes_sec_ = 0;
   uint32_t evr_note_window_ = 0;         // millis() / 1000 of the current sc_evr window

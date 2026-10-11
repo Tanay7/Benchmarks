@@ -8,7 +8,10 @@
 //  middle of a read (MCU reset, glitch, a hung AS72651) can hold SDA low for ever;
 //  re-initialising the controller does not help, because only clock pulses make
 //  the target finish its byte. bus_clear() therefore:
-//    1. ends the controller (Wire end()),
+//    1. calls Wire end(); on ArduinoCore-zephyr that only unregisters a target - its
+//       device_deinit() returns -ENOTSUP because the STM32 I2C driver registers no
+//       deinit hook (i2c_stm32.c I2C_DEVICE_DT_INST_DEFINE, kernel/device.c) - so I2C3
+//       stays enabled; pinMode() below takes the pins over as GPIOs regardless,
 //    2. if SDA reads LOW, sends up to kI2cClearMaxPulses SCL pulses with
 //       kI2cClearHalfPeriodUs half periods, stopping as soon as SDA is released,
 //       and checks that SCL really rose after every pulse ("SCL stuck low" ends it),
@@ -16,13 +19,16 @@
 //       followed by a STOP, which returns every target to idle,
 //    4. re-muxes the pins to the I2C controller (Wire begin(), which re-applies
 //       the DEFAULT pinctrl state, ArduinoCore-zephyr Wire.cpp) and sets the clock.
+//       The setClock() is LOAD-BEARING: i2c_configure -> i2c_stm32_runtime_configure ->
+//       LL_I2C_Disable clears PE, the software reset of the I2C block (RM0456 I2C_CR1
+//       PE) - the only controller reset in this sequence.
 //  Open drain is EMULATED, because ArduinoCore-zephyr pinMode() implements only
 //  INPUT, INPUT_PULLUP, INPUT_PULLDOWN and OUTPUT (= GPIO_OUTPUT_LOW) and silently
 //  ignores OUTPUT_OPENDRAIN (wiring_digital.cpp): a line is RELEASED with
 //  pinMode(pin, INPUT) - the bus pull-ups raise it - and DRIVEN LOW with
 //  pinMode(pin, OUTPUT), which configures and drives low at once. digitalWrite(HIGH)
 //  is never used on SDA/SCL, so the MCU never drives a bus line high against a target.
-//  Bound: <= 9 x 2 half periods of ~6 us + START/STOP, about 0.12 ms plus end()/begin().
+//  Bound: <= 9 x 2 half periods of ~6 us + START/STOP, about 0.12 ms plus begin()/setClock().
 // =============================================================================
 #pragma once
 #include <Arduino.h>

@@ -69,12 +69,12 @@ def vectors(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def _integration_file(vectors: Path, name: str) -> Path:
-    """A test_integration.cpp output: skipped while that source is not in the tree (WS1
-    lands it), a failure when the source exists but did not write the file."""
+    """A vector written by host_test (test_integration.cpp and the packet writers). A missing
+    file FAILS: a skip would turn the flight <-> ground bit-exact checks green when a
+    generator is deleted or stops writing (only a missing C++ toolchain skips, in `vectors`)."""
+    assert INTEGRATION_SRC.exists(), f"{INTEGRATION_SRC} missing: the integration vectors cannot be generated"
     path = vectors / name
     if not path.exists():
-        if not INTEGRATION_SRC.exists():
-            pytest.skip("tools/host_test/test_integration.cpp not in the tree yet (WS1)")
         pytest.fail(f"host_test did not write {name}")
     return path
 
@@ -133,9 +133,7 @@ def _same(got: Any, want: str) -> bool:
 
 def test_flight_telemetry_packets_decommutate(vectors: Path) -> None:
     """tlm_vectors.txt holds packets built by the FLIGHT packers with known values."""
-    path = vectors / "tlm_vectors.txt"
-    if not path.exists():
-        pytest.skip("flight packet vectors not generated")
+    path = _integration_file(vectors, "tlm_vectors.txt")
     dec = Decommutator()
     n = 0
     for line in path.read_text().splitlines():
@@ -189,11 +187,16 @@ def test_flight_header_constants_match_dictionary() -> None:
                          ("Mag", "MAG"), ("Att", "ATT"), ("Env", "ENV")):
         apid = next(a for a, s in dd.PACKETS.items() if s["name"] == name)
         assert lens[flight] == dd.packet_len(apid), name
-    consts = _enum(tlm, r"\b(kEvrTextMax|kRfscanMaxChannels|kMaxPayload|kCmdVerSeqBypass|kCmdVerSeqStored)"
+    consts = _enum(tlm, r"\b(kEvrTextMax|kRfscanMaxChannels|kMaxPayload|kCmdVerStageMask|kCmdVerSourceShift)"
                         r"\s*=\s*(0x[0-9A-Fa-f]+|\d+)")
+    stage = {n: (lsb, w) for n, lsb, w in dd.BITFIELDS[dd.APID_CMDVER]["stage"]}
     assert consts == {"kEvrTextMax": dd.EVR_TEXT_MAX, "kRfscanMaxChannels": dd.RFSCAN_MAX_CHANNELS,
-                      "kMaxPayload": dd.CFDP_PDU_MAX, "kCmdVerSeqBypass": dd.CMDVER_SEQ_BYPASS,
-                      "kCmdVerSeqStored": dd.CMDVER_SEQ_STORED}
+                      "kMaxPayload": dd.CFDP_PDU_MAX, "kCmdVerStageMask": (1 << stage["stage"][1]) - 1,
+                      "kCmdVerSourceShift": stage["cmd_source"][0]}
+    assert stage["stage"][0] == 0                                    # I1: stage b1..0, source b7..6
+    src = _enum(tlm, r"\bCMD_SRC_(\w+)\s*=\s*(\d+)")
+    assert src == {"AD": dd.CMD_SOURCE_AD, "BD": dd.CMD_SOURCE_BD, "STORED": dd.CMD_SOURCE_STORED}
+    assert "kCmdVerSeqBypass" not in tlm and "kCmdVerSeqStored" not in tlm  # retired tc_seq sentinels
     fdir = _enum(tlm, r"\bFDIR_(\w+)\s*=\s*1u\s*<<\s*(\d+)")
     assert [n for n, _ in sorted(fdir.items(), key=lambda kv: kv[1])] == dd.FDIR_BITS
     sns = _enum(tlm, r"\bSNS_(\w+)\s*=\s*1u\s*<<\s*(\d+)")
@@ -349,8 +352,8 @@ def test_integration_packets_bit_exact_with_expected_values(integration: dict[st
                 names[name] += 1
                 if p.apid == dd.APID_HK:
                     assert values["beacon_level"] == 2, sid
-                if p.apid == dd.APID_CMDVER:
-                    assert values["tc_seq"] == dd.CMDVER_SEQ_STORED
+                if p.apid == dd.APID_CMDVER:                 # a stored-sequence command (I1)
+                    assert values["cmd_source"] == dd.CMD_SOURCE_STORED and values["tc_seq"] == 0
                 if p.apid == dd.APID_MAG:
                     assert values["flags"] == 0x30
                 if p.apid == dd.APID_ATT:

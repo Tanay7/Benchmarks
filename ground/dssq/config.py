@@ -22,6 +22,7 @@ the App folder is mounted, so every persistent file goes under <App>/data.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import logging
 import math
 import os
@@ -51,8 +52,9 @@ APP_KEY_FILE = "sdls_key.hex"
 
 # Nested tables merged key by key (two-level merge).
 NESTED_TABLES = {("radio", "sx126x"), ("radio", "sensitivity_measured"), ("spectral", "classifier")}
-# Keys that may be absent (no silent default): [science] field_ut.
-OPTIONAL_KEYS = {("science", "field_ut")}
+# Keys that may be absent: [science] field_ut (no silent default); [linkmgr] min_rate
+# (absent = the radio model's minimum rate code: E22 2, SX126x 0 - PB-3.2).
+OPTIONAL_KEYS = {("science", "field_ut"), ("linkmgr", "min_rate")}
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     "station": {"name": "DSS-Q1", "latitude_deg": 0.0, "longitude_deg": 0.0, "altitude_m": 0.0,
@@ -79,9 +81,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "science": {"r_outboard_m": 1.0, "r_inboard_m": 0.5},
     "tdm": {"auto_write": True},
     "linkmgr": {"mode": "ADVISE", "target_margin_db": 6.0, "period_s": 60.0, "holdoff_s": 600.0,
-                "min_rate": 2, "max_rate": 4, "revert_s": 180},
+                "max_rate": 4, "revert_s": 180},
     "interop": {"tm_frames_udp": "", "tm_packets_udp": "", "tc_frames_udp_listen": ""},
     "gds": {"archive_dir": "archive", "http_host": "127.0.0.1", "http_port": 8080, "http_token": "",
+            "http_allowed_hosts": [],
             "los_timeout_s": 90.0, "frontpanel": True, "rcu": True, "router_address": "",
             "console_interval_s": 10.0},
     "commanding": {"t1_s": 45.0, "tx_limit": 3, "window": 5, "verify_timeout_s": 300.0,
@@ -89,6 +92,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 }
 
 _HOSTPORT_RE = re.compile(r"[A-Za-z0-9.\-]{1,253}:\d{1,5}")
+_HOSTNAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?")
 _PLAIN_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 _TOKEN_RE = re.compile(r"[\x21-\x7E]{1,256}")      # printable ASCII, no blank (an HTTP header value)
 
@@ -316,9 +320,9 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     _num(cfg, "linkmgr", "target_margin_db", -50.0, 100.0)
     _num(cfg, "linkmgr", "period_s", 0.0)
     _num(cfg, "linkmgr", "holdoff_s", 0.0)
-    lo = _int(cfg, "linkmgr", "min_rate", 0, 7)
     hi = _int(cfg, "linkmgr", "max_rate", 0, 7)
-    if lo > hi:
+    lo = _int(cfg, "linkmgr", "min_rate", 0, 7) if "min_rate" in cfg["linkmgr"] else None
+    if lo is not None and lo > hi:
         raise ValueError(f"[linkmgr] min_rate {lo} > max_rate {hi}")
     _int(cfg, "linkmgr", "revert_s", 60, 3600)                  # AIRRATE / CHANNEL revert_s range
     # [interop]
@@ -331,6 +335,11 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     tok = _str(cfg, "gds", "http_token", 256)
     if tok and not _TOKEN_RE.fullmatch(tok):
         raise ValueError("[gds] http_token must be printable ASCII without blanks")
+    hosts = _get(cfg, "gds", "http_allowed_hosts")
+    if not isinstance(hosts, list) or len(hosts) > 32 or any(
+            not isinstance(h, str) or not _HOSTNAME_RE.fullmatch(h) for h in hosts):
+        raise ValueError(f"[gds] http_allowed_hosts = {hosts!r} must be a list of at most 32 host names "
+                         "(letters, digits, '.', '-'; no port)")
     _num(cfg, "gds", "los_timeout_s", 0.0, lo_open=True)
     _bool(cfg, "gds", "frontpanel")
     _bool(cfg, "gds", "rcu")
@@ -352,8 +361,13 @@ def validate(cfg: dict[str, Any]) -> list[str]:
 # Derived values used by several modules
 # =============================================================================
 def is_loopback(host: str) -> bool:
-    """True for the local-only HTTP bind addresses."""
-    return host in ("127.0.0.1", "localhost", "::1")
+    """True for the local-only HTTP bind addresses (localhost, 127.0.0.0/8, ::1)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def archive_path(cfg: Mapping[str, Any]) -> Path:

@@ -248,6 +248,23 @@ uint32_t sx_tx_timeout_raw(uint32_t airtime_us, uint32_t margin_us) {
   return (uint32_t)raw;
 }
 
+// RxDutyCycle periods (radio.h).
+bool sx_duty_cycle_us(uint8_t sf, uint32_t bw_hz, uint16_t n_pre, uint32_t& rx_us, uint32_t& sleep_us) {
+  const uint64_t ts = lora_symbol_us(sf, bw_hz);
+  if (ts == 0 || n_pre <= 2u * kSxDutyDetectSym) return false;
+  const uint64_t sleep = (uint64_t)(n_pre - 2u * kSxDutyDetectSym) * ts;
+  if (sleep <= (uint64_t)kSxDutyTransitionUs + 16u) return false;   // RadioLib's own minimum
+  const uint64_t prog_sleep = sleep - kSxDutyTransitionUs;
+  const uint64_t need = ((4u * (uint64_t)n_pre + 49u) * ts + 3u) / 4u;   // (n_pre + 12.25) Tsym, rounded up
+  uint64_t rx = need > prog_sleep ? (need - prog_sleep + 1u) / 2u + ts : ts;
+  if (rx < (kSxDutyDetectSym + 1u) * ts) rx = (kSxDutyDetectSym + 1u) * ts;
+  const uint64_t max_us = 0xFFFFFFull * 125u / 8u;                  // 24-bit raw limit
+  if (rx > max_us || sleep > max_us) return false;
+  rx_us = (uint32_t)rx;
+  sleep_us = (uint32_t)sleep;
+  return true;
+}
+
 // =============================================================================
 // Model-generic figures
 // =============================================================================
@@ -355,11 +372,13 @@ RadioEvent E22StreamParser::classify(RxPacket& rx, int32_t& value) {
 }
 
 // =============================================================================
-// E22TxTracker (v2 Flight TX_WAIT_BUSY / TX_WAIT_DONE, unchanged)
+// E22TxTracker (v2 Flight TX_WAIT_BUSY / TX_WAIT_DONE; TX_DONE no earlier than the
+// frame's modelled busy time, manual 5.6.2)
 // =============================================================================
-void E22TxTracker::start(uint32_t now) {
+void E22TxTracker::start(uint32_t now, uint32_t min_busy_ms) {
   phase_ = WAIT_BUSY;
   t0_ = now;
+  min_busy_ms_ = min_busy_ms;
 }
 
 RadioEvent E22TxTracker::poll(uint32_t now, bool aux_high, int32_t& value) {
@@ -370,7 +389,7 @@ RadioEvent E22TxTracker::poll(uint32_t now, bool aux_high, int32_t& value) {
       return RadioEvent::NONE;
     case WAIT_DONE: {
       const bool timeout = dt > kE22AuxTimeoutMs;
-      if (!aux_high && !timeout) return RadioEvent::NONE;
+      if ((!aux_high || dt < min_busy_ms_) && !timeout) return RadioEvent::NONE;
       phase_ = IDLE;
       value = dt > (uint32_t)INT32_MAX ? INT32_MAX : (int32_t)dt;
       return timeout ? RadioEvent::TX_TIMEOUT : RadioEvent::TX_DONE;

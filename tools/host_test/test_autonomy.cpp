@@ -23,6 +23,7 @@
 
 #include "fsw/autonomy.h"
 #include "fsw/commands.h"
+#include "drivers/radio.h"     // radio_boot_power_code (contract 15)
 #include "host_test.h"
 
 using namespace vgq;
@@ -825,4 +826,23 @@ HOST_TEST(rm3100_bist_decode) {
     fits = fits && mag_bist_evr_text(1, x, t, sizeof t) <= 80;
   }
   CHECK(fits, "every BIST EVR text fits 80 characters");
+}
+
+// ---- Reset cause (C16 / C56): a cold power-up is POWER-ON, not BROWNOUT -------------------
+HOST_TEST(reset_cause_classification) {
+  // STM32U5 cold power-up: BORRSTF | PINRSTF (BOR = POR/PDR, no PORRSTF), no warm marker.
+  CHECK(classify_reset_cause(RST_F_BOR | RST_F_PIN, false) == 0, "power-up (BOR + PIN, no marker) -> 0 POWER-ON");
+  CHECK(classify_reset_cause(RST_F_BOR, false) == 0, "BOR flag alone, no marker -> 0 POWER-ON");
+  CHECK(classify_reset_cause(RST_F_BOR | RST_F_PIN, true) == kResetCauseBrownout,
+        "BOR with the marker of a running MCU -> 4 BROWNOUT");
+  CHECK(classify_reset_cause(RST_F_PIN, true) == 1 && classify_reset_cause(RST_F_PIN, false) == 1,
+        "NRST (Linux side) -> 1 PIN");
+  CHECK(classify_reset_cause(RST_F_SOFT | RST_F_PIN, true) == 2, "NVIC_SystemReset -> 2 SOFTWARE");
+  CHECK(classify_reset_cause(RST_F_IWDG | RST_F_PIN, true) == 3 && classify_reset_cause(RST_F_WWDG, false) == 3,
+        "IWDG / WWDG -> 3 WATCHDOG");
+  CHECK(classify_reset_cause(0, true) == 255, "no flag -> 255 UNKNOWN");
+  BeaconMonitor b;
+  b.begin(classify_reset_cause(RST_F_BOR | RST_F_PIN, false));
+  CHECK(b.level() != BEACON_URGENT && radio_boot_power_code(false, 3, 2) == 3,
+        "a power-up neither latches the beacon URGENT nor derates the TX power");
 }

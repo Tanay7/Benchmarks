@@ -94,7 +94,8 @@ size_t pack_rf(const RfPacket& p, uint8_t* out) {
 
 size_t pack_cmdver(const CmdVerPacket& p, uint8_t* out) {
   W w(out);
-  w.u8(p.tc_seq); w.u8(p.opcode); w.u8(p.stage); w.u8(p.error_code); w.u32(p.ground_tag);
+  const uint8_t stage = (uint8_t)((p.stage & kCmdVerStageMask) | ((p.source & 3u) << kCmdVerSourceShift));
+  w.u8(p.tc_seq); w.u8(p.opcode); w.u8(stage); w.u8(p.error_code); w.u32(p.ground_tag);
   return w.n;                                                     // kCmdVerLen = 8
 }
 

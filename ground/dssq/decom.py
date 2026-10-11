@@ -13,6 +13,8 @@ driven entirely by dssq.dictionary (Phase B specification PB-1, PB-8.4):
                     Rice stream raises rice.RiceError, a ValueError);
   * CFDP 0x030      one CCSDS 727.0-B-5 PDU per packet -> {"pdu_len": n} only: the GDS
                     hands the user data to ccsds.cfdp.Receiver, which validates it.
+A raw field listed in dictionary.BITFIELDS is replaced by its sub-fields (CMDVER stage
+octet -> `stage` b1..0 and `cmd_source` b7..6, interface decision I1).
 
 Everything that arrives over RF is untrusted, even when SDLS protected it (OID frames are
 never protected and NONE is a valid service): every length is checked before use, and
@@ -34,7 +36,7 @@ from typing import Any
 
 from . import spectral
 from .ccsds.packets import SpacePacket
-from .dictionary import (APID_CFDP, APID_EVR, APID_RFSCAN, APID_SPECBURST, CFDP_PDU_MAX,
+from .dictionary import (APID_CFDP, APID_EVR, APID_RFSCAN, APID_SPECBURST, BITFIELDS, CFDP_PDU_MAX,
                          CFDP_PDU_MIN, EVR_SEVERITY, EVR_TEXT_MAX, PACKET_NAMES, PACKETS,
                          RFSCAN_MAX_CHANNELS, FieldDef, checked_limits, field_na)
 
@@ -154,6 +156,10 @@ class Decommutator:
                 out[name] = r
             else:
                 out[name] = r * scale
+        for raw_name, subs in BITFIELDS.get(apid, {}).items():
+            r = out.pop(raw_name)
+            for sub, lsb, width in subs:
+                out[sub] = None if r is None else (r >> lsb) & ((1 << width) - 1)
         return out
 
     @staticmethod
@@ -217,7 +223,18 @@ def encode(apid: int, values: Mapping[str, Any]) -> bytes:
     one that would collide with the sentinel. KeyError for an APID without a layout."""
     spec = PACKETS[apid]
     fields = spec["fields"]
-    unknown = sorted(set(values) - {str(f[0]) for f in fields})
+    values = dict(values)
+    subnames: set[str] = set()
+    for raw_name, subs in BITFIELDS.get(apid, {}).items():
+        packed = 0
+        for sub, lsb, width in subs:
+            subnames.add(sub)
+            v = values.pop(sub, 0)
+            if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v < 1 << width:
+                raise ValueError(f"{sub}: {v!r} is not a {width}-bit unsigned integer")
+            packed |= v << lsb
+        values[raw_name] = packed
+    unknown = sorted(set(values) - {str(f[0]) for f in fields} - subnames)
     if unknown:
         raise ValueError(f"{spec['name']}: no field named {', '.join(unknown)}")
     return _layout(apid).pack(*[_raw(apid, f, values.get(str(f[0]))) for f in fields])

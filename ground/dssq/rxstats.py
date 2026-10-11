@@ -15,7 +15,14 @@ the absolute accuracy is set by [radio] rssi_cal_offset_db (docs/08 T-RF-02).
 
 Windows: "1m" (60 s), "10m" (600 s) and "pass" (since AOS; cleared at every AOS and
 capped at PASS_WINDOW_MAX samples, `truncated` once older samples were discarded - the v2
-"pass" window was never trimmed nor reset). Every window is also capped in length.
+"pass" window was never trimmed nor reset). Every window is also capped in length. The
+AOS frame's own reception / codeblock samples (added before the frame is recognised as
+the AOS) are kept in the new pass, and the inter-pass gap is never an inter-arrival time.
+
+Frame error rate: `frames.fer` is the lifetime ratio (display); the link manager uses
+`frames.fer_10m`, taken over the same 10-minute window as its margin and without the MCFC
+jump of the AOS frame (frames sent while out of view, or a spacecraft reboot, are not
+frames lost in the pass).
 
 Free-space path loss (exact constant): FSPL = 20 log10(4 pi d f / c), d in m, f in Hz;
 20 log10(4 pi 1e9 / c) = 32.44778 dB for d in km and f in MHz (not 32.44).
@@ -36,6 +43,8 @@ C_M_S = link.C_M_S
 C_KM_S = C_M_S / 1000.0
 PASS_WINDOW_MAX = 20_000            # >= 8 h at the fastest E22 frame period of 1.5 s
 TIME_WINDOW_MAX = 20_000            # length cap of the 1-min / 10-min windows (safety bound)
+STALE_PAIR_DEFAULT_S = 90.0         # RSSI / noise pairing limit before the first tick ([gds] los_timeout_s)
+FER_WINDOW_S = 600.0                # link-manager FER window = its margin window (linkmgr docstring)
 WINDOWS = (("1m", 60.0), ("10m", 600.0), ("pass", None))
 METRICS = ("rssi", "noise", "snr_est", "snr_meas", "freq_err", "iat", "rs", "asm")
 SERIES_LEN = 300
@@ -81,6 +90,12 @@ class Window:
     def clear(self) -> None:
         self.d.clear()
         self.discarded = 0
+
+    def clear_before(self, t: float) -> None:
+        """Drops the samples older than t (a new pass keeps the AOS frame's own samples)."""
+        kept = [x for x in self.d if x[0] >= t]
+        self.clear()
+        self.d.extend(kept)
 
     def _trim(self, now: float) -> None:
         if self.h is None:
@@ -213,6 +228,7 @@ class ReceiverStats:
         self.vc_loss: dict[int, int] = {}
         self.frames_ok = 0
         self.frames_lost = 0
+        self.fer_lost = Window(FER_WINDOW_S, TIME_WINDOW_MAX)     # (t, frames lost before this frame)
         self.oid_frames = 0
         self.by_format = {"TM": 0, "USLP": 0}
         self.per_vc: dict[int, dict[str, int]] = {}
@@ -324,18 +340,24 @@ class ReceiverStats:
 
     def on_frame(self, t: float, frame: Any, rs: int, data_octets: int, field_octets: int) -> None:
         """One frame that passed RS and the FECF (a dssq.ccsds.tm.TransferFrame)."""
-        if self.los:
+        aos = self.los
+        if aos:
             self.los = False
             self.aos_t = t
             self.passes += 1
-            for w in self.w["pass"].values():                 # a new pass starts empty
-                w.clear()
+            # A new pass starts empty, except for this frame's own reception / codeblock
+            # samples: the GDS adds them (on_reception, on_codeblock, same ERT) before this call.
+            for w in self.w["pass"].values():
+                w.clear_before(t)
             self._event(t, "AOS")
-        if self.last_frame_t is not None:
+        elif self.last_frame_t is not None:               # the LOS gap is not an inter-arrival time
             self._add("iat", t, t - self.last_frame_t)
         self.last_frame_t = t
         lost = self.loss.update(frame)
         self.frames_lost += lost
+        # Link-manager FER: the AOS frame's MCFC jump counts frames sent while out of view
+        # (or a spacecraft reboot), not frames lost in the pass.
+        self.fer_lost.add(t, 0 if aos else lost)
         vc = int(frame.vcid)
         prev = self.vc_loss.get(vc)
         vc_lost = 0 if prev is None else (frame.vcfc - prev - 1) & 0xFF
@@ -361,6 +383,12 @@ class ReceiverStats:
         s["freq_err"].append(self.last_rx["freq_err_hz"] if self.last_rx["t"] == t else None)
         s["margin"].append(_sub(rssi, sens))
         s["rs"].append(rs)
+
+    def fer_window(self, now: float) -> float | None:
+        """Frame error rate over the last FER_WINDOW_S (None without frames): lost / (lost + received)."""
+        v = self.fer_lost.values(now)
+        lost = math.fsum(v)
+        return lost / (lost + len(v)) if v else None
 
     def on_uplink(self, n_octets: int, t: float) -> None:
         self.uplink["cltus"] += 1
@@ -454,6 +482,12 @@ class ReceiverStats:
         ferr_med, ferr_state = self.freq_state()
         pkts = self.packets_ok + self.packets_crc_fail
         freq_mhz = link.channel_freq_mhz(s.channel)
+        # RSSI - noise only when both readings belong to the same pass: the last packet's RSSI
+        # minus a noise reading taken hours later (after LOS) was never a measured SNR.
+        rx_t = self.last_rx["t"]
+        same_pass = rx_t is not None and bool(self.noise_t) and \
+            abs(self.noise_t - rx_t) <= (self.los_timeout_s or STALE_PAIR_DEFAULT_S)
+        snr_est = _sub(rssi, self.noise_dbm) if same_pass else None
         rf: dict[str, Any] = {
             "freq_mhz": freq_mhz, "freq_hz": s.freq_hz, "model": m.name, "air_rate_code": s.rate_code,
             "rate_label": link.rate_label(m, s.rate_code), "air_rate_bps": rb,
@@ -463,7 +497,7 @@ class ReceiverStats:
             "noise_dbm": self.noise_dbm,
             "noise_source": "SX126x GetRssiInst median of 8" if m.packet_mode else "E22 noise register",
             "noise_age_s": None if not self.noise_t else now - self.noise_t,
-            "snr_est_db": _sub(rssi, self.noise_dbm), "pr_est_dbm": pr, "n0_est_dbm_hz": n0,
+            "snr_est_db": snr_est, "pr_est_dbm": pr, "n0_est_dbm_hz": n0,
             "cn0_est_dbhz": cn0, "cn0_source": cn0_src, "ebn0_est_db": ebn0,
             "noise_bw_hz": bw, "noise_bw_source": bw_src,
             "sensitivity_dbm": sens, "sensitivity_source": sens_src, "margin_est_db": _sub(rssi, sens),
@@ -512,6 +546,7 @@ class ReceiverStats:
                         "sdls_rejected": dict(self.sdls_rejected)},
             "frames": {"ok": self.frames_ok, "lost": self.frames_lost,
                        "fer": (self.frames_lost / total) if total else None,
+                       "fer_10m": self.fer_window(now),
                        "oid_frames": self.oid_frames,
                        "idle_frame_pct": 100 * self.oid_frames / self.frames_ok if self.frames_ok else None,
                        "channel_efficiency_pct": 100 * self.data_octets / self.field_octets

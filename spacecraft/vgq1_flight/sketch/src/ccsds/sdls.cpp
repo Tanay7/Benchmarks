@@ -23,8 +23,8 @@ void sdls_iv(uint16_t dir, uint16_t epoch, uint32_t sn, uint8_t iv[kSdlsIvLen]) 
 // ---------------------------------------------------------------------------
 const char* Sdls::result_name(Result r) {
   static const char* const kName[] = {"OK", "disabled", "bad length", "bad SPI", "REPLAY",
-                                      "bad MAC", "bad IV"};
-  return r <= SDLS_BAD_IV ? kName[r] : "?";
+                                      "bad MAC", "bad IV", "SN not restored"};
+  return r <= SDLS_NOT_RESTORED ? kName[r] : "?";
 }
 
 void Sdls::init(const uint8_t* key, size_t key_len, uint16_t spi) {
@@ -85,6 +85,7 @@ Sdls::Result Sdls::process(uint8_t* frame, size_t hdr_len, size_t prot_len, uint
     if (!ct_equal(full, body + body_len, kSdlsMacLen)) return fail(SDLS_BAD_MAC);
     // Replay check only AFTER the MAC is proven, so forged frames cannot move SN.
     if (sn <= last_sn_) return fail(SDLS_REPLAY);
+    if (held_) return SDLS_NOT_RESTORED;           // authentic, but the window is not known yet
     last_sn_ = sn;
     data = body;
     data_len = body_len;
@@ -103,6 +104,7 @@ Sdls::Result Sdls::process(uint8_t* frame, size_t hdr_len, size_t prot_len, uint
   const size_t aad_len = hdr_len + kSdlsAeHdrLen;     // primary header || security header
   if (!gcm_.verify(iv, frame, aad_len, ct, ct_len, tag)) return fail(SDLS_BAD_MAC);
   if (sn <= last_sn_) return fail(SDLS_REPLAY);
+  if (held_) return SDLS_NOT_RESTORED;             // authentic, but the window is not known yet
   // decrypt() checks the tag once more (one GHASH over <= 64 octets) so that
   // the buffer is only ever modified for an authentic, fresh frame.
   if (!gcm_.decrypt(iv, frame, aad_len, ct, ct_len, tag)) return fail(SDLS_BAD_MAC);

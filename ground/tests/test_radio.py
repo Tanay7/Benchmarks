@@ -1091,7 +1091,7 @@ def _status(state=1, flags=7, up=100, foff=0):
 # ------------------------------------------------- 20-field status line, flags b3..b5
 def test_status_line_with_frequency_offset_and_flags(sxb):
     radio, b, _clk = sxb
-    assert len(_status().split("|")) == 1 + len(sx.STATUS_FIELDS) == 21
+    assert len(_status().split("|")) == 1 + sx.STATUS_BASE_LEN == 21 and len(sx.STATUS_FIELDS) == 22
     b.handlers["rf_evt"](_status(flags=7 | 8 | 16 | 32, foff=-1234))
     st = radio.mcu
     assert st["freq_offset_hz"] == -1234 and st["state_name"] == "RX" and st["uptime_s"] == 100
@@ -1109,6 +1109,66 @@ def test_status_line_with_frequency_offset_and_flags(sxb):
                 _status(foff="+5"), _status() + "|7"):
         b.handlers["rf_evt"](bad)
     assert radio.stats["evt_rejected"] == n + 6
+
+
+# ------------------------------- Phase C: compiled chip / TCXO check (I3), uptime wrap
+STATUS22 = ("S|DSSQ-IO 3.1 SX126x|SX1268|1|23|1|0|7|150|{rx_ok}|1|0|4|0|2|0|0|1|0|{up}|0|{chip}|{tcxo}")
+
+
+def _status22(up=100, chip=1268, tcxo=1800, rx_ok=12):
+    return STATUS22.format(up=up, chip=chip, tcxo=tcxo, rx_ok=rx_ok)
+
+
+def _sx_radio(chip="SX1268", tcxo_v=1.8):
+    clk = Clock()
+    b = FakeBridge()
+    radio = sx.Sx126xBridge(b, {"model": "SX126x", "air_rate": 1, "power": 0, "channel": 23,
+                                "sx126x": {"chip": chip, "tcxo_v": tcxo_v}}, clock=clk, poll_s=0.0)
+    radio.attach()
+    return radio, b
+
+
+def test_status_chip_and_tcxo_checked_against_station_toml():
+    radio, b = _sx_radio()
+    b.handlers["rf_evt"](_status22())
+    st = radio.mcu
+    assert (st["chip_id"], st["tcxo_mv"], st["hw_mismatch"]) == (1268, 1800, None) and not radio.events
+    assert radio.get_config()["hw_mismatch"] is None and radio.snapshot()["hw_mismatch"] is None
+    b.handlers["rf_evt"](_status(foff=0))                             # 20 fields (older sketch): no check
+    assert (radio.mcu["chip_id"], radio.mcu["tcxo_mv"], radio.hw_mismatch) == (None, None, None)
+
+    radio, b = _sx_radio(chip="SX1262", tcxo_v=0)                    # TOML edited, sketch not rebuilt
+    b.handlers["rf_evt"](_status22())
+    text = radio.hw_mismatch
+    assert "SX1268 (DSSQ_SX_CHIP)" in text and "chip = SX1262" in text and "1800 mV" in text
+    assert radio.get_config()["hw_mismatch"] == text == radio.snapshot()["hw_mismatch"]
+    b.handlers["rf_evt"](_status22(up=105))
+    assert [e["name"] for e in radio.events] == ["HW_MISMATCH"]       # raised once, not per status line
+    radio.expected_chip, radio.expected_tcxo_mv = 1268, 1800
+    b.handlers["rf_evt"](_status22(up=110))
+    assert radio.hw_mismatch is None and radio.mcu["hw_mismatch"] is None
+    n = radio.stats["evt_rejected"]
+    for bad in (_status22(chip=12), _status22(tcxo=3301), _status22(tcxo=-1), _status22() + "|0",
+                _status22().rsplit("|", 1)[0]):                       # 21 fields
+        b.handlers["rf_evt"](bad)
+    assert radio.stats["evt_rejected"] == n + 5
+
+
+def test_uptime_wrap_after_49_7_days_is_not_a_reboot():
+    radio, b = _sx_radio()
+    wrap = (1 << 32) // 1000                                          # millis() / 1000 wraps at 4294967
+    b.handlers["rf_evt"](_status22(up=wrap - 2))
+    radio.read()
+    pushes = radio.stats["config_pushes"]
+    b.handlers["rf_evt"](_status22(up=3, rx_ok=13))                   # wrapped, counters kept going
+    radio.read()
+    assert radio.stats["mcu_reboots"] == 0 and radio.stats["config_pushes"] == pushes
+    b.handlers["rf_evt"](_status22(up=wrap - 1))
+    b.handlers["rf_evt"](_status22(up=2, rx_ok=0))                    # near the wrap, but counters reset
+    assert radio.stats["mcu_reboots"] == 1
+    b.handlers["rf_evt"](_status22(up=9000, rx_ok=5))
+    b.handlers["rf_evt"](_status22(up=4, rx_ok=5))                    # far from the wrap: a reboot
+    assert radio.stats["mcu_reboots"] == 2
 
 
 # ---------------------------------------------- set_freq_offset / rf_foff (post-G1 check)

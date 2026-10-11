@@ -29,7 +29,7 @@ Built only from the ground's reference code - no second implementation of any pr
     seconds), CFDPPUT 0 (the recorded packets of the in-memory SSR sent with ccsds.cfdp.Sender
     on VC3, sequence number cfdp_make_seq(partition, n)), CFDPPUT 1/2 (relay request: no EGSE
     in the simulator, so it times out after 30 s like the flight), CFDPCANCEL, SEQLOAD /
-    SEQCTRL (stored, dispatched by simulated SCLK with CMDVER tc_seq 0xFE), MAGBIST (HK
+    SEQCTRL (stored, dispatched by simulated SCLK with CMDVER command source 2), MAGBIST (HK
     mag_bist), MAGCAL (HK magcal_state); the rest are accepted without effect.
   * MAG: a constant field [science] field_ut (50 uT when unset) seen through a KNOWN hard-iron
     offset and soft-iron matrix while the simulated attitude tumbles, so the MAGCAL fit can be
@@ -65,8 +65,8 @@ from .ccsds.tm import (Clcw, build_frame, build_oid_frame, build_uslp_frame, bui
                        encode_cadu)
 from .cmdparse import check_user_data, unpack_seqload
 from .dictionary import (APID_ATT, APID_CFDP, APID_CMDVER, APID_ENV, APID_EVR, APID_HK, APID_MAG, APID_RF,
-                         APID_RFSCAN, APID_SPEC, APID_SPECBURST, APID_TIMECORR, CMDVER_SEQ_BYPASS, CMDVER_SEQ_STORED,
-                         FDIR_HIBERNATE, PERIODIC_APIDS)
+                         APID_RFSCAN, APID_SPEC, APID_SPECBURST, APID_TIMECORR, CMD_SOURCE_AD, CMD_SOURCE_BD,
+                         CMD_SOURCE_STORED, FDIR_HIBERNATE, PERIODIC_APIDS)
 from .radio.e22 import regs_from_cfg
 
 # Flight datalink.cpp kModeCadence (s, 0 = off), PeriodicIdx order HK RF TIMECORR MAG ATT SPEC ENV.
@@ -74,6 +74,7 @@ CADENCE = {0: (10, 10, 0, 0, 0, 0, 0), 1: (30, 60, 300, 0, 0, 0, 0), 2: (60, 60,
            3: (20, 30, 120, 4, 8, 30, 30), 4: (10, 10, 60, 4, 8, 30, 30)}
 PERIOD_X10 = {0: 40, 1: 40, 2: 25, 3: 20, 4: 20}       # flight kModePeriodX10
 MIN_FRAME_PERIOD_S = 1.5                                # flight kMinFramePeriodMs
+GROUND_UART_BAUD = 9600                                 # ground E22 -> USB (config.E22_UART_CODE_9600)
 MAX_TX_DUTY = 0.5                                       # flight kMaxTxDutyPermille / 1000
 VC_BUF_LEN = 1024                                       # flight VcStream::kBufLen
 VC_RESERVE = 256                                        # flight kVcReserveOctets
@@ -99,6 +100,14 @@ MAG_SOFT_IRON = {0: ((1.06, 0.03, -0.02), (0.03, 0.95, 0.04), (-0.02, 0.04, 1.02
 MAG_FIELD_DIR = (0.40, 0.10, 0.911)
 TUMBLE_RAD_S = (0.11, 0.073, 0.051)                     # incommensurate body rates (full sphere)
 SPEC_TEMPLATE_UW = [max(0.05, 40.0 * math.exp(-((nm - 560.0) / 220.0) ** 2)) for nm in spectral.WAVELENGTHS_NM]
+
+
+def _qmul(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, float, float, float]:
+    """Hamilton product a (x) b, scalar first."""
+    return (a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+            a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+            a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+            a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0])
 
 
 def _rot(t: float) -> tuple[tuple[float, float, float], ...]:
@@ -627,7 +636,10 @@ class SimSpacecraft(link.RadioBackend):
                 b[self.rng.randrange(4, len(b))] ^= self.rng.randrange(1, 256)
             rssi_i = max(-127, min(-1, round(rssi)))
             self.last_rx_rssi = rssi_i
-            self.out.append((t_arrive, bytes(b) + bytes([(256 + rssi_i) & 0xFF])))
+            # The ground E22 then sends the CADU + RSSI octet over its own 9600-baud UART (8N1):
+            # the delay gds._time_correlate removes (E22_UART_CADU_S) before the airtime.
+            uart_s = (len(b) + 1) * 10 / GROUND_UART_BAUD
+            self.out.append((t_arrive + uart_s, bytes(b) + bytes([(256 + rssi_i) & 0xFF])))
             return
         crc_ok = self.rng.random() >= self.crc_fail_prob
         if not crc_ok:                                      # RS-correctable errors (contract 20)
@@ -688,7 +700,7 @@ class SimSpacecraft(link.RadioBackend):
             self.revert = None
             self._evr(1, 0x0210, f"radio change confirmed by ground (code {self.sc_rate}, ch {self.sc_ch})")
         if verdict in ("ACCEPT", "ACCEPT_BYPASS"):
-            self._execute_packet(f.data, f.seq if verdict == "ACCEPT" else CMDVER_SEQ_BYPASS, now)
+            self._execute_packet(f.data, f.seq, CMD_SOURCE_AD if verdict == "ACCEPT" else CMD_SOURCE_BD, now)
         elif verdict == "DISCARD_LOCKOUT":
             self._evr(3, 0x0205, f"FARM LOCKOUT (N(S)={f.seq} V(R)={self.farm.vr})")
         elif verdict.startswith("CONTROL"):
@@ -696,34 +708,38 @@ class SimSpacecraft(link.RadioBackend):
         if verdict in ("ACCEPT", "ACCEPT_BYPASS", "CONTROL_UNLOCK", "CONTROL_SET_VR"):
             self._ground_contact()
 
-    def _execute_packet(self, pkt: bytes, tc_seq: int, now: float) -> None:
+    def _execute_packet(self, pkt: bytes, tc_seq: int, src: int, now: float) -> None:
         if len(pkt) < 7 or (int.from_bytes(pkt[0:2], "big") & 0x7FF) != 0x0C0:
-            self._cmdver(tc_seq, pkt[6] if len(pkt) > 6 else 0, 2, 0, now)
+            self._cmdver(tc_seq, src, pkt[6] if len(pkt) > 6 else 0, 2, 0, now)
             return
         n = int.from_bytes(pkt[4:6], "big") + 1
-        self._execute(pkt[6:6 + n], tc_seq, now)
+        self._execute(pkt[6:6 + n], tc_seq, src, now)
 
-    def _cmdver(self, tc_seq: int, opcode: int, err: int, tag: int, now: float) -> None:
+    def _cmdver(self, tc_seq: int, src: int, opcode: int, err: int, tag: int, now: float) -> None:
+        """CMDVER (I1): stage octet = stage (bits 1..0: 2 EXECUTED, 3 FAILED) | command source
+        << 6 (0 AD frame, 1 BD frame / hardline, 2 stored sequence); tc_seq = the AD frame's
+        N(S), 0 for the other sources."""
         if err:
             self.cmd_rej += 1
             self._evr(2, 0x0500 + min(err, 7), f"command 0x{opcode:02X} rejected, error {err}")
         else:
             self.cmd_acc += 1
         self.last_opcode, self.last_status = opcode, err
-        self._emit(APID_CMDVER, bytes([tc_seq, opcode, 3 if err else 2, err]) + tag.to_bytes(4, "big"), 0, now,
-                   priority=True)
+        stage = (3 if err else 2) | (src & 3) << 6
+        self._emit(APID_CMDVER, bytes([tc_seq & 0xFF if src == CMD_SOURCE_AD else 0, opcode, stage, err])
+                   + tag.to_bytes(4, "big"), 0, now, priority=True)
 
-    def _execute(self, ud: bytes, tc_seq: int, now: float) -> None:
+    def _execute(self, ud: bytes, tc_seq: int, src: int, now: float) -> None:
         """One command (opcode + arguments) from a TC or the stored sequence."""
         if not ud:
-            self._cmdver(tc_seq, 0, 2, 0, now)
+            self._cmdver(tc_seq, src, 0, 2, 0, now)
             return
         op, a = ud[0], ud[1:]
         err, _why = check_user_data(ud)
         tag = 0
         if not err:
             err, tag = self._effect(op, a, now)
-        self._cmdver(tc_seq, op, err, tag, now)
+        self._cmdver(tc_seq, src, op, err, tag, now)
 
     def _effect(self, op: int, a: bytes, now: float) -> tuple[int, int]:
         """Simulated effect of a valid command: (CmdError, ground tag)."""
@@ -923,7 +939,7 @@ class SimSpacecraft(link.RadioBackend):
                 self._evr(2, 0x0905, f"SEQ slot {slot} skipped: {late} s late")
             else:
                 self._evr(1, 0x0904, f"SEQ slot {slot}: opcode 0x{cmd[0]:02X}")
-                self._execute(cmd, CMDVER_SEQ_STORED, now)
+                self._execute(cmd, 0, CMD_SOURCE_STORED, now)
         if not self.seq_table and self.seq_armed:
             self.seq_armed, self.seq_state = False, 2
             self.acc["seq_complete"] = True
@@ -1041,7 +1057,11 @@ class SimSpacecraft(link.RadioBackend):
     def _mag(self, now: float) -> None:
         t = self._sclk(now)
         g = self.rng.gauss
-        v: dict[str, Any] = {"nsamples": 4, "flags": 0x0E | (0x20 if self.magcal_state else 0), "rm3100_cc": 200}
+        # nsamples as the flight reports it: the 1 Hz readings in one MAG period (PKTRATE MAG 1
+        # gives 1). The simulated vector itself is instantaneous.
+        period = self.period_override.get(PERIODIC_APIDS.index(APID_MAG), CADENCE[self.mode][3])
+        v: dict[str, Any] = {"nsamples": max(1, min(255, round(period))),
+                             "flags": 0x0E | (0x20 if self.magcal_state else 0), "rm3100_cc": 200}
         for unit, prefix in ((0, "ob"), (1, "ib")):
             raw = self.mag_truth(unit, t)
             for axis, val in zip("xyz", raw, strict=True):
@@ -1064,9 +1084,15 @@ class SimSpacecraft(link.RadioBackend):
                              "gyro_y": round(math.degrees(TUMBLE_RAD_S[1]), 1),
                              "gyro_z": round(math.degrees(TUMBLE_RAD_S[0]), 1),
                              "mag_x": 19.5, "mag_y": 0.5, "mag_z": 44.0, "q_fus_acc": 0.035}
+        # q = body -> NED (the simulator's world is NED: MAG_FIELD_DIR points down). The flight
+        # fields differ in convention: q_fus = BHI260 device -> ENU (Android world), q_triad =
+        # TRIAD NED -> body (attitude.h triad_ned). ENU <-> NED is a 180 deg turn about (1,1,0).
+        h = math.sqrt(0.5)
+        q_fus = _qmul((0.0, h, h, 0.0), q)
+        q_triad = (q[0], -q[1], -q[2], -q[3])
         for i, axis in enumerate("wxyz"):
-            v[f"q_fus_{axis}"] = round(q[i] * 16384) / 16384
-            v[f"q_triad_{axis}"] = round(q[i] * 16384) / 16384
+            v[f"q_fus_{axis}"] = round(q_fus[i] * 16384) / 16384
+            v[f"q_triad_{axis}"] = round(q_triad[i] * 16384) / 16384
         self._emit_values(APID_ATT, v, 1, now)
 
     def _spec(self, now: float) -> None:

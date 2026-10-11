@@ -78,9 +78,11 @@ void sdls_iv(uint16_t dir, uint16_t epoch, uint32_t sn, uint8_t iv[kSdlsIvLen]);
 // ---------------------------------------------------------------------------
 class Sdls {
  public:
+  // SDLS_NOT_RESTORED: an authentic frame refused while the anti-replay counter waits
+  // for its restore (hold_for_restore()); not an authentication failure.
   enum Result : uint8_t { SDLS_OK = 0, SDLS_DISABLED, SDLS_BAD_LENGTH, SDLS_BAD_SPI,
-                          SDLS_REPLAY, SDLS_BAD_MAC, SDLS_BAD_IV };
-  static const char* result_name(Result r);   // "OK", "disabled", ..., "bad IV"
+                          SDLS_REPLAY, SDLS_BAD_MAC, SDLS_BAD_IV, SDLS_NOT_RESTORED };
+  static const char* result_name(Result r);   // "OK", "disabled", ..., "bad IV", "SN not restored"
 
   // Selects the TC service. AUTH uses `master` directly with SPI `auth_spi`;
   // AE derives K_tc_ae from `master` and uses SPI 2. NONE, or no key, disables
@@ -108,8 +110,22 @@ class Sdls {
   Result process(uint8_t* frame, size_t hdr_len, size_t prot_len, uint8_t*& data, size_t& data_len);
 
   uint32_t last_sn() const { return last_sn_; }
-  void set_last_sn(uint32_t sn) { if (sn > last_sn_) last_sn_ = sn; }   // restored by EGSE
+  // Restored by the EGSE (set_sdls_sn); it can only rise. Ends the restore hold.
+  void set_last_sn(uint32_t sn) {
+    if (sn > last_sn_) last_sn_ = sn;
+    held_ = false;
+  }
   uint32_t auth_failures() const { return fails_; }
+
+  // Anti-replay restore hold. last_sn lives in RAM, so after a reset it is 0 until the
+  // EGSE restores it: an authentic frame recorded at any earlier SN would pass the
+  // replay check, execute, and (sdls_sn) lower the persisted counter. While held,
+  // process() verifies the frame as usual and then refuses it with SDLS_NOT_RESTORED,
+  // leaving last_sn untouched. set_last_sn() ends the hold; release_hold() is the
+  // integrator's bounded fall-back when no restore arrives (EGSE absent).
+  void hold_for_restore() { held_ = true; }
+  void release_hold() { held_ = false; }
+  bool held() const { return held_ && enabled(); }
 
  private:
   Result fail(Result r) { ++fails_; return r; }
@@ -120,6 +136,7 @@ class Sdls {
   uint16_t spi_ = kSdlsSpiAuth;
   uint32_t last_sn_ = 0;
   uint32_t fails_ = 0;
+  bool held_ = false;
   AesGcm gcm_;                   // AE: K_tc_ae
 };
 
@@ -159,6 +176,10 @@ class SdlsTm : public FrameSecurity {
   uint32_t frames_protected() const { return n_protected_; }
   uint32_t frames_null() const { return n_null_; }
   uint32_t frames_refused() const { return n_refused_; }
+
+#ifdef VGQ_HOST_BUILD
+  void test_set_sn(uint32_t sn) { sn_ = sn; }     // host tests only: reach sn exhaustion
+#endif
 
   size_t header_len() const override { return ae_ ? kSdlsAeHdrLen : 0; }
   size_t trailer_len() const override { return ae_ ? kSdlsAeTagLen : 0; }

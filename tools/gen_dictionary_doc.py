@@ -201,9 +201,9 @@ def document() -> list[str]:
         *_enum("SPEC.spec_mode", MODE_NAMES),
         *_enum("SPEC.spec_class (onboard heuristic)", CLASS_NAMES),
         *_enum("CMDVER.error_code / HK.cmd_last_status", dd.CMD_ERRORS),
-        "CMDVER.tc_seq: N(S) of the carrying AD frame; "
-        f"{dd.CMDVER_SEQ_BYPASS} = bypass (BD) frame, {dd.CMDVER_SEQ_STORED} = dispatched by the stored "
-        "sequence.", "",
+        *_enum("CMDVER.cmd_source (stage octet b7..6)", dd.CMD_SOURCES),
+        "CMDVER.stage octet: b1..0 the stage, b7..6 the command source; tc_seq is the N(S) of the "
+        "carrying AD frame and is significant only for source AD.", "",
         "## 4 Telecommands (uplinked; APID 0x0C0, user data = opcode + arguments)", "",
         "Typed identically on the web console and on the station CardKB. Hazardous commands need CONFIRM "
         "(and a second operator's AUTH when the two-person rule is enabled). Prefix any command with `BD` "

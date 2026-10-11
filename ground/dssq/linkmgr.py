@@ -6,6 +6,8 @@ the current rate code, dssq.link.sensitivity() with its source) and the frame er
 these radios offer. It is model-aware (dssq.link registry):
   * E22 UART models: rate codes 0 and 1 are aliases of 2.4 kbit/s, so the ladder starts
     at code 2 (min_effective_rate_code); SX126x: LoRa profiles 0..7 are all distinct.
+    [linkmgr] min_rate absent = the model's own minimum (E22 2, SX126x 0; PB-3.2); the
+    limits follow a model change ([radio] model = "auto").
   * Higher code = faster and less sensitive for every model, so one ladder logic serves all.
   * The rate is the only lever used: the E22-400T37S has no output power levels (every
     code is 37 dBm, manual v1.5); the T33D and the SX126x do have power codes, but a power
@@ -29,7 +31,7 @@ from . import link
 
 class LinkManager:
     def __init__(self, target_margin_db: float = 6.0, period_s: float = 60.0, holdoff_s: float = 600.0,
-                 min_rate: int = 2, max_rate: int = 4, model: str | link.RadioModel | None = None,
+                 min_rate: int | None = None, max_rate: int = 4, model: str | link.RadioModel | None = None,
                  measured: Mapping[tuple[str, int], float] | None = None, rx_boost: bool = True):
         self.model = link.get_model(model)
         self.measured = dict(measured or {})
@@ -38,17 +40,27 @@ class LinkManager:
         self.target = target_margin_db
         self.period_s = period_s
         self.holdoff_s = holdoff_s
-        self.min_rate = max(min_rate, self.model.min_effective_rate_code)
-        self.max_rate = max(self.min_rate, min(max_rate, 7))
+        self._cfg_min = min_rate                 # None: the model's minimum
+        self._cfg_max = max_rate
         self.last_eval = -1e18
         self.last_action = -1e18
         self.recommendation: dict[str, Any] | None = None
+
+    @property
+    def min_rate(self) -> int:
+        floor = self.model.min_effective_rate_code
+        return floor if self._cfg_min is None else max(self._cfg_min, floor)
+
+    @property
+    def max_rate(self) -> int:
+        return max(self.min_rate, min(self._cfg_max, 7))
 
     def _sens(self, code: int) -> float:
         return link.sensitivity(self.model, code, self.measured, self.rx_boost)[0]
 
     def evaluate(self, now: float, rx: Mapping[str, Any], rate_code: int, power_code: int | None) -> dict | None:
-        """rx = ReceiverStats.snapshot() (windows, frames). Returns the recommendation when
+        """rx = {"windows": {"10m": {"rssi": stats}}, "frames": {"fer": FER over the same 10 min}}
+        (the ReceiverStats.snapshot() layout). Returns the recommendation when
         AUTO mode should act now, else None (the recommendation is kept for the displays)."""
         if self.mode == "OFF" or now - self.last_eval < self.period_s:
             return None

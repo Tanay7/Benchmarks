@@ -22,7 +22,9 @@
 //    C1 addr len      -> read; every reply is C1 addr len data; FF FF FF = wrong format
 //  Normal-mode ambient-noise query (needs REG1 bit 5): C0 C1 C2 C3 00 02 ->
 //    C1 00 02 <noise> <last-packet RSSI>, dBm = -(256 - value)
-//  AUX: LOW while the module is busy (self-test, buffering, transmitting, mode change).
+//  AUX: LOW while the module is busy (self-test, buffering, mode change). After a
+//  transmission AUX = 1 only means the buffer has gone to the RF chip: the last packet
+//  may still be on air (manual 5.6.2), so TX_DONE also waits for the modelled air time.
 //  LBT (REG3 bit 4) runs inside the module: it defers a transmission for at most
 //  2 s, then sends anyway; the deferral is not observable from the host.
 //

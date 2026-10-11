@@ -184,7 +184,10 @@ class TcFrameInfo:
 def parse_tc_frame(b: bytes, open_tfdf: bool = True) -> TcFrameInfo | None:
     """Parses a TC or USLP TC frame (detected from the version field) and checks
     the FECF; None if invalid. For USLP the TFDF header is checked and stripped
-    unless `open_tfdf` is False (SDLS order: parse -> SDLS -> tc_open_tfdf)."""
+    unless `open_tfdf` is False (SDLS order: parse -> SDLS -> tc_open_tfdf).
+    Same acceptance rules as the flight tc_parse (src/ccsds/tc.cpp), including the
+    SCID check: a frame addressed to another spacecraft is None (the GDS relays
+    external MCS frames only after this check, rebuilding them for SPACECRAFT_ID)."""
     if len(b) < TC_PRI_HDR_LEN + 2:
         return None
     if is_uslp(b):
@@ -192,7 +195,9 @@ def parse_tc_frame(b: bytes, open_tfdf: bool = True) -> TcFrameInfo | None:
     w0 = int.from_bytes(b[0:2], "big")
     w1 = int.from_bytes(b[2:4], "big")
     length = (w1 & 0x3FF) + 1
-    if (w0 >> 14) != 0 or length > len(b):
+    if (w0 >> 14) != 0 or (w0 & 0x3FF) != SPACECRAFT_ID:
+        return None
+    if length > len(b) or length < TC_PRI_HDR_LEN + 2 or length > TC_MAX_FRAME_LEN:
         return None
     if crc16_ccitt(b[:length - 2]) != int.from_bytes(b[length - 2:length], "big"):
         return None
@@ -206,9 +211,11 @@ def _parse_uslp_tc(b: bytes, open_tfdf: bool) -> TcFrameInfo | None:
         h = UslpHeader.unpack(b)
     except ValueError:
         return None
+    if h.scid != SPACECRAFT_ID:
+        return None
     ocf = 4 if h.ocf else 0
     length = h.frame_len
-    if length > len(b) or length < h.length + TC_TFDF_HDR_LEN + ocf + 2:
+    if length > len(b) or length < h.length + TC_TFDF_HDR_LEN + ocf + 2 or length > TC_MAX_FRAME_LEN:
         return None
     if crc16_ccitt(b[:length - 2]) != int.from_bytes(b[length - 2:length], "big"):
         return None

@@ -24,7 +24,9 @@ be used twice with one key:
   * the TC SN file is written atomically (temporary file, flush, fsync, rename) BEFORE the
     frame that uses the number leaves; a write that fails stops the frame;
   * the GDS and the hardline tool (dssq.cltu) share the file: every use re-reads it and
-    continues from the larger number;
+    continues from the larger number, under an exclusive flock() on `<file>.lock` held from
+    the read to the rename (two processes can never take the same number), and nothing ever
+    writes a number lower than the file holds; each writer uses its own temporary file;
   * a missing SN file means first use (0); an empty or unparsable one BLOCKS the TC uplink
     ("SDLS SN file corrupt") until a real-time HK that arrived in an AE-protected frame
     reports the spacecraft's sdls_last_sn: then sn = max(sn, sdls_last_sn) and the uplink is
@@ -53,8 +55,17 @@ import hashlib
 import hmac
 import os
 import re
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+# POSIX only (the station is Linux); elsewhere the SN file is used without the
+# inter-process lock (development hosts, one writer).
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX development hosts
+    fcntl = None  # type: ignore[assignment]
 
 from .aes_gcm import AesGcm, InvalidTag
 
@@ -85,11 +96,12 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     """Replaces `path` with `text` so that a crash or power loss leaves either the old
     or the new content, never a partial file: write a temporary file in the same
     directory, flush, fsync, rename over the target, then fsync the directory (the
-    rename itself must reach the disk). Mode 0600 (security state). Raises OSError."""
+    rename itself must reach the disk). Mode 0600 (security state). Raises OSError.
+    The temporary file has a unique name (mkstemp), so two processes writing the same
+    target never truncate or rename each other's temporary file."""
     p = Path(path)
-    tmp = p.with_name(p.name + ".tmp")
     data = text.encode("ascii")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=p.parent if str(p.parent) else ".", prefix=p.name + ".", suffix=".tmp")
     try:
         try:
             view = memoryview(data)
@@ -211,6 +223,21 @@ class SdlsSender:
         """"OK" or "BLOCKED: <reason>" (snapshot link.sdls.tc_sn_state)."""
         return "OK" if self.blocked is None else f"BLOCKED: {self.blocked}"
 
+    @contextlib.contextmanager
+    def _sn_lock(self) -> Iterator[None]:
+        """Exclusive inter-process lock on `<sn_file>.lock` (the GDS and dssq.cltu share the
+        SN file): held across re-read, compare and persist. OSError when it cannot be
+        taken (the frame must not be sent)."""
+        if self.sn_file is None or fcntl is None:
+            yield
+            return
+        fd = os.open(self.sn_file.with_name(self.sn_file.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)                               # closing the descriptor releases the lock
+
     def _persist(self, value: int) -> None:
         if self.sn_file is not None:
             atomic_write_text(self.sn_file, str(value))
@@ -237,32 +264,40 @@ class SdlsSender:
         Raises RuntimeError while blocked or at the 32-bit limit (a new key is then
         required: the number may not wrap), OSError when it cannot be persisted (the
         frame must not be sent)."""
-        if self.blocked is None:
-            self._resync()
-        if self.blocked is not None:
-            raise RuntimeError(self.blocked)
-        if self.sn >= U32_MAX:
-            raise RuntimeError("SDLS TC sequence number space exhausted: generate a new key "
-                               "(tools/gen_sdls_key.py)")
-        nxt = self.sn + 1
-        self._persist(nxt)
-        self.sn = nxt
-        return nxt
+        with self._sn_lock():
+            if self.blocked is None:
+                self._resync()
+            if self.blocked is not None:
+                raise RuntimeError(self.blocked)
+            if self.sn >= U32_MAX:
+                raise RuntimeError("SDLS TC sequence number space exhausted: generate a new key "
+                                   "(tools/gen_sdls_key.py)")
+            nxt = self.sn + 1
+            self._persist(nxt)
+            self.sn = nxt
+            return nxt
 
     def observe_spacecraft_sn(self, last_sn: int, protected: bool) -> str | None:
         """HK sdls_last_sn (the last TC SN the spacecraft accepted). Only an HK that came in
         an SDLS-protected frame counts: then sn = max(sn, last_sn), which releases a block.
         Returns an event text when something changed, else None. OSError if the new value
-        cannot be persisted (the block, if any, stays)."""
+        cannot be persisted (the block, if any, stays). The file is re-read under the lock
+        first: the HK lags the hardline tool's numbers, and writing max(in-memory, last_sn)
+        over a file another writer advanced would hand out its numbers again (GCM nonce
+        reuse under K_tc_ae)."""
         if not protected or isinstance(last_sn, bool) or not isinstance(last_sn, int) \
                 or not 0 <= last_sn <= U32_MAX:
             return None
-        if self.blocked is None and last_sn <= self.sn:
-            return None
-        new = max(self.sn, last_sn)
-        self._persist(new)
-        old, was_blocked = self.sn, self.blocked is not None
-        self.sn, self.blocked = new, None
+        with self._sn_lock():
+            if self.blocked is None:
+                self._resync()                      # never persist below the file's number
+            old = self.sn
+            if self.blocked is None and last_sn <= self.sn:
+                return None
+            new = max(self.sn, last_sn)
+            self._persist(new)
+            was_blocked = self.blocked is not None
+            self.sn, self.blocked = new, None
         if was_blocked:
             return (f"SDLS TC sequence number restored to {new} from a protected HK (sdls_last_sn {last_sn}): "
                     "TC uplink released")

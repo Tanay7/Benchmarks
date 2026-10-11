@@ -594,6 +594,7 @@ class AfcLoop:
                          "steps": 0, "sign_flips": 0, "rpc_failures": 0}
         self._configure(sf, bw_hz, freq_hz, airtime_s)
         cal = _float(static_offset_hz, "static offset")
+        self.static_cal_hz = cal                  # the calibration; static_hz = its clip to the current profile
         self.static_hz = round(max(-self.bound_hz, min(self.bound_hz, cal)))
         if abs(cal) > self.bound_hz:
             self._event(0.0, "WARN", f"AFC: static offset {cal:.0f} Hz clipped to +-{self.bound_hz:.0f} Hz "
@@ -816,7 +817,12 @@ class AfcLoop:
         self._configure(sf, bw_hz, freq_hz, airtime_s)
         self._hist.clear()
         self._check, self._step = [], None
-        self.static_hz = self._clamp(self.static_hz)
+        # Re-clipped from the calibration, not from the previous clip: a narrow profile and
+        # back must restore the full calibrated offset ([radio] freq_offset_cal_hz).
+        self.static_hz = self._clamp(self.static_cal_hz)
+        if abs(self.static_cal_hz) > self.bound_hz:
+            self._event(t, "WARN", f"AFC: static offset {self.static_cal_hz:.0f} Hz clipped to "
+                                   f"+-{math.floor(self.bound_hz)} Hz (80 % of FERR_L)")
         if self.state not in ("DISABLED", "FAULT"):
             self.state = "STATIC"
         target = self._clamp(self.correction_hz)

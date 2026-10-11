@@ -197,7 +197,39 @@ enum BeaconLevel : uint8_t {
 static const uint16_t kEvrSpectralEvent     = 0x0701;   // contract 13.6
 static const uint16_t kEvrLightSourceChange = 0x0702;   // contract 13.6
 static const uint8_t  kEvrSevWarn           = 2;        // EVR severities 0 DIAG .. 4 FATAL
-static const uint8_t  kResetCauseBrownout   = 4;        // HK reset_cause BROWNOUT (RCC BORRSTF)
+static const uint8_t  kResetCauseBrownout   = 4;        // HK reset_cause BROWNOUT (see classify_reset_cause)
+
+// Re-probe pacing for instruments absent at boot (C28), like the AS7265X driver's
+// kSpecRetryMs back-off: first try kMinMs after begin(), the interval doubling to kMaxMs
+// while something stays missing, back to kMinMs after an acquisition.
+struct ReprobeTimer {
+  static constexpr uint32_t kMinMs = 30000, kMaxMs = 600000;
+  uint32_t t0_ms = 0, interval_ms = kMinMs;
+  void begin(uint32_t now_ms) { t0_ms = now_ms; interval_ms = kMinMs; }
+  bool due(uint32_t now_ms) const { return now_ms - t0_ms >= interval_ms; }
+  void done(uint32_t now_ms, bool acquired) {
+    t0_ms = now_ms;
+    interval_ms = acquired ? kMinMs : (interval_ms >= kMaxMs / 2 ? kMaxMs : interval_ms * 2u);
+  }
+};
+
+// HK reset_cause from the RCC_CSR reset flags (abstracted here so the rule is host-tested)
+// and the "was running" marker. On the STM32U5 BORRSTF is also the power-on flag: the
+// always-on BOR provides POR/PDR and there is no PORRSTF (RM0456 RCC_CSR; ST HAL
+// stm32u5xx_hal_rcc.h RCC_RESET_FLAG_PWR = BORRSTF, "BOR or POR/PDR reset flag"), so a
+// cold power-up shows BORRSTF | PINRSTF. A brown-out is told apart by a marker the
+// flight writes into a backup register on every boot: a power-up resets the backup
+// domain (no marker), a dip below the BOR level with the MCU running keeps it.
+enum ResetFlag : uint8_t {
+  RST_F_IWDG = 0x01, RST_F_WWDG = 0x02, RST_F_SOFT = 0x04, RST_F_BOR = 0x08, RST_F_PIN = 0x10,
+};
+inline uint8_t classify_reset_cause(uint8_t flags, bool warm_marker) {
+  if (flags & (RST_F_IWDG | RST_F_WWDG)) return 3;                 // WATCHDOG
+  if (flags & RST_F_SOFT) return 2;                                // SOFTWARE
+  if (flags & RST_F_BOR) return warm_marker ? kResetCauseBrownout : 0;   // BROWNOUT / POWER-ON
+  if (flags & RST_F_PIN) return 1;                                 // PIN
+  return 255;                                                      // UNKNOWN
+}
 // FDIR flags whose RISING edge is an URGENT event: radio faults (configuration, AUX
 // timeout, E22 abnormal status incl. its PA over-temperature / under-voltage bits),
 // avionics over-temperature, command loss, sensor-bus failure, FARM-1 lockout. Edges,

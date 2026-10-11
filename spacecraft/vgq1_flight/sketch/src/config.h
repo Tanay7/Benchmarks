@@ -149,6 +149,10 @@ static const uint8_t  kE22NetId       = 0x00;
 // epoch; after this many seconds without one they go out under the null SA (clear,
 // flagged) with EVR 0x0121 until an epoch arrives.
 static const uint32_t kSdlsEpochWaitS = 120;
+// TC anti-replay (contract 5, C17): authentic frames are refused (EVR 0x0123) until the
+// EGSE restores the SN (set_sdls_sn, sent after sc_boot); after this many seconds without
+// a restore (EGSE absent) they are accepted again from the in-RAM counter, EVR 0x0124.
+static const uint32_t kSdlsSnWaitS = 120;
 
 // ---- Sensor bus: one I2C bus on the UNO Q header pins, no Qwiic, no multiplexer ----------
 //   Nicla Sense ME  0x2A  attitude reference unit (custom firmware, two 32-octet pages)

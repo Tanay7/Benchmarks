@@ -19,7 +19,9 @@ bool Rm3100::begin(I2cBus& bus, uint8_t addr, uint16_t cc) {
 }
 
 bool Rm3100::set_cycle_count(uint16_t cc) {
-  if (!bus_) return false;
+  // Never between start() and collect(): a register write clears DRDY (HSHAKE DRC0 = 1,
+  // manual 5.6.2) and the pending conversion would be scaled with the new gain (C29).
+  if (!bus_ || pending_) return false;
   const uint8_t b[6] = {(uint8_t)(cc >> 8), (uint8_t)cc, (uint8_t)(cc >> 8), (uint8_t)cc,
                         (uint8_t)(cc >> 8), (uint8_t)cc};
   if (!bus_->write(addr_, 0x04, b, 6)) return false;       // CCX, CCY, CCZ

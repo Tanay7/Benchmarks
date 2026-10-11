@@ -18,7 +18,7 @@ or enqueue operator requests under `GroundStation.lock`):
   frames, SDLS AUTH / AE) -> CLTU -> radio, in the quiet window after every received frame.
   SX126x: ground AFC (link.AfcLoop -> rf_foff), CCSDS TDM per pass (products.TdmRecorder).
 
-Runner (Phase B PB-8.4) drives one bounded iteration per step(): radio_read, ingest,
+Runner (Phase B PB-8.4) drives one bounded iteration per step(): register, radio_read, ingest,
 packets, outbox, jobs, afc, tdm, housekeeping, console - each inside ONE documented
 error boundary that catches Exception (never BaseException, so SIGTERM / SIGINT / SystemExit
 still stop the App), counts it in health.stage_errors, logs the traceback at most once per
@@ -39,6 +39,7 @@ import math
 import re
 import signal
 import socket
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -66,7 +67,8 @@ from .cmdparse import (CommandError, ParsedCommand, SequenceError, help_text, pa
 from .decom import Decommutator
 from .dictionary import (APID_CFDP, APID_CMDVER, APID_EVR, APID_HK, APID_MAG, APID_RF,
                          APID_RFSCAN, APID_SPEC, APID_SPECBURST, APID_TIMECORR, BEACON_LEVELS, CFDP_STATES,
-                         CMD_ERRORS, CMD_STAGES, CMDVER_SEQ_STORED, FARM_STATES, FDIR_BITS, FDIR_HIBERNATE,
+                         CMD_ERRORS, CMD_SOURCE_AD, CMD_SOURCE_BD, CMD_SOURCE_STORED, CMD_SOURCES, CMD_STAGES,
+                         FARM_STATES, FDIR_BITS, FDIR_HIBERNATE,
                          FDIR_TX_INHIBIT, FRAMINGS, MAG_FLAG_BITS, MODES, RADIO_FAULTS, RADIO_MODELS,
                          RESET_BROWNOUT, RESET_CAUSES, RF_FLAG_BITS, SDLS_SERVICES, SDLS_TM_STATES, SENSOR_BITS,
                          SEQ_STATES, decode_bits, decode_mag_bist)
@@ -83,7 +85,7 @@ from .spectral import LED_CUR_ALLOWED, LED_MAX_CODE, SpectralState
 log = logging.getLogger("dssq")
 
 SCHEMA_VERSION = 3
-STAGES = ("radio_read", "ingest", "packets", "outbox", "jobs", "afc", "tdm", "housekeeping", "console")
+STAGES = ("register", "radio_read", "ingest", "packets", "outbox", "jobs", "afc", "tdm", "housekeeping", "console")
 CONFIRM_EXPIRY_S = 120.0
 HIBERNATE_LOS_ALARM_S = 7200.0      # two maximum beacon intervals (HIBERNATE beacon_s <= 3600)
 HIB_CMD_GRACE_MIN_S = 30.0          # HK generated before a radiated HIBERNATE may still arrive this long
@@ -98,6 +100,8 @@ MISMATCH_FRAMES = 3                 # consecutive BAD_SPI / BAD_IV data frames -
 STAGE_LOG_EVERY_S = 60.0
 READ_FAIL_SLEEP_AFTER = 5
 E22_REOPEN_EVERY_S = 10.0
+REGISTER_RETRY_S = 10.0             # Router Bridge registrations retried (front panel, SX126x): App Lab's
+                                    # bridge fails fast for frontpanel.APP_RETRY_S after "router unreachable"
 CLOSE_BUDGET_S = 3.8
 EVR_LEVEL = {"DIAG": "INFO", "INFO": "INFO", "WARN": "WARN"}       # anything else -> ERROR
 SSR_FILE_RE = re.compile(r"ssr_p([0-9]{1,5})_([0-9]{1,10})\.bin")
@@ -207,7 +211,10 @@ class GroundStation:
         self.corr = SclkCorrelator()
         self.anomaly = AnomalyDetector()
         self.events: deque[dict[str, Any]] = deque(maxlen=400)
-        self.health: dict[str, Any] = {"stage_errors": {}, "last_error": None, "tdm_rejected": 0}
+        self.health: dict[str, Any] = {"stage_errors": {}, "last_error": None, "tdm_rejected": 0,
+                                       "archive_write_errors": 0, "archive_last_error": None}
+        self._archive_errors_seen = 0
+        self._archive_error_t: float | None = None
         self._stage_error_times: deque[float] = deque(maxlen=256)
         self._limited: dict[str, float] = {}
         # ---- SDLS (contract 5; F-64) ----
@@ -283,7 +290,7 @@ class GroundStation:
         self.allowed_channels = list(cfg["radio"]["allowed_channels"])
         lm = cfg["linkmgr"]
         self.link_mgr = LinkManager(float(lm["target_margin_db"]), float(lm["period_s"]), float(lm["holdoff_s"]),
-                                    int(lm["min_rate"]), int(lm["max_rate"]), model=self.settings.model,
+                                    lm.get("min_rate"), int(lm["max_rate"]), model=self.settings.model,
                                     measured=self.settings.measured, rx_boost=self.settings.rx_boost)
         self.link_mgr.mode = str(lm["mode"]).upper()
         self.link_change: dict[str, Any] | None = None
@@ -310,7 +317,8 @@ class GroundStation:
         fu = cfg["science"].get("field_ut")
         self.field_ut: float | None = float(fu) if isinstance(fu, (int, float)) and not isinstance(fu, bool) else None
         self.magcal_units: dict[int, dict[str, Any]] = {
-            u: {"collector": None, "collecting": False, "fit": None, "command": None} for u in (0, 1)}
+            u: {"collector": None, "collecting": False, "fit": None, "command": None, "averaged_skipped": 0}
+            for u in (0, 1)}
         self.seq_file: dict[str, Any] | None = None
         self.seq_uplink_state: dict[str, Any] = {"pending_confirm_id": None, "queued_ids": [], "first_slot": None}
         # ---- station I/O MCU (display/frontpanel.py) ----
@@ -319,6 +327,7 @@ class GroundStation:
         # ---- alarm ----
         self.alarm = "NONE"
         self.alarm_reasons: list[str] = []
+        self.alarm_red_count = 0                         # alarm_reasons[:alarm_red_count] are RED, the rest YELLOW
         self._hk_1hz_t = -1e18
         self._xtce_cache: tuple[tuple[str, str], bytes] | None = None
         self._xtce_lock = threading.Lock()
@@ -357,7 +366,7 @@ class GroundStation:
         t = time.time() if t is None else t
         try:
             line = self.archive.event(t, level, source, text)
-        except (OSError, ValueError) as e:              # archive disk full / closed: keep running
+        except (OSError, ValueError, sqlite3.Error) as e:   # archive closed (writes are best-effort)
             line = f"{level} {source} {text} (archive: {e})"
         self.events.append({"t": t, "level": level, "source": source, "text": text})
         log.log(logging.WARNING if level in ("WARN", "ERROR") else logging.INFO, line)
@@ -527,12 +536,15 @@ class GroundStation:
         pkts: list[SpacePacket] = []
         ex = self.extract.get(f.vcid)
         if ex is not None and opened is not None and opened.fhp is not None:
-            pkts = ex.push(opened.vcfc, opened.fhp, opened.data)
+            # I2: the frame's SDLS status goes with its octets; a status change on the VC is a
+            # discontinuity (partial packet dropped), and a packet is protected only when
+            # EVERY octet came from an AE-verified frame (packet spanning a null-SA frame: not).
+            pkts = ex.push(opened.vcfc, opened.fhp, opened.data, protected=protected)
         data_octets = sum(len(p.raw) for p in pkts)
         field = len(opened.data) if opened is not None else 0
         self._frame_done(f, ert, res.rs_corrected, rssi_raw, snr, ferr, info, data_octets, field, clcw_ok=True)
         for p in pkts:
-            self._on_packet(p, f.vcid, ert, protected)
+            self._on_packet(p, f.vcid, ert, p.protected is True)
 
     def _sdls_reject(self, verdict: str, f: TransferFrame, ert: float, info: dict[str, Any]) -> None:
         self.rx.on_sdls_reject(verdict)
@@ -747,13 +759,20 @@ class GroundStation:
                    f"(was {old}) for the link budget, sensitivity and power figures", now)
 
     def _on_cmdver(self, v: dict[str, Any], now: float) -> None:
-        if v.get("tc_seq") == CMDVER_SEQ_STORED:
-            stage = _label(CMD_STAGES, v.get("stage"))
+        # Routed on the command source (I1), never on tc_seq: a stored-sequence command has no
+        # FOP record (fop.on_cmdver returns None for it) and is reported here instead.
+        stage, src = _int_or_none(v.get("stage")), _int_or_none(v.get("cmd_source"))
+        if src == CMD_SOURCE_STORED:
+            label = _label(CMD_STAGES, stage)
             err = _label(CMD_ERRORS, v.get("error_code"))
-            text = f"stored sequence: opcode 0x{(v.get('opcode') or 0):02X} {stage}" + \
+            text = f"stored sequence: opcode 0x{(v.get('opcode') or 0):02X} {label}" + \
                    ("" if v.get("error_code") == 0 else f" ({err})")
             self.console(text)
-            self.event("INFO" if v.get("stage") == 2 else "WARN", "CMD", text, now)
+            self.event("INFO" if stage == 2 else "WARN", "CMD", text, now)
+            return
+        if src not in (CMD_SOURCE_AD, CMD_SOURCE_BD):
+            self._limited_event("cmdver_src", 60.0, "WARN", "CMD", f"CMDVER with unknown command source {src} "
+                                f"(opcode 0x{(v.get('opcode') or 0):02X}) ignored", now)
             return
         r = self.fop.on_cmdver(v, now)
         lc = self.link_change
@@ -785,10 +804,22 @@ class GroundStation:
         self.corr.add(self.partition, coarse + fine / 65536.0, scet)
 
     def _on_mag(self, v: dict[str, Any]) -> None:
+        # A MAG vector is the MEAN of `nsamples` 1 Hz readings over the MAG period (flight
+        # gen_mag). While the spacecraft rotates - which the collection requires - a mean lies
+        # inside the field ellipsoid and biases the soft-iron scale high; ob_rms (the RMS of
+        # |B|) does not reveal it. The flight calibrates instantaneous readings, so only
+        # unaveraged packets (nsamples == 1: PKTRATE MAG 1) are collected.
+        single = v.get("nsamples") == 1
         for unit, prefix in ((0, "ob_b"), (1, "ib_b")):
             u = self.magcal_units[unit]
             col = u["collector"]
             if not u["collecting"] or col is None:
+                continue
+            if not single:
+                u["averaged_skipped"] += 1
+                if u["averaged_skipped"] == 1:
+                    self.event("WARN", "MAGCAL", f"unit {unit}: MAG packets average {v.get('nsamples')} readings and "
+                               "are not collected - command PKTRATE MAG 1 (1 s, unaveraged) while calibrating")
                 continue
             vec = [v.get(f"{prefix}_{a}") for a in "xyz"]
             if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in vec):
@@ -1180,7 +1211,9 @@ class GroundStation:
                 if u["collector"] is None:
                     u["collector"] = MagCalCollector(unit, self.field_ut)
                 u["collecting"] = True
-                self.event("INFO", "MAGCAL", f"unit {unit} collection started by {source}: rotate the spacecraft")
+                u["averaged_skipped"] = 0
+                self.event("INFO", "MAGCAL", f"unit {unit} collection started by {source}: rotate the spacecraft "
+                           "(MAG at a 1 s period, PKTRATE MAG 1: averaged MAG packets are not collected)")
                 return {"status": "OK", "message": f"unit {unit} collecting"}
             if act == "stop":
                 u["collecting"] = False
@@ -1188,7 +1221,7 @@ class GroundStation:
             if act == "reset":
                 if u["collector"] is not None:
                     u["collector"].reset()
-                u.update(fit=None, command=None)
+                u.update(fit=None, command=None, averaged_skipped=0)
                 return {"status": "OK", "message": f"unit {unit} samples cleared"}
             if act == "fit":
                 if u["collector"] is None:
@@ -1326,6 +1359,11 @@ class GroundStation:
             res = rm.survey(*arg)
             with self.lock:
                 if res:
+                    # The survey reads the raw radio (E22 register / SX126x RSSI median): calibrated
+                    # here like every other noise reading ([radio] rssi_cal_offset_db), so the
+                    # bars compare with the RECEIVER noise floor. The ordering is unchanged.
+                    res["noise"] = [None if n is None else n + self.rx.rssi_cal_db for n in res["noise"]]
+                    res["calibrated"] = True
                     allowed = [(n, arg[0] + i) for i, n in enumerate(res["noise"])
                                if n is not None and arg[0] + i in self.allowed_channels]
                     res["quietest_allowed"] = min(allowed)[1] if allowed else None
@@ -1466,9 +1504,10 @@ class GroundStation:
 
     def _housekeeping_1hz(self, now: float) -> None:
         if self.link_mgr.mode != "OFF" and now - self.link_mgr.last_eval >= self.link_mgr.period_s:
-            frames = self.rx.frames_ok + self.rx.frames_lost
+            # FER over the margin's 10-minute window without the AOS frame's MCFC jump: the
+            # lifetime ratio counts every inter-pass gap as lost frames (rxstats.fer_window).
             rx = {"windows": {"10m": {"rssi": self.rx.w["10m"]["rssi"].stats(now)}},
-                  "frames": {"fer": (self.rx.frames_lost / frames) if frames else None}}
+                  "frames": {"fer": self.rx.fer_window(now)}}
             rec = self.link_mgr.evaluate(now, rx, self.settings.rate_code, self.rx.sc_rf.get("tx_power_code"))
             if rec:
                 self.event("INFO", "LINK", f"link manager AUTO: {rec['action']} {rec.get('value')} - {rec['why']}")
@@ -1492,8 +1531,22 @@ class GroundStation:
             self.event("ERROR", "SDLS", "TM epoch went backwards with a valid MAC: replayed recording or EGSE "
                        "boot-counter regression (possible GCM nonce reuse) - investigate; generate a new key if the "
                        "counter regressed")
+        self._archive_health(now)
         self._radio_link_events(now)
-        self.alarm, self.alarm_reasons = self._compute_alarm(now)
+        self.alarm, self.alarm_reasons, self.alarm_red_count = self._compute_alarm(now)
+
+    def _archive_health(self, now: float) -> None:
+        """Archive writes are best-effort (archive.py): a failed write (disk full) is counted
+        there and reported here - once a minute as an event, YELLOW while it lasts."""
+        a = self.archive
+        self.health["archive_write_errors"], self.health["archive_last_error"] = a.write_errors, a.last_error
+        if a.write_errors > self._archive_errors_seen:
+            self._archive_errors_seen = a.write_errors
+            self._archive_error_t = now
+            self._limited_event("archive_write", 60.0, "WARN", "ARCHIVE",
+                                f"archive write failed ({a.write_errors} so far): {a.last_error} - reception and "
+                                "commanding continue, the recording is incomplete")
+            self._archive_errors_seen = a.write_errors     # the event's own failed write is not news
 
     def _radio_link_events(self, now: float) -> None:
         b = self.radio_backend
@@ -1511,7 +1564,8 @@ class GroundStation:
             self._radio_down_since = now
         self._radio_connected = connected
 
-    def _compute_alarm(self, now: float) -> tuple[str, list[str]]:
+    def _compute_alarm(self, now: float) -> tuple[str, list[str], int]:
+        """(level, reasons RED first then YELLOW (PB-5.5), number of RED reasons)."""
         red: list[str] = []
         yellow: list[str] = []
         for pname, p in self.tlm.items():
@@ -1562,16 +1616,21 @@ class GroundStation:
             yellow.append("SDLS service mismatch suspected (spacecraft TM without AE header)")
         if self.model_mismatch:
             yellow.append(f"radio model mismatch: spacecraft {self.model_seen}, station {self.settings.model.name}")
+        hw = getattr(self.radio_backend, "hw_mismatch", None) if self.settings.model.packet_mode else None
+        if hw:                                           # I3: SX126x sketch chip / TCXO vs [radio.sx126x]
+            yellow.append(f"ground SX126x hardware mismatch: {hw}")
         if self.afc.state == "FAULT":
             yellow.append("AFC FAULT (frequency-error sign check failed twice): AFC RESET after checking")
         if self.key_error and (self.sdls_tc_configured or self.sdls_tm_configured):
             yellow.append(self.key_error)
         if self.sdls_tc.blocked:
             yellow.append(f"TC uplink BLOCKED: {self.sdls_tc.blocked}")
+        if self._archive_error_t is not None and now - self._archive_error_t < RECENT_WINDOW_S:
+            yellow.append(f"archive write errors in the last 60 s ({self.archive.last_error})")
         if any(now - t < RECENT_WINDOW_S for t in self._stage_error_times):
             yellow.append("GDS stage errors in the last 60 s (health.stage_errors)")
         reasons = red + yellow
-        return ("RED" if red else "YELLOW" if yellow else "NONE"), reasons
+        return ("RED" if red else "YELLOW" if yellow else "NONE"), reasons, len(red)
 
     def stage_failed(self, stage: str, exc: BaseException) -> bool:
         """Runner error boundary book-keeping; True when the traceback should be logged."""
@@ -1665,6 +1724,7 @@ class GroundStation:
         for u, d in self.magcal_units.items():
             col = d["collector"]
             units[str(u)] = {"collecting": d["collecting"], "coverage": col.live_coverage() if col else None,
+                             "averaged_skipped": d["averaged_skipped"],
                              "fit": d["fit"].as_dict() if d["fit"] is not None else None, "command": d["command"]}
         return {"field_ut": self.field_ut, "units": units,
                 "onboard": {"state": mc, "ob_active": None if mc is None else bool(mc & 1),
@@ -1697,6 +1757,7 @@ class GroundStation:
                             "lost": self.rx.per_vc.get(v, {}).get("lost", 0)}
             oid_vc = 63 if self.framing_seen.get("last") == "USLP" else 7
             vc["OID"] = {**self.vc_info["OID"], "lost": self.rx.per_vc.get(oid_vc, {}).get("lost", 0)}
+            n_corr = len(self.corr.samples)
             seq_hk = {"state": hk.get("seq_state"), "state_name": SEQ_STATES.get(hk.get("seq_state")),
                       "count": hk.get("seq_count"), "next_dt_s": hk.get("seq_next_dt_s")}
             snap: dict[str, Any] = {
@@ -1704,10 +1765,13 @@ class GroundStation:
                 "station": self.cfg["station"]["name"], "spacecraft": self.cfg["spacecraft"]["name"],
                 "uptime_s": now - self.t_start, "mode": self.mode,
                 "alarm": self.alarm, "alarm_reasons": list(self.alarm_reasons),
+                "alarm_red_count": self.alarm_red_count,
                 "beacon": self.beacon,
                 "rx": rx,
                 "radio": {**link.describe(self.settings), "model_seen": self.model_seen,
-                          "model_mismatch": self.model_mismatch, "rcu": bool(rm and rm.available),
+                          # The RCU drives the E22 M0/M1/AUX lines; a packet (SX126x) manager has none.
+                          "model_mismatch": self.model_mismatch,
+                          "rcu": bool(rm and rm.rcu is not None and rm.available),
                           "backend_available": self.radio_backend is not None,
                           "backend_error": self.radio_unavailable,
                           "ground_config": self.ground_radio,
@@ -1734,8 +1798,11 @@ class GroundStation:
                 "decoded": self._decoded(),
                 "time": {"partition": self.partition, "last_sclk": self.last_sclk,
                          "scet_of_last_sclk": self.corr.scet(self.last_sclk) if self.last_sclk is not None else None,
-                         "corr_samples": len(self.corr.samples), "drift_ppm": self.corr.drift_ppm,
-                         "residual_rms_ms": self.corr.residual_rms * 1000, "owlt_s": self.owlt_s,
+                         # PB-5.1 "nothing is invented": a drift needs two samples, a residual
+                         # three (a line through two points always fits exactly).
+                         "corr_samples": n_corr, "drift_ppm": self.corr.drift_ppm if n_corr >= 2 else None,
+                         "residual_rms_ms": self.corr.residual_rms * 1000 if n_corr >= 3 else None,
+                         "owlt_s": self.owlt_s,
                          "timecorr_key": self.timecorr_key_name, "sclk_estimate_s": self.sclk_estimate_s(now)},
                 "cop": {**self.fop.state(), "tc_framing": self.fop.framing,
                         "sdls_service": self.sdls_tc.service_name, "sdls_sn": self.sdls_tc.sn,
@@ -1762,7 +1829,7 @@ class GroundStation:
                 "station_io": {**self.station_io,
                                "connected": bool(self.station_io["connected_t"]
                                                  and now - self.station_io["connected_t"] < STATION_IO_STALE_S)},
-                "cmd_stages": CMD_STAGES, "cmd_errors": CMD_ERRORS,
+                "cmd_stages": CMD_STAGES, "cmd_errors": CMD_ERRORS, "cmd_sources": CMD_SOURCES,
             }
             out = json_safe(snap)
             assert isinstance(out, dict)
@@ -1851,6 +1918,9 @@ class Runner:
         self._read_fail_streak = 0
         self._last_console = time.time()
         self._e22_retry_t = 0.0
+        self._reg_retry_t = 0.0
+        self._fp_pending = False                   # FrontPanel registration failed: retried by _stage_register
+        self._sx_pending = False                   # SX126x backend attach failed: retried by _stage_register
         self._udp_stop = threading.Event()
         self._udp_sock: socket.socket | None = None
         self._udp_thread: threading.Thread | None = None
@@ -1885,7 +1955,9 @@ class Runner:
                     self.fp.start()
                 except BRIDGE_ERRORS as e:
                     self.fp = None
-                    gs.event("WARN", "GDS", f"front panel not started: {e}")
+                    self._fp_pending = True
+                    self._reg_retry_t = time.monotonic() + REGISTER_RETRY_S
+                    gs.event("WARN", "GDS", f"front panel not started: {e} (retried every {REGISTER_RETRY_S:.0f} s)")
             if model.packet_mode:
                 if self.link is None:
                     unavailable = "no Router Bridge for the SX126x radio (station MCU)"
@@ -1896,7 +1968,9 @@ class Runner:
                         self.radio.attach()
                     except BRIDGE_ERRORS as e:
                         self.radio = None
-                        unavailable = f"SX126x backend not attached: {e}"
+                        self._sx_pending = True
+                        self._reg_retry_t = time.monotonic() + REGISTER_RETRY_S
+                        unavailable = f"SX126x backend not attached: {e} (retried every {REGISTER_RETRY_S:.0f} s)"
             else:
                 unavailable = self._open_e22()
                 if self.link is not None and g["rcu"]:
@@ -1972,6 +2046,42 @@ class Runner:
         self._udp_thread.start()
 
     # ---------------------------------------------------------------- stages
+    def _stage_register(self) -> None:
+        """Retries the Router Bridge registrations that failed at start (App Lab: the first
+        use of arduino.app_utils.Bridge raises AppError when the router is not reachable
+        within 5 s). Without this the CardKB / annunciators and the SX126x radio would stay
+        disabled for the whole run although the router comes up seconds later."""
+        if not (self._fp_pending or self._sx_pending) or self.link is None or \
+                time.monotonic() < self._reg_retry_t:
+            return
+        self._reg_retry_t = time.monotonic() + REGISTER_RETRY_S
+        gs = self.gs
+        if self._fp_pending:
+            from .display.frontpanel import FrontPanel
+            try:
+                fp = FrontPanel(gs, self.link)
+                fp.start()
+            except BRIDGE_ERRORS as e:
+                log.info("front panel registration retry failed: %s", e)
+            else:
+                self.fp, self._fp_pending = fp, False
+                gs.event("INFO", "GDS", "front panel started (Router Bridge reachable)")
+        if self._sx_pending:
+            from .radio.sx126x import Sx126xBridge
+            try:
+                with gs.lock:
+                    foff = int(gs.afc.correction_hz)
+                radio = Sx126xBridge(self.link, self.cfg["radio"], freq_offset_hz=foff)
+                radio.attach()
+            except BRIDGE_ERRORS as e:
+                with gs.lock:
+                    gs.radio_unavailable = f"SX126x backend not attached: {e} (retried every " \
+                                           f"{REGISTER_RETRY_S:.0f} s)"
+            else:
+                self.radio, self._sx_pending = radio, False
+                gs.attach_radio(radio, RadioManager(radio, None), None)
+                gs.event("INFO", "RADIO", "SX126x backend attached (Router Bridge reachable)")
+
     def _stage_radio_read(self) -> None:
         if self.radio is None:
             self._data = b""

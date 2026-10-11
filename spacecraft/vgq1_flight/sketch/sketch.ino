@@ -29,25 +29,31 @@ static void note_failure(const char* name) {
   memcpy(g_bridge_failures + used + (used ? 1u : 0u), name, strlen(name) + 1u);
 }
 
-// --- EGSE (Linux) -> MCU services. provide_safe: executed in the loop thread between
-//     loop() iterations (__loopHook), so no locking is needed inside Flight (PB-4.1).
+// --- EGSE (Linux) -> MCU services (PB-4.1). Arduino_RouterBridge 0.4.3 runs a
+//     provide_safe handler on its own "bridge" thread (priority 5, 500-octet stack) as
+//     well as in __loopHook, NOT only in the loop thread (bridge.h update(): get_rpc()
+//     without the "__safe__" tag; see src/fsw/rpc_mailbox.h). Each handler therefore
+//     only hands its arguments to Flight's mailbox and waits for the loop, which runs
+//     the service on its own stack; nothing here may use a large local or block for
+//     long. Names and signatures are unchanged (the Linux side is not affected).
 static bool rpc_set_partition(int p) {          // SCLK partition = SDLS TM epoch
-  return g_fsw.egse_set_partition(p);
+  return g_fsw.rpc_set_partition(p);
 }
 static bool rpc_set_sdls_sn(int sn) {           // restores the SDLS TC anti-replay state
-  return g_fsw.egse_set_sdls_sn(sn);
+  return g_fsw.rpc_set_sdls_sn(sn);
 }
 static bool rpc_hardline_cltu(String hex) {     // bench "umbilical" commanding
-  return g_fsw.egse_hardline_cltu(hex);
+  return g_fsw.rpc_hardline_cltu(hex.c_str(), hex.length());
 }
 static int rpc_cfdp_pdu(String hex) {           // EGSE-built CFDP PDU for the relay (VC3)
-  return g_fsw.egse_cfdp_pdu(hex);
+  return g_fsw.rpc_cfdp_pdu(hex.c_str(), hex.length());
 }
 
 void setup() {
   // Setup-only blocking calls (PB-0.4): Bridge.begin() waits for the Linux-side
   // arduino-router (a cold power-up therefore waits for Linux to boot), and every
   // provide_safe() waits until the router has registered the name.
+  g_fsw.rpc_begin();                    // the mailbox exists before any handler can run
   if (!Bridge.begin()) note_failure("begin");
 #if VGQ_DEBUG_MONITOR
   // Bench debugging only: Monitor writes can block the flight loop (config.h).
