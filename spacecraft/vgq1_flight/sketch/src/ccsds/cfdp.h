@@ -7,7 +7,7 @@
 //  the ground detects gaps from the File Data offsets and verifies the result
 //  with the file checksum carried in the EOF PDU.
 //
-//  PDU header (§5.1), 10 octets with this mission's managed parameters:
+//  PDU header, 10 octets with this mission's managed parameters (bit widths):
 //    version 3 '001' | PDU type 1 (0 directive, 1 file data) | direction 1 (0 =
 //    toward the receiver) | transmission mode 1 (1 = unacknowledged) | CRC flag 1
 //    (0) | large-file flag 1 (0: 32-bit offsets and sizes) | PDU data field
@@ -15,31 +15,38 @@
 //    segment-metadata flag 1 (0) | transaction-sequence-number length 3 (3 = 4
 //    octets) | source entity ID 8 | transaction sequence number 32 | destination
 //    entity ID 8
-//  Metadata PDU (directive 0x07, §5.2.5): reserved 1 | closure requested 1 (0) |
+//  Metadata PDU (directive 0x07): reserved 1 | closure requested 1 (0) |
 //    reserved 2 | checksum type 4 (0 = modular) | file size 32 | source file name
 //    LV | destination file name LV (same name). No TLVs.
-//  File Data PDU (§5.3): offset 32 | data. No segment metadata.
-//  EOF PDU (directive 0x04, §5.2.2): condition code 4 | spare 4 | file checksum 32
-//    | file size 32 | [fault location: Entity ID TLV 06 01 <entity>, only when the
-//    condition code is not "no error" — VERIFY against 727.0-B-5 Table 5-6; the
-//    standard text could not be retrieved, field order cross-checked with the
-//    spacepackets/cfdp-py implementations of 727.0-B-5].
+//  File Data PDU: offset 32 | data. No segment metadata.
+//  EOF PDU (directive 0x04): condition code 4 | spare 4 | file checksum 32 |
+//    file size 32 | fault location (Entity ID TLV 06 01 <entity>), present only
+//    when the condition code is not "no error".
 //  The PDU data field length counts everything after the header (directive
 //  code + parameters, or offset + data).
 //
-//  Modular checksum (727.0-B-5 Annex F): the file is a sequence of big-endian
-//  4-octet words aligned on file offset 0 (the octet at offset o is byte
-//  o & 3 of word o & ~3; a short last word is zero-padded); the checksum is
-//  their sum mod 2^32. Each octet's contribution depends only on its offset,
-//  so the sum can be accumulated segment by segment in any order.
+//  Modular checksum (727.0-B-5 annex): the file is a sequence of big-endian
+//  4-octet words aligned on file offset 0 (the octet at offset o is byte o & 3
+//  of word o & ~3; a short last word is zero-padded); the checksum is their sum
+//  mod 2^32. Each octet's contribution depends only on its offset, so the sum
+//  can be accumulated segment by segment in any order.
+//
+//  Source of the field layouts: the standard's text could not be retrieved in
+//  the development environment (egress policy); every layout, directive code,
+//  condition code and the checksum were cross-checked against two independent
+//  727.0-B-5 implementations (spacepackets 0.32.0 and cfdp-py 0.7.0). VERIFY
+//  against the standard's EOF PDU table that the fault-location TLV is required
+//  (not merely permitted) for a non-zero condition code; the ground accepts an
+//  EOF with or without it.
 //
 //  Entities (managed parameters): 0x01 VGQ-1 (MCU and EGSE alike), 0x02 DSS-Q1.
 //  Transaction sequence numbers: MCU transfers < 0x80000000, EGSE-built
 //  transfers relayed through the MCU >= 0x80000000 (cfdp_tx.py), so one
 //  source entity never reuses a number.
 //
-//  Pure C++ (no Arduino, no heap), host-tested by tools/host_test/test_cfdp.cpp
-//  against the independent ground receiver ground/dssq/ccsds/cfdp.py.
+//  Pure C++ (no Arduino, no heap, no recursion, bounded loops), host-tested by
+//  tools/host_test/test_cfdp.cpp against the independent ground receiver
+//  ground/dssq/ccsds/cfdp.py.
 // =============================================================================
 #pragma once
 #include "ccsds_types.h"
@@ -52,35 +59,58 @@ static const uint8_t  kCfdpEntityVgq1     = 0x01;   // spacecraft (MCU and EGSE)
 static const uint8_t  kCfdpEntityDssq1    = 0x02;   // ground station
 static const uint32_t kCfdpEgseSeqFlag    = 0x80000000UL;  // EGSE-built transactions
 
-// File directive codes (727.0-B-5 Table 5-4) used by class 1
+// File directive codes used by class 1
 static const uint8_t kCfdpDirEof      = 0x04;
 static const uint8_t kCfdpDirMetadata = 0x07;
-// Condition codes (Table 5-5) this sender emits
+// Condition codes this sender emits
 static const uint8_t kCfdpCondNoError            = 0;
 static const uint8_t kCfdpCondFilestoreRejection = 4;   // the source stopped delivering octets
 static const uint8_t kCfdpCondCancel             = 15;  // cancel request received (CFDPCANCEL)
 static const uint8_t kCfdpChecksumModular        = 0;
-static const uint8_t kCfdpTlvEntityId            = 0x06; // fault location TLV type
+static const uint8_t kCfdpTlvEntityId            = 0x06; // fault-location TLV type
 
-// Segment sizes (data octets per File Data PDU). Flight: a 142-octet PDU in a
-// 154-octet Space Packet still fits one TM AE data field (158). EGSE relay: the
-// hex text of a 110-octet PDU must fit the Router Bridge 256-octet RPC buffer.
+// HK cfdp_state values (tlm_packets.h / ground dictionary)
+static const uint8_t kCfdpHkIdle  = 0;
+static const uint8_t kCfdpHkSsr   = 1;   // CfdpSender active (SSR contents)
+static const uint8_t kCfdpHkRelay = 2;   // CfdpRelayMonitor active (EGSE file)
+
+// Segment sizes (data octets per File Data PDU). Flight: the 142-octet PDU in a
+// 154-octet Space Packet fits one TM-AE frame data field (158 octets); in
+// USLP-AE mode (TFDZ 153) it spans two frames, which both framers support.
+// EGSE relay: every relayed PDU is <= 110 octets so its 220-character hex text
+// plus the msgpack request envelope fits the 256-octet Router Bridge RPC buffer.
 static const size_t kCfdpFlightSegLen = 128;
 static const size_t kCfdpRelaySegLen  = 96;
 static const size_t kCfdpMaxNameLen   = 64;         // mission limit (an LV allows 255)
-static const size_t kCfdpEofLen       = kCfdpHdrLen + 1 + 1 + 4 + 4 + 3;          // 23 with TLV
-static const size_t kCfdpMetadataMaxLen = kCfdpHdrLen + 1 + 1 + 4 + 2 * (1 + kCfdpMaxNameLen); // 146
-static const size_t kCfdpFileDataMaxLen = kCfdpHdrLen + 4 + kCfdpFlightSegLen;    // 142
+static const size_t kCfdpMetadataFixedLen = kCfdpHdrLen + 1 + 1 + 4 + 2;               // 18 + names
+static const size_t kCfdpMetadataMaxLen = kCfdpMetadataFixedLen + 2 * kCfdpMaxNameLen; // 146
+static const size_t kCfdpFileDataMaxLen = kCfdpHdrLen + 4 + kCfdpFlightSegLen;         // 142
+static const size_t kCfdpEofMaxLen      = kCfdpHdrLen + 1 + 1 + 4 + 4 + 3;             // 23 with TLV
+static const size_t kCfdpRelayMaxPduLen = kCfdpHdrLen + 4 + kCfdpRelaySegLen;          // 110
+// Longest file name an EGSE Metadata PDU can carry within kCfdpRelayMaxPduLen.
+static const size_t kCfdpRelayMaxNameLen = (kCfdpRelayMaxPduLen - kCfdpMetadataFixedLen) / 2;  // 46
 // Output buffer that holds any PDU this module builds.
 static const size_t kCfdpMaxPduLen =
     kCfdpMetadataMaxLen > kCfdpFileDataMaxLen ? kCfdpMetadataMaxLen : kCfdpFileDataMaxLen;
+// A relay with no PDU for this long is considered over (EGSE stopped or died);
+// matches the ground receiver's default inactivity limit.
+static const uint32_t kCfdpRelayTimeoutMs = 600000UL;
 
 // Transaction sequence number of the n-th MCU transfer in SCLK partition
-// `partition` (the EGSE boot counter): unique across reboots, always < 2^31.
-// OR in kCfdpEgseSeqFlag for a transfer the EGSE builds (CFDPPUT source 1/2).
+// `partition` (the EGSE boot counter): unique across 32768 reboots, always
+// < 2^31. OR in kCfdpEgseSeqFlag for a transfer the EGSE builds (CFDPPUT 1/2).
 inline uint32_t cfdp_make_seq(uint16_t partition, uint16_t n) {
   return ((uint32_t)(partition & 0x7FFFu) << 16) | n;
 }
+
+// Mission file-name rule (both ends): 1..max_len characters from
+// [A-Z a-z 0-9 . _ -], not starting with '.', so a name can never form a path.
+bool cfdp_name_ok(const uint8_t* name, size_t n, size_t max_len = kCfdpMaxNameLen);
+
+// Writes "ssr_p<partition>_<sclk_s>.bin" (decimal, NUL-terminated) into `out`.
+// Returns the length without the NUL (at most 25), or 0 (and an empty string)
+// when `cap` is too small; a 26-octet buffer always suffices.
+size_t cfdp_ssr_file_name(char* out, size_t cap, uint16_t partition, uint32_t sclk_s);
 
 struct CfdpHeader {
   bool     file_data = false;       // PDU type: 0 file directive, 1 file data
@@ -94,12 +124,13 @@ struct CfdpHeader {
   uint8_t  dest = kCfdpEntityDssq1;
 };
 
-// Writes the 10-octet header; returns kCfdpHdrLen.
+// Writes the 10-octet header into `p` (>= kCfdpHdrLen octets); returns
+// kCfdpHdrLen (0 for a null pointer).
 size_t cfdp_put_header(uint8_t* p, const CfdpHeader& h);
 // Reads a header in this mission's profile. Returns kCfdpHdrLen, or 0 when `len`
 // is short, the version is not '001', the CRC / large-file / segment-metadata
 // flags are set, the entity IDs are not 1 octet or the sequence number not 4
-// octets, or the data field runs past `len`.
+// octets, or the data field runs past `len` (trailing octets are allowed here).
 size_t cfdp_get_header(const uint8_t* p, size_t len, CfdpHeader& h);
 
 // Modular checksum accumulation: returns `sum` plus the contribution of `n`
@@ -107,11 +138,12 @@ size_t cfdp_get_header(const uint8_t* p, size_t len, CfdpHeader& h);
 uint32_t cfdp_checksum(uint32_t sum, uint32_t offset, const uint8_t* data, size_t n);
 
 // PDU builders. Each writes one complete PDU (header included) into `out` and
-// returns its length, or 0 when it does not fit in `cap` (or the name is longer
-// than kCfdpMaxNameLen). `name` is a NUL-terminated ASCII file name used as both
-// the source and the destination file name.
+// returns its length, or 0 when it does not fit in `cap` or an argument is out
+// of range (name failing cfdp_name_ok, null pointers). `name` is a
+// NUL-terminated file name used as both the source and destination file name.
 size_t cfdp_build_metadata(uint8_t* out, size_t cap, uint8_t source, uint32_t seq, uint8_t dest,
                            uint32_t file_size, const char* name);
+// `data` may point into `out` itself (the sender reads segments in place).
 size_t cfdp_build_file_data(uint8_t* out, size_t cap, uint8_t source, uint32_t seq, uint8_t dest,
                             uint32_t offset, const uint8_t* data, size_t n);
 // condition != kCfdpCondNoError appends the fault-location Entity ID TLV naming
@@ -138,8 +170,9 @@ struct CfdpPdu {
   uint32_t checksum = 0;
   bool     has_fault_entity = false; uint8_t fault_entity = 0;
 };
-// Parses a Metadata, File Data or EOF PDU. Returns false for a bad header, a
-// truncated or inconsistent parameter field, or any other directive.
+// Parses exactly one Metadata, File Data or EOF PDU occupying all `len`
+// octets. Returns false for a bad header, trailing octets, a truncated or
+// inconsistent parameter field, or any other directive.
 bool cfdp_parse(const uint8_t* pdu, size_t len, CfdpPdu& out);
 
 // ---------------------------------------------------------------------------
@@ -148,10 +181,13 @@ bool cfdp_parse(const uint8_t* pdu, size_t len, CfdpPdu& out);
 class CfdpSource {
  public:
   virtual ~CfdpSource() {}
-  // File size in octets; read once by CfdpSender::begin() and then held fixed.
+  // File size in octets; read once by CfdpSender::begin() and then held fixed
+  // (the SSR source must not change while a transfer runs: recording paused).
   virtual uint32_t size() = 0;
-  // Copies up to `n` octets from file offset `off` into `dst`; returns the count
-  // (0 = cannot deliver: the sender ends the transaction with condition 4).
+  // Copies up to `n` (<= kCfdpFlightSegLen) octets from file offset `off` into
+  // `dst` and returns the count; must never write more than `n` octets.
+  // 0 = cannot deliver: the sender ends the transaction with condition 4.
+  // Called at most once per CfdpSender::next_pdu(); must not block.
   virtual size_t read(uint32_t off, uint8_t* dst, size_t n) = 0;
 };
 
@@ -168,10 +204,11 @@ class CfdpSender {
   enum State : uint8_t { IDLE = 0, METADATA = 1, FILE_DATA = 2, EOF_PENDING = 3 };
 
   // Starts transaction `seq` for `source` (not owned; must stay valid until
-  // idle). `name` is copied. `max_bytes` > 0 sends only the first max_bytes
-  // octets (the Metadata file size is then the truncated size). seg_len =
-  // data octets per File Data PDU (1..kCfdpFlightSegLen). Returns false (and
-  // changes nothing) while a transaction is active or for bad arguments.
+  // idle). `name` is copied and must pass cfdp_name_ok(). `max_bytes` > 0 sends
+  // only the first max_bytes octets (the Metadata file size is then the
+  // truncated size). seg_len = data octets per File Data PDU
+  // (1..kCfdpFlightSegLen). Returns false (and changes nothing) while a
+  // transaction is active or for bad arguments.
   bool begin(uint32_t seq, const char* name, CfdpSource* source, uint32_t max_bytes = 0,
              size_t seg_len = kCfdpFlightSegLen, uint8_t source_entity = kCfdpEntityVgq1,
              uint8_t dest_entity = kCfdpEntityDssq1);
@@ -189,7 +226,9 @@ class CfdpSender {
   uint32_t file_size() const { return size_; }
   uint32_t sent() const { return off_; }            // file octets sent so far
   uint32_t checksum() const { return sum_; }        // over the octets sent so far
-  // Octets sent / file size in 0.1 % (1000 once the EOF is out; HK cfdp_progress).
+  const char* name() const { return name_; }
+  // Octets sent / file size in 0.1 % (1000 once a no-error EOF is out;
+  // HK cfdp_progress_permille).
   uint16_t progress_permille() const;
   // Condition code of the last EOF sent (valid once idle again).
   uint8_t last_condition() const { return last_cond_; }
@@ -212,16 +251,22 @@ class CfdpSender {
 // can report cfdp_seq / cfdp_progress_permille while cfdp_state = 2.
 // RPC handler order: acceptable() -> queue the Space Packet -> observe() (only
 // once it was queued; observe() is idempotent, so an EGSE retry of the same PDU
-// changes nothing).
+// changes nothing). The main loop calls expired() and reset()s a relay that
+// went silent, so HK never reports a dead relay as running.
 // ---------------------------------------------------------------------------
 class CfdpRelayMonitor {
  public:
-  // True for a well-formed class-1 Metadata / File Data / EOF PDU from VGQ-1 to
-  // DSS-Q1, toward the receiver, with an EGSE sequence number (>= 0x80000000)
-  // and at most kCfdpRelaySegLen data octets. Anything else must be refused.
+  // True for a well-formed class-1 Metadata / File Data / EOF PDU of at most
+  // kCfdpRelayMaxPduLen octets from VGQ-1 to DSS-Q1, toward the receiver, with
+  // an EGSE sequence number (>= 0x80000000), 1..kCfdpRelaySegLen data octets
+  // and (Metadata) modular checksum and a name passing cfdp_name_ok().
+  // Anything else must be refused.
   static bool acceptable(const uint8_t* pdu, size_t len);
-  void observe(const uint8_t* pdu, size_t len);
-  void reset() { active_ = false; done_ = false; seq_ = 0; size_ = 0; hi_ = 0; cond_ = 0; }
+  // `now_ms` = MCU millisecond clock (wraps; only differences are used).
+  void observe(const uint8_t* pdu, size_t len, uint32_t now_ms = 0);
+  // True while active() and no PDU was observed for `timeout_ms`.
+  bool expired(uint32_t now_ms, uint32_t timeout_ms = kCfdpRelayTimeoutMs) const;
+  void reset() { active_ = false; done_ = false; seq_ = 0; size_ = 0; hi_ = 0; cond_ = 0; last_ms_ = 0; }
   bool active() const { return active_; }           // a PDU was relayed and no EOF yet
   uint32_t seq() const { return seq_; }
   // Highest File Data end offset / Metadata file size in 0.1 % (1000 after a
@@ -231,7 +276,7 @@ class CfdpRelayMonitor {
 
  private:
   bool active_ = false, done_ = false;
-  uint32_t seq_ = 0, size_ = 0, hi_ = 0;
+  uint32_t seq_ = 0, size_ = 0, hi_ = 0, last_ms_ = 0;
   uint8_t cond_ = kCfdpCondNoError;
 };
 
