@@ -8,13 +8,22 @@ checksum; the Python Sender and the EGSE cfdp_tx.py must reproduce the flight
 PDUs octet for octet. The receiver is then driven through every outcome
 (out-of-order / duplicate data, gaps, corruption, cancel, inactivity) with a
 deterministic clock. Flight-dependent tests are skipped without a C++ toolchain.
+
+The last section tests the spacecraft EGSE (spacecraft/vgq1_flight/python/main.py,
+Phase B PB-6.3) with a fake Router Bridge and a fake `arduino.app_utils` injected
+into sys.modules: SCLK partition / SDLS TM epoch rules, crash-safe counter files,
+the CFDP relay loop, the hardline queue, the archive and the user-loop boundary.
 """
+import importlib.util
 import itertools
 import json
+import logging
+import os
 import random
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -107,14 +116,14 @@ def test_checksum_known_values():
 
 def test_checksum_against_reference_any_split_any_order():
     rnd = random.Random(727)
-    for n in list(range(0, 13)) + [999, 1000, 4096 + 3]:
+    for n in [*range(13), 999, 1000, 4096 + 3]:
         data = rnd.randbytes(n)
         ref = ref_checksum(data)
         assert modular_checksum(data) == ref
         assert cfdp_tx.modular_checksum(data) == ref
         for _ in range(20):
             cuts = sorted(rnd.randrange(n + 1) for _ in range(rnd.randrange(1, 6)))
-            edges = [0] + cuts + [n]
+            edges = [0, *cuts, n]
             segs = [(a, data[a:b]) for a, b in itertools.pairwise(edges)]
             rnd.shuffle(segs)                                # any order, unaligned offsets
             s1 = s2 = 0
@@ -317,9 +326,9 @@ def test_out_of_order_and_duplicate_file_data(tmp_path):
     md, fds, eof = pdus[0], pdus[1:-1], pdus[-1]
     rnd = random.Random(5)
     rnd.shuffle(fds)
-    stream = fds[:5] + [md] + fds[5:] + fds[:3] + [fds[7]]          # Metadata late, duplicates
+    stream = [*fds[:5], md, *fds[5:], *fds[:3], fds[7]]             # Metadata late, duplicates
     rx = Receiver(tmp_path, clock=Clock())
-    events = feed(rx, stream + [eof, eof])                          # duplicate EOF too
+    events = feed(rx, [*stream, eof, eof])                          # duplicate EOF too
     t = only(rx)
     assert t["state"] == COMPLETE and t["checksum_ok"] and t["duplicates"] == 4
     assert (tmp_path / "ooo.bin").read_bytes() == data
@@ -553,7 +562,7 @@ def test_cfdp_tx_retry_cancel_and_failing_source(tmp_path):
     assert isinstance(e, Eof) and e.condition == COND_CANCEL and e.file_size == 192
     assert e.checksum == ref_checksum(data[:192]) and e.fault_entity == 1
     rx = Receiver(tmp_path, clock=Clock())
-    feed(rx, sent + [eof])
+    feed(rx, [*sent, eof])
     t = only(rx)
     assert t["state"] == CANCELLED and t["checksum_ok"] is True and t["size"] == 500
     # a file that shrinks under the sender ends the transfer with condition 4
@@ -567,3 +576,579 @@ def test_cfdp_tx_retry_cancel_and_failing_source(tmp_path):
     e = parse_pdu(pdus[-1])
     assert isinstance(e, Eof) and e.condition == COND_FILESTORE_REJECTION and e.file_size == 96
     assert len(pdus) == 3 and tx.condition == COND_FILESTORE_REJECTION
+
+
+# --- Spacecraft EGSE (spacecraft/vgq1_flight/python/main.py, PB-6.3) ---------------------
+
+EGSE_DIR = ROOT / "spacecraft" / "vgq1_flight" / "python"
+_spec = importlib.util.spec_from_file_location("vgq1_egse_main", EGSE_DIR / "main.py")
+assert _spec is not None and _spec.loader is not None
+egse_main = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(egse_main)          # module level only defines things (no App, no bridge)
+
+
+class FakeAppError(Exception):
+    """Stands in for arduino.app_utils.AppError (derives from Exception only)."""
+
+
+class FakeBridge:
+    """Router Bridge double. Provided handlers are invoked through `mcu()`, which marks
+    the dispatcher path: a Bridge.call from there raises RuntimeError, as the real
+    arduino.app_utils.Bridge does. `answers[name]` is a list consumed one per call (an
+    exception instance is raised) or a callable(*params); the default answer is True."""
+
+    def __init__(self):
+        self.handlers: dict = {}
+        self.calls: list[tuple[str, tuple]] = []
+        self.answers: dict = {}
+        self.dispatching = False
+        self.provide_errors: list[BaseException] = []
+
+    def provide(self, name, fn):
+        if self.provide_errors:
+            raise self.provide_errors.pop(0)
+        self.handlers[name] = fn
+
+    def call(self, name, *params, timeout=10):
+        if self.dispatching:
+            raise RuntimeError("Bridge.call from a provided handler")
+        assert timeout is not None and timeout <= 5
+        self.calls.append((name, params))
+        ans = self.answers.get(name, True)
+        if callable(ans):
+            ans = ans(*params)
+        elif isinstance(ans, list):
+            ans = ans.pop(0) if ans else True
+        if isinstance(ans, BaseException):
+            raise ans
+        return ans
+
+    def mcu(self, name, *args):
+        """The MCU sends a notification (runs the handler on the 'dispatcher')."""
+        self.dispatching = True
+        try:
+            self.handlers[name](*args)
+        finally:
+            self.dispatching = False
+
+    def called(self, name):
+        return [p for n, p in self.calls if n == name]
+
+
+class EgseClock:
+    """Wall and monotonic time for the EGSE; sleep() advances both."""
+
+    def __init__(self):
+        self.t = 1_791_700_000.0             # 2026-10-11 UTC
+        self.m = 1000.0
+
+    def wall(self):
+        return self.t
+
+    def mono(self):
+        return self.m
+
+    def sleep(self, s):
+        self.advance(s)
+
+    def advance(self, s):
+        self.t += s
+        self.m += s
+
+
+def make_egse(data: Path, bridge: FakeBridge | None = None, start: bool = True):
+    bridge = bridge or FakeBridge()
+    clk = EgseClock()
+    eg = egse_main.Egse(data, bridge, call_errors=(*egse_main.CALL_ERRORS, FakeAppError),
+                        clock=clk.wall, monotonic=clk.mono, sleep=clk.sleep)
+    if start:
+        eg.start()
+        eg.loop_once()                       # registers the handlers, first set_partition
+    return eg, bridge, clk
+
+
+def core_status(epoch: int, **kw) -> str:
+    """sc_status as the flight formatter prints it (tlm_packets.cpp format_sc_status)."""
+    d = {"mode": "SAFE", "sclk": 120, "part": epoch, "epoch": epoch, "tm_state": 1 if epoch else 2,
+         "tm_sn": 7, "frames": 42, "oid": 3, "mcfc": 42, "period_ms": 6000, "busy_ms": 1267,
+         "duty_pct": 21.1, "model": 1, "fr": 0, "ch": 23, "code": 2, "pwr": 0, "lbt": 0, "tx": 1,
+         "inhibit": 0, "hib": 0, "beacon": 2}
+    d.update(kw)
+    return json.dumps(d, separators=(",", ":"))
+
+
+def x_status(**kw) -> str:
+    """sc_status_x as the flight formatter prints it (format_sc_status_x)."""
+    d = {"sclk": 120, "ul_rssi": -97, "ul_snr_cdb": 32767, "noise": -118, "farm": 1, "vr": 5, "acc": 4,
+         "rej": 1, "fdir": 0, "sns": 897, "vc0": 120, "vc1": 0, "vc2": 0, "vc3": 154, "ssr_pm": 12,
+         "bus_c": 24.5, "rf_fault": 0, "tc_svc": 2, "tm_svc": 2, "cfdp": 2, "cfdp_seq": 2147483655,
+         "cfdp_pm": 500, "seq": 1, "tc_rescued": 0, "evr_nd": 0, "cadu_nd": 0, "emit_ref": 0,
+         "relay_ref": 0, "stretch": 100}
+    d.update(kw)
+    return json.dumps(d, separators=(",", ":"))
+
+
+def boot_file(data: Path) -> str:
+    return (data / "boot_count.txt").read_text()
+
+
+def test_egse_partition_new_value_on_start_boot_and_epoch0(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="vgq1.egse")
+    eg, br, clk = make_egse(tmp_path)
+    assert set(br.handlers) == {"tm_cadu", "sc_status", "sc_status_x", "sc_evr", "sc_boot", "sdls_sn",
+                                "cfdp_req", "cfdp_cancel"}
+    assert "first start or counter lost" in caplog.text                     # rule 6
+    assert br.called("set_partition") == [(1,)] and boot_file(tmp_path) == "1\n"
+    assert eg.epoch_accepted == 1 and eg.epoch_pending is None
+    # rule 1: every MCU boot gets a NEW value, persisted before it is offered
+    br.mcu("sc_boot", 3)
+    eg.loop_once()
+    assert br.called("set_partition")[-1] == (2,) and boot_file(tmp_path) == "2\n"
+    # rule 2: a status that still says epoch 0 right after the accepted call is stale ...
+    br.mcu("sc_status", core_status(0))
+    eg.loop_once()
+    assert len(br.called("set_partition")) == 2
+    # ... later, epoch 0 means the MCU booted unseen: a new value
+    clk.advance(egse_main.EPOCH0_GRACE_S + 1)
+    br.mcu("sc_status", core_status(0))
+    eg.loop_once()
+    assert br.called("set_partition")[-1] == (3,) and boot_file(tmp_path) == "3\n"
+    br.mcu("sc_status", core_status(3))
+    eg.loop_once()
+    # rule 4: a restarted EGSE never re-sends an old value
+    _, br2, _ = make_egse(tmp_path)
+    assert br2.called("set_partition") == [(4,)] and boot_file(tmp_path) == "4\n"
+
+
+def test_egse_partition_same_value_after_a_raised_call(tmp_path):
+    br = FakeBridge()
+    br.answers["set_partition"] = [TimeoutError("t"), ConnectionError("c"), FakeAppError("router"),
+                                   RuntimeError("r"), ValueError("v"), True]
+    eg, br, clk = make_egse(tmp_path, br)
+    for _ in range(120):                                  # back-off 1 .. 8 s between retries
+        eg.loop_once()
+    assert br.called("set_partition") == [(1,)] * 6       # rule 3: the SAME value every time
+    assert eg.epoch_accepted == 1 and boot_file(tmp_path) == "1\n"
+    # an epoch-0 status while a request is in flight issues nothing new
+    br.answers["set_partition"] = [TimeoutError("t")] * 3
+    br.mcu("sc_boot", 0)
+    clk.advance(egse_main.EPOCH0_GRACE_S + 1)
+    br.mcu("sc_status", core_status(0))
+    eg.loop_once()
+    assert eg.epoch_pending == 2 and boot_file(tmp_path) == "2\n"
+    # a later sc_boot always issues a new value, even over a pending one
+    br.mcu("sc_boot", 3)
+    br.answers["set_partition"] = []
+    eg.loop_once()
+    assert br.called("set_partition")[-1] == (3,) and eg.epoch_accepted == 3
+    # an answer that is not a bool is not an acceptance: the same value is retried
+    br.answers["set_partition"] = [1, True]
+    br.mcu("sc_boot", 0)
+    for _ in range(10):
+        eg.loop_once()
+    assert br.called("set_partition")[-2:] == [(4,), (4,)] and eg.epoch_accepted == 4
+
+
+def test_egse_partition_refusal_raises_counter_above_reported_epoch(tmp_path, caplog):
+    (tmp_path / "boot_count.txt").write_text("5\n")       # restored from an old backup
+    br = FakeBridge()
+    br.answers["set_partition"] = [False]
+    eg, br, clk = make_egse(tmp_path, br)
+    assert br.called("set_partition") == [(6,)]
+    assert "MCU refused epoch 6" in caplog.text and "boot counter regressed" in caplog.text
+    br.mcu("sc_status", core_status(40))                  # the MCU's current epoch
+    eg.loop_once()
+    assert boot_file(tmp_path) == "40\n"                  # raised to the reported epoch
+    clk.advance(egse_main.REFUSAL_WAIT_S)
+    eg.loop_once()
+    assert br.called("set_partition") == [(6,), (41,)]    # a NEW value above it, never 6 again
+    assert eg.epoch_accepted == 41 and boot_file(tmp_path) == "41\n"
+
+
+def test_egse_three_refusals_stop_issuing(tmp_path, caplog):
+    br = FakeBridge()
+    br.answers["set_partition"] = lambda p: False
+    eg, br, _ = make_egse(tmp_path, br)
+    for _ in range(30):
+        eg.loop_once()
+    assert br.called("set_partition") == [(1,), (2,), (3,)]
+    assert "epoch negotiation failed: check data/boot_count.txt and the flight key" in caplog.text
+    br.mcu("sc_boot", 0)                                  # nothing more is offered
+    for _ in range(5):
+        eg.loop_once()
+    assert len(br.called("set_partition")) == 3 and eg.epoch_stopped
+    assert boot_file(tmp_path) == "3\n"
+
+
+def test_egse_epoch_space_exhausted_at_65534(tmp_path, caplog):
+    (tmp_path / "boot_count.txt").write_text("65533")
+    eg, br, _ = make_egse(tmp_path)
+    assert br.called("set_partition") == [(65534,)]       # the last valid value
+    br.mcu("sc_boot", 0)
+    eg.loop_once()
+    assert len(br.called("set_partition")) == 1 and boot_file(tmp_path) == "65534\n"
+    assert "SDLS TM epoch space exhausted: generate a new key" in caplog.text
+    # a status claiming an epoch beyond the range is never adopted
+    br.mcu("sc_status", core_status(65535))
+    eg.loop_once()
+    assert boot_file(tmp_path) == "65534\n"
+
+
+def test_egse_counter_files_atomic_and_never_reset(tmp_path, monkeypatch, caplog):
+    # an empty or corrupt counter is NOT read as 0: nothing is issued
+    for bad in ("", "12abc", "\xff"):
+        d = tmp_path / f"c{len(bad)}{bad[:1].isdigit()}"
+        d.mkdir()
+        (d / "boot_count.txt").write_bytes(bad.encode("latin-1"))
+        with pytest.raises(egse_main.CounterFileError):
+            egse_main.read_int_file(d / "boot_count.txt")
+        eg, br, _ = make_egse(d)
+        assert br.called("set_partition") == [] and eg.boot_count is None
+        assert (d / "boot_count.txt").read_bytes() == bad.encode("latin-1")
+    assert "are NOT issued" in caplog.text
+    # write = tmp + fsync + replace; a failing replace leaves the old value and sends nothing
+    d = tmp_path / "ok"
+    d.mkdir()
+    (d / "boot_count.txt").write_text("9\n")
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(egse_main.os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1])
+
+    def broken_replace(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(egse_main.os, "replace", broken_replace)
+    eg, br, clk = make_egse(d)
+    assert br.called("set_partition") == [] and (d / "boot_count.txt").read_text() == "9\n"
+    assert eg.stats["write_errors"] >= 1
+    monkeypatch.undo()
+    clk.advance(10)
+    eg.loop_once()                                        # retried once the disk works again
+    assert br.called("set_partition") == [(10,)] and (d / "boot_count.txt").read_text() == "10\n"
+    assert synced and not (d / "boot_count.txt.tmp").exists()
+
+
+def test_egse_migrates_v2_counters(tmp_path, caplog):
+    app = tmp_path / "app"
+    (app / "python" / "egse_data").mkdir(parents=True)
+    (app / "python" / "egse_data" / "boot_count.txt").write_text("17")
+    (app / "python" / "egse_data" / "sdls_last_sn.txt").write_text("-5")
+    data = egse_main.prepare_data_dir(app)
+    assert data == app / "data" and (data / "boot_count.txt").read_text() == "17"
+    assert "migrated boot_count.txt" in caplog.text
+    _, br, _ = make_egse(data)
+    assert br.called("set_partition") == [(18,)] and br.called("set_sdls_sn") == [(-5,)]
+    # once data/ holds a counter, the old location is never read again
+    (app / "python" / "egse_data" / "boot_count.txt").write_text("99")
+    egse_main.prepare_data_dir(app)
+    assert (data / "boot_count.txt").read_text() == "18\n"
+
+
+def test_egse_sdls_sn_persisted_and_restored(tmp_path):
+    (tmp_path / "sdls_last_sn.txt").write_text("123")
+    br = FakeBridge()
+    br.answers["set_sdls_sn"] = [TimeoutError("t"), True]
+    eg, br, clk = make_egse(tmp_path, br)
+    clk.advance(1)
+    eg.loop_once()
+    assert br.called("set_sdls_sn") == [(123,), (123,)]
+    br.mcu("sdls_sn", -2147483000)                         # int32 two's complement of a u32 SN
+    br.mcu("sdls_sn", 2**31)                               # outside int32: ignored
+    br.mcu("sdls_sn", True)                                # wrong type: ignored
+    eg.loop_once()
+    assert (tmp_path / "sdls_last_sn.txt").read_text() == "-2147483000\n"
+    assert eg.stats["bad_notifications"] == 2
+    br.mcu("sc_boot", 1)
+    eg.loop_once()
+    assert br.called("set_sdls_sn")[-1] == (-2147483000,)
+
+
+RELAY_REQ_SEQ = 0x80000007
+
+
+def _relay_world(tmp_path, n=1000, name="evr_20261011.jsonl"):
+    data = make_data(n, 21)
+    (tmp_path / name).write_bytes(data)
+    eg, br, clk = make_egse(tmp_path)
+    return data, eg, br, clk
+
+
+def test_egse_relay_loop_busy_errors_and_receiver(tmp_path):
+    data, eg, br, _ = _relay_world(tmp_path)
+    answers = [1, 0, 0, TimeoutError("t"), 1, ConnectionError("c"), 1]
+    br.answers["cfdp_pdu"] = lambda hx: answers.pop(0) if answers else 1
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
+    for _ in range(200):
+        eg.loop_once()
+        if eg.relay is None:
+            break
+    offered = [bytes.fromhex(p[0]) for p in br.called("cfdp_pdu")]
+    assert all(len(p) <= cfdp_tx.MAX_PDU_LEN for p in offered)
+    # PDU 2 was offered 4 times (busy, busy, no answer, queued), PDU 3 twice; nothing skipped
+    accepted = [offered[0], offered[4], offered[6], *offered[7:]]
+    assert offered[1] == offered[2] == offered[3] == offered[4] and offered[5] == offered[6]
+    assert accepted == list(cfdp_tx.RelayTransfer(RELAY_REQ_SEQ, "evr_20261011.jsonl", data))
+    assert eg.stats["relay_completed"] == 1 and eg.stats["relay_busy"] == 2
+    assert eg.stats["relay_pdus"] == len(accepted)
+    rx = Receiver(tmp_path / "files", clock=Clock())
+    feed(rx, accepted)
+    t = only(rx)
+    assert t["state"] == COMPLETE and t["origin"] == "EGSE" and t["seq"] == RELAY_REQ_SEQ
+    assert (tmp_path / "files" / "evr_20261011.jsonl").read_bytes() == data
+
+
+def test_egse_relay_backoff_follows_retry_delay(tmp_path):
+    _, eg, br, clk = _relay_world(tmp_path)
+    offers: list[float] = []
+
+    def busy_three_times(hx):
+        offers.append(clk.m)
+        return 0 if len(offers) <= 3 else 1
+
+    br.answers["cfdp_pdu"] = busy_three_times
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
+    for _ in range(20):
+        eg.loop_once()
+    gaps = [b - a for a, b in itertools.pairwise(offers[:4])]
+    for i, g in enumerate(gaps):                            # 0.25, 0.5, 1.0 s (+ one 0.2 s pass)
+        assert cfdp_tx.retry_delay_s(i) <= g <= cfdp_tx.retry_delay_s(i) + egse_main.LOOP_SLEEP_S + 1e-9
+    assert offers[4] - offers[3] == pytest.approx(egse_main.LOOP_SLEEP_S)   # queued: next PDU at once
+
+
+def test_egse_relay_refused_cancel_and_supersede(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="vgq1.egse")
+    _, eg, br, _ = _relay_world(tmp_path, n=2000)
+    # -1: the MCU does not authorise it -> abandoned at once
+    br.answers["cfdp_pdu"] = [1, -1]
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
+    for _ in range(5):
+        eg.loop_once()
+    assert eg.relay is None and eg.stats["relay_abandoned"] == 1 and len(br.called("cfdp_pdu")) == 2
+    # cancel: a foreign seq is ignored, the matching one turns the next PDU into EOF(cancel)
+    br.calls.clear()
+    br.answers["cfdp_pdu"] = lambda hx: 1
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ + 2},0")
+    for _ in range(4):
+        eg.loop_once()                                     # Metadata + 3 File Data
+    br.mcu("cfdp_cancel", str(RELAY_REQ_SEQ + 9))
+    eg.loop_once()
+    assert "ignored" in caplog.text and eg.relay is not None
+    br.mcu("cfdp_cancel", str(RELAY_REQ_SEQ + 2))
+    for _ in range(3):
+        eg.loop_once()
+    pdus = [bytes.fromhex(p[0]) for p in br.called("cfdp_pdu")]
+    eof = parse_pdu(pdus[-1])
+    assert isinstance(eof, Eof) and eof.condition == COND_CANCEL and eof.file_size == eg_sent(pdus)
+    assert eg.relay is None and eg.stats["relay_cancelled"] == 1
+    rx = Receiver(tmp_path / "rx", clock=Clock())
+    feed(rx, pdus)
+    assert only(rx)["state"] == CANCELLED and only(rx)["checksum_ok"] is True
+    # a new request while one runs: the MCU dropped the old one (RelayGate NONE), it is replaced
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ + 3},0")
+    eg.loop_once()
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ + 3},0")         # a repeat changes nothing
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ + 4},0")
+    eg.loop_once()
+    assert eg.relay is not None and eg.relay.seq == RELAY_REQ_SEQ + 4 and "superseded" in caplog.text
+    # an MCU reboot ends the relay (its authorisation is RAM only)
+    br.mcu("sc_boot", 0)
+    eg.loop_once()
+    assert eg.relay is None and eg.stats["relay_abandoned"] == 3
+
+
+def eg_sent(pdus):
+    return sum(len(parse_pdu(p).data) for p in pdus if p[0] & 0x10)
+
+
+def test_egse_relay_eof_refused_after_unanswered_offer_is_complete(tmp_path):
+    _, eg, br, _ = _relay_world(tmp_path, n=50)
+    br.answers["cfdp_pdu"] = [1, 1, TimeoutError("lost answer"), -1]   # Metadata, data, EOF x2
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
+    for _ in range(10):
+        eg.loop_once()
+    assert eg.relay is None and eg.stats["relay_completed"] == 1 and eg.stats["relay_abandoned"] == 0
+
+
+def test_egse_relay_without_source_file_sends_nothing(tmp_path, caplog):
+    eg, br, _ = make_egse(tmp_path)
+    br.mcu("cfdp_req", f"2,{RELAY_REQ_SEQ},0")
+    br.mcu("cfdp_req", "3,2147483655,0")                    # source 3 does not exist
+    br.mcu("cfdp_req", "1,7,0")                             # an MCU sequence number
+    br.mcu("cfdp_req", "1,2147483655,0," + "9" * 40)        # too long
+    br.mcu("cfdp_cancel", "-1")
+    eg.loop_once()
+    assert br.called("cfdp_pdu") == [] and "nothing sent" in caplog.text
+    assert eg.stats["bad_notifications"] == 4
+
+
+def test_egse_status_merge_logs_and_board(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="vgq1.egse")
+    eg, br, clk = make_egse(tmp_path)
+    br.mcu("sc_status", core_status(1))
+    br.mcu("sc_status_x", x_status(evr_nd=3))
+    br.mcu("sc_status_x", x_status(evr_nd=3))
+    br.mcu("sc_status_x", x_status(evr_nd=5, cadu_nd=1))
+    br.mcu("sc_status", '{"mode":"SAFE","epoch":NaN}')       # rejected: not finite
+    br.mcu("sc_status", '{"mode":["x"]}')                    # rejected: not a scalar
+    br.mcu("sc_status", "{" * 600)
+    clk.advance(egse_main.BOARD_PERIOD_S)
+    eg.loop_once()
+    lines = (tmp_path / "sc_status_20261011.jsonl").read_text().splitlines()
+    recs = [json.loads(ln) for ln in lines]
+    assert [r["kind"] for r in recs] == ["core", "x", "x", "x"]
+    assert recs[0]["utc"].startswith("2026-10-11T") and recs[0]["epoch"] == 1 and recs[3]["evr_nd"] == 5
+    assert eg.stats["bad_notifications"] == 3
+    assert caplog.text.count("EVRs not forwarded by the MCU") == 2    # once per change
+    assert "1 CADU copies not forwarded" in caplog.text
+    board = "\n".join(egse_main.render_board(eg.status_core, eg.status_x, eg.board_info()))
+    for want in ("E22-400T33D", "433.125 MHz", "FARM OPEN(1)", "TM AE(2)", "PROTECTED(1) epoch 1",
+                 "RELAYING EGSE FILE(2)", "50.0 %", "IMPORTANT(2)", "ARMED(1)", "x1.00", "EVRs 5",
+                 "CADUs 1", "UPLINK RSSI -97 dBm  SNR n/a", "VC3 154 B", "SSR 1.2 %"):
+        assert want in board, want
+    assert "VGQ-1 SPACECRAFT EGSE" in caplog.text            # printed every 10 s
+
+
+def test_egse_cadu_archive_and_vc_counts(tmp_path):
+    from dssq.archive import read_cadu_file
+    from dssq.ccsds.tm import build_frame, build_oid_frame, build_uslp_frame, build_uslp_oid_frame, encode_cadu
+    eg, br, clk = make_egse(tmp_path)
+    frames = [build_frame(0, 1, 1, 0, bytes(188), 0), build_frame(3, 2, 1, 0, bytes(188), 0),
+              build_oid_frame(3, 1, 0), build_uslp_frame(1, 1, 0, bytes(183), 0),
+              build_uslp_oid_frame(1, 0)]
+    cadus = [encode_cadu(f) for f in frames]
+    for c in cadus:
+        br.mcu("tm_cadu", c.hex().upper())
+    br.mcu("tm_cadu", cadus[0].hex()[:-2])                  # short
+    br.mcu("tm_cadu", "zz" * 236)                           # not hex
+    br.mcu("tm_cadu", 5)                                    # wrong type
+    br.mcu("tm_cadu", "00", "11")                           # wrong arity
+    eg.loop_once()
+    assert eg.vc_counts == {"TM VC0": 1, "TM VC3": 1, "TM VC7": 1, "USLP VC1": 1, "USLP VC63": 1}
+    got = list(read_cadu_file(tmp_path / "cadu_20261011.bin"))
+    assert [c for _, _, c in got] == cadus and got[0][1] is None
+    assert abs(got[0][0] - clk.t) < 2 and eg.stats["cadus"] == 5 and eg.stats["bad_notifications"] == 4
+    assert egse_main.cadu_vc(b"\x00" * 236) == "?"
+
+
+def test_egse_evr_log(tmp_path):
+    eg, br, _ = make_egse(tmp_path)
+    br.mcu("sc_evr", "0x0A05 INFO CFDP relay seq 2147483655 EOF cond 0")
+    br.mcu("sc_evr", "0x0001 INFO ")
+    br.mcu("sc_evr", "garbage\x07text")
+    br.mcu("sc_evr", "x" * 300)
+    eg.loop_once()
+    recs = [json.loads(ln) for ln in (tmp_path / "evr_20261011.jsonl").read_text().splitlines()]
+    assert recs[0] == {"utc": recs[0]["utc"], "id": "0x0A05", "severity": "INFO",
+                       "text": "CFDP relay seq 2147483655 EOF cond 0"}
+    assert recs[1]["id"] == "0x0001" and recs[1]["text"] == ""
+    assert recs[2] == {"utc": recs[2]["utc"], "id": None, "severity": None, "text": "garbage?text"}
+    assert len(recs) == 3 and eg.stats["evrs"] == 3
+    # the event log is CFDPPUT source 1: the relay picks it up
+    assert cfdp_tx.source_file(tmp_path, 1).name == "evr_20261011.jsonl"
+
+
+def test_egse_handlers_never_call_the_bridge(tmp_path):
+    eg, br, _ = make_egse(tmp_path)
+    br.answers["cfdp_pdu"] = lambda hx: 1
+    (tmp_path / "evr_20261011.jsonl").write_text("x")
+    malformed = [None, 1.5, b"\x00", "", "{}", "0" * 600, -1, 2**40]
+    n_before = len(br.calls)
+    for name in br.handlers:                                # FakeBridge.call raises on this path
+        for arg in malformed:
+            br.mcu(name, arg)
+        br.mcu(name)
+    br.mcu("sc_boot", 0)
+    br.mcu("cfdp_req", f"1,{RELAY_REQ_SEQ},0")
+    br.mcu("cfdp_cancel", str(RELAY_REQ_SEQ))
+    assert len(br.calls) == n_before                        # handlers only validated and enqueued
+    eg.loop_once()                                          # the loop makes the calls
+    assert br.called("set_partition")[-1] == (2,) and br.called("cfdp_pdu")
+
+
+def test_egse_duty_exception_does_not_escape_the_loop(tmp_path, caplog):
+    eg, br, _ = make_egse(tmp_path)
+    (tmp_path / "hardline_queue.txt").write_text("c0ffee\n")
+
+    def boom(now):
+        raise KeyError("injected")
+
+    eg._duty_inbox = boom
+    eg._duty_cfdp = boom
+    eg.loop_once()                                          # must not raise
+    eg.loop_once()
+    assert eg.duty_errors["inbox"] == 2 and eg.duty_errors["cfdp"] == 2
+    assert br.called("hl_cltu") == [("c0ffee",)]            # later duties still ran
+    assert caplog.text.count("EGSE duty inbox failed") == 1  # traceback once per minute
+    # registration retried until the router is reachable (AppError at first use)
+    br2 = FakeBridge()
+    br2.provide_errors = [FakeAppError("router unreachable"), ValueError("provided by another client")]
+    (tmp_path / "r").mkdir()
+    eg2, br2, _ = make_egse(tmp_path / "r", br2)
+    assert br2.handlers == {}
+    for _ in range(40):
+        eg2.loop_once()
+    assert len(br2.handlers) == 8 and eg2.registered == set(br2.handlers)
+
+
+def test_egse_hardline_queue(tmp_path, caplog):
+    eg, br, _ = make_egse(tmp_path)
+    q = tmp_path / "hardline_queue.txt"
+    q.write_text("# bench commands\n" + "EB90" * 5 + "\n\nabc\nzz\n" + "00" * 111 + "\n" + "c0ffee\n")
+    br.answers["hl_cltu"] = [TimeoutError("t"), True]
+    for _ in range(30):
+        eg.loop_once()
+    assert br.called("hl_cltu") == [("EB90" * 5,), ("c0ffee",)]     # the unconfirmed one is NOT re-sent
+    assert "NOT re-sent" in caplog.text and caplog.text.count("hardline line") == 3
+    assert not q.exists() and not (tmp_path / "hardline_queue.txt.work").exists()
+    q.write_text("aa\n")
+    eg.loop_once()
+    assert br.called("hl_cltu")[-1] == ("aa",)
+
+
+def test_egse_main_under_fake_app_lab(tmp_path, monkeypatch):
+    br = FakeBridge()
+    passes = []
+
+    class FakeApp:
+        @staticmethod
+        def run(user_loop):
+            for i in range(4):
+                if i == 1:
+                    br.mcu("sc_boot", 2)
+                    br.mcu("sc_status", core_status(0))
+                user_loop()
+                passes.append(i)
+
+    class BridgeFacade:
+        @staticmethod
+        def call(name, *params, timeout=10):
+            return br.call(name, *params, timeout=timeout)
+
+        @staticmethod
+        def provide(name, fn):
+            br.provide(name, fn)
+
+    arduino = types.ModuleType("arduino")
+    app_utils = types.ModuleType("arduino.app_utils")
+    app_utils.App, app_utils.Bridge, app_utils.AppError = FakeApp, BridgeFacade, FakeAppError
+    arduino.app_utils = app_utils
+    monkeypatch.setitem(sys.modules, "arduino", arduino)
+    monkeypatch.setitem(sys.modules, "arduino.app_utils", app_utils)
+    data = tmp_path / "data"
+    assert egse_main.main(["--data", str(data)]) == 0
+    assert passes == [0, 1, 2, 3] and len(br.handlers) == 8
+    assert br.called("set_partition") == [(1,), (2,)] and (data / "boot_count.txt").read_text() == "2\n"
+    # outside App Lab (no arduino package) the entry point refuses with exit code 2
+    monkeypatch.setitem(sys.modules, "arduino", None)
+    monkeypatch.delitem(sys.modules, "arduino.app_utils")
+    assert egse_main.main(["--data", str(data)]) == 2
+
+
+def test_egse_app_folder_packaging_rules():
+    app = EGSE_DIR.parent
+    assert not (EGSE_DIR / "requirements.txt").exists()      # App Lab would pip-install it (F-13)
+    fields = dict(line.split(": ", 1) for line in (app / "app.yaml").read_text(encoding="utf-8").splitlines())
+    assert set(fields) == {"name", "icon", "description"}     # no ports: the EGSE serves nothing
+    assert fields["description"].startswith("VGQ-1 flight software (E22-400T33D default radio")
+    assert ": " not in fields["description"] and " #" not in fields["description"]   # plain YAML scalar
+    assert app == egse_main.APP                                  # data lives in <App>/data (contract 18)

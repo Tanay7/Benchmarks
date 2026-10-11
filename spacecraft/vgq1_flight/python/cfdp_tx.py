@@ -2,11 +2,12 @@
 #  VGQ-1 EGSE — CFDP class-1 file sender (CCSDS 727.0-B-5, unacknowledged)
 #
 #  Builds the PDUs of the EGSE files the ground asks for with CFDPPUT source 1
-#  (EGSE event log, egse_data/evr_YYYYMMDD.jsonl) or 2 (latest CADU archive,
-#  egse_data/cadu_YYYYMMDD.bin). The PDUs travel to the MCU one by one through
-#  the Router Bridge RPC cfdp_pdu(hex) -> 1 queued / 0 busy; the MCU checks each
-#  one (CfdpRelayMonitor::acceptable) and downlinks it as a TM Space Packet
-#  (APID 0x030, VC 3) exactly like its own SSR transfers.
+#  (EGSE event log, <App>/data/evr_YYYYMMDD.jsonl) or 2 (latest CADU archive,
+#  <App>/data/cadu_YYYYMMDD.bin). The PDUs travel to the MCU one by one through
+#  the Router Bridge RPC cfdp_pdu(hex) -> 1 queued / 0 busy / -1 refused
+#  (Phase B PB-4.1); the MCU admits only the transaction it authorised
+#  (RelayGate, PB-2.5) and downlinks each PDU as a TM Space Packet (APID 0x030,
+#  VC 3) exactly like its own SSR transfers. main.py drives the transfer.
 #
 #  Byte-identical to the flight builders (spacecraft/vgq1_flight/sketch/src/
 #  ccsds/cfdp.cpp) in the mission profile: 10-octet header (version '001',
@@ -26,9 +27,10 @@
 #  Use from the App Lab loop (never from a Bridge handler):
 #      tx = cfdp_tx.start_request(DATA, "1,2147483655,64")   # from cfdp_req
 #      pdu = tx.current()                 # None once the EOF was queued
-#      if Bridge.call("cfdp_pdu", pdu.hex(), timeout=5) == 1: tx.advance()
-#      else: wait cfdp_tx.retry_delay_s(attempt) and offer the same PDU again
-#      on cfdp_cancel: tx.cancel()        # the next current() is EOF(cancel)
+#      r = Bridge.call("cfdp_pdu", pdu.hex(), timeout=5)
+#      r == 1: tx.advance(); r == 0: wait cfdp_tx.retry_delay_s(attempt) and offer
+#      the same PDU again; r == -1: the MCU refuses this transaction, abandon it
+#      on cfdp_cancel "<seq>": tx.cancel() # the next current() is EOF(cancel)
 # =============================================================================
 from __future__ import annotations
 
@@ -52,6 +54,7 @@ SOURCE_EVENT_LOG, SOURCE_CADU_ARCHIVE = 1, 2
 SOURCE_PATTERNS = {SOURCE_EVENT_LOG: "evr_*.jsonl", SOURCE_CADU_ARCHIVE: "cadu_*.bin"}
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
+_NUMBER_RE = re.compile(r"[0-9]{1,10}|0[xX][0-9A-Fa-f]{1,8}", re.ASCII)
 
 
 def name_ok(name: str) -> bool:
@@ -153,6 +156,16 @@ class RelayTransfer:
         return self._stage == "DONE"
 
     @property
+    def stage(self) -> str:
+        """METADATA, FILE_DATA, EOF or DONE (the PDU current() offers)."""
+        return self._stage
+
+    @property
+    def offering_eof(self) -> bool:
+        """current() has built the EOF PDU: the last one of the transfer."""
+        return self._stage == "EOF" and self._pdu is not None
+
+    @property
     def progress_permille(self) -> int:
         if self.done and self.condition == COND_NO_ERROR:
             return 1000
@@ -223,13 +236,34 @@ class RelayTransfer:
             self.advance()
 
 
+def _number(field: str) -> int:
+    """One unsigned field of an MCU notification: decimal (what the flight prints with
+    %u / %lu) or 0x-prefixed hexadecimal, at most 32 bits. Python's int() alone would
+    also accept signs, underscores and Unicode digits, none of which the MCU sends."""
+    f = field.strip()
+    if not _NUMBER_RE.fullmatch(f):
+        raise ValueError(f"{field!r} is not an unsigned 32-bit number")
+    value = int(f, 16) if f[:2] in ("0x", "0X") else int(f, 10)
+    if value > 0xFFFFFFFF:
+        raise ValueError(f"{field!r} exceeds 32 bits")
+    return value
+
+
+def parse_seq(text: str) -> int:
+    """The MCU's cfdp_cancel notification "<seq>" (decimal, C-22) -> an EGSE
+    transaction sequence number (>= 0x80000000). Raises ValueError."""
+    seq = _number(text)
+    _check_seq(seq)
+    return seq
+
+
 def parse_request(text: str) -> tuple[int, int, int]:
     """The MCU's cfdp_req notification "<source>,<seq>,<max_kib>" ->
     (source 1|2, seq >= 0x80000000, max_kib 0..65535). Raises ValueError."""
     parts = text.strip().split(",")
     if len(parts) != 3:
         raise ValueError(f"cfdp_req {text!r}: expected '<source>,<seq>,<max_kib>'")
-    source, seq, max_kib = (int(p, 0) for p in parts)
+    source, seq, max_kib = (_number(p) for p in parts)
     if source not in SOURCE_PATTERNS:
         raise ValueError(f"cfdp_req source {source}: the EGSE serves 1 (event log) and 2 (CADU archive)")
     _check_seq(seq)
