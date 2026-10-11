@@ -14,8 +14,8 @@
 // transparent radio on that UART would transmit those bytes over the air and a
 // log line printed mid-CADU would corrupt the frame.
 // Default: USART3 = Serial3, routed to the header pins silk-screened SDA/SCL
-// (PB11 = RX, PB10 = TX). Those pins are then a UART — never call Wire.begin();
-// all sensors live on the Qwiic bus (Wire1). Set to 1 to use D0/D1 instead.
+// (PB11 = RX, PB10 = TX). Those pins are then a UART — never call Wire.begin()
+// (Wire = I2C2 shares PB10/PB11). Set to 1 to use D0/D1 instead.
 #ifndef VGQ_RADIO_ON_SERIAL1
 #define VGQ_RADIO_ON_SERIAL1 0
 #endif
@@ -37,14 +37,16 @@ static const int PIN_E22_M0  = 2;     // D2 (PB3)
 static const int PIN_E22_M1  = 3;     // D3 (PB0)
 static const int PIN_E22_AUX = 7;     // D7 (PB2)  input, module busy = LOW
 
-// ---- Sensor bus: four instruments, one Qwiic I2C bus, no multiplexer ---------------
+// ---- Sensor bus: one I2C bus on the UNO Q header pins, no Qwiic, no multiplexer ----
 //   Nicla Sense ME  0x2A  attitude reference unit (custom firmware, two 32-octet pages)
-//   Nicla Sense Env 0x21  Arduino firmware (Arduino_NiclaSenseEnv library)
 //   AS7265X         0x49  SparkFun Spectral Triad (18 channels, 410-940 nm)
 //   RM3100 outboard 0x20  science magnetometer at the boom tip   (SA1 = 0, SA0 = 0)
 //   RM3100 inboard  0x23  OPTIONAL, boom mid-point, auto-detected (SA1 = 1, SA0 = 1)
-// NEVER strap an RM3100 to 0x21: that is the Nicla Sense Env.
-#define SENSOR_WIRE Wire1                       // Qwiic connector = I2C4 (PD12 SCL / PD13 SDA), 3.3 V
+// Wire2 = I2C3 on header pins A4 (SDA, PC1) and A5 (SCL, PC0): ArduinoCore-zephyr
+// variant arduino_uno_q_stm32u585xx, i2cs = <&i2c2>, <&i2c4>, <&i2c3>. Wire1 (I2C4)
+// is the Qwiic connector and is NOT used. A4/A5 are 3.3 V only (ABX00162): every
+// pull-up on this bus goes to 3.3 V.
+#define SENSOR_WIRE Wire2                       // header A4 = SDA (PC1), A5 = SCL (PC0)
 static const uint32_t kI2cClockHz    = 100000;  // 100 kHz: tolerant of a long boom cable
 static const uint8_t  kRm3100ObAddr  = 0x20;
 static const uint8_t  kRm3100IbAddr  = 0x23;

@@ -1,6 +1,7 @@
 // I2C bus access with error accounting and bus recovery (the FDIR "I2C_BUS"
-// response). All four instruments have distinct addresses, so there is no
-// multiplexer: one Qwiic bus (Wire1, 3.3 V) carries everything.
+// response). All instruments have distinct addresses, so there is no
+// multiplexer: one bus on the UNO Q header pins (Wire2 = I2C3, A4 SDA / A5 SCL,
+// 3.3 V) carries everything. No Qwiic connector is used anywhere.
 #pragma once
 #include <Arduino.h>
 #include <Wire.h>
