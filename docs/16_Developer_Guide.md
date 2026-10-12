@@ -250,7 +250,7 @@ All of 4.1, plus:
 ### 4.5 Add a sensor (instrument)
 
 1. Hardware first: a unique 7-bit address on the `Wire2` bus (today 0x20, 0x23, 0x2A, 0x49 are
-   taken), 3.3 V supply and pull-ups only (A4/A5 are not 5 V tolerant), no Qwiic (D-13); update
+   taken), 3.3 V supply and pull-ups only (A4/A5 are not 5 V tolerant), no Qwiic (only the AS7265X may use it, D-13); update
    [03_Hardware_Integration.md](03_Hardware_Integration.md).
 2. Driver `src/drivers/<sensor>.*` on `I2cBus` (never `Wire` directly): register map from the
    datasheet with the section cited, a timeout on every wait, non-blocking (start / poll / result,

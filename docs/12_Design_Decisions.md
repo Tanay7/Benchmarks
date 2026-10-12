@@ -53,7 +53,7 @@ hardware**; every such item is listed in [20_Known_Limitations.md](20_Known_Limi
 | [D-10](#d-10) | SX126x SPI module as the long-range option, LoRa profiles 0-7 | Hardware |
 | [D-11](#d-11) | E22 UART on `Serial3` (header SDA/SCL pins), not on D0/D1 | Hardware |
 | [D-12](#d-12) | External 10 kOhm pull-ups on M0/M1; T37S board jumpers removed | Hardware |
-| [D-13](#d-13) | One sensor bus: `Wire2` = I2C3 on A4/A5, no Qwiic, no multiplexer | Hardware |
+| [D-13](#d-13) | One sensor bus: `Wire2` = I2C3 on A4/A5 (the AS7265X optionally on the Qwiic socket), no multiplexer | Hardware |
 | [D-14](#d-14) | Instrument set: Nicla Sense ME, AS7265X, one or two RM3100 | Hardware |
 | [D-15](#d-15) | One CardKB on the VENTUNO Q header I2C; second operator in the web UI | Hardware |
 | [D-16](#d-16) | The web dashboard is the only station display | Hardware |
@@ -254,7 +254,7 @@ Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C revie
 | **Status** | Current. |
 
 <a id="d-13"></a>
-### D-13 One sensor bus: `Wire2` = I2C3 on A4/A5, no Qwiic, no multiplexer
+### D-13 One sensor bus: `Wire2` = I2C3 on A4/A5 (the AS7265X optionally on the Qwiic socket), no multiplexer
 
 | | |
 |---|---|
@@ -262,6 +262,7 @@ Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C revie
 | **Alternatives** | (recorded) v2: one Qwiic bus (`Wire1`, I2C4) daisy-chained through the boards' Qwiic sockets (commit `ae6087d`); a TCA9548A multiplexer. |
 | **Reason** | Owner directive "No Qwiic connectors ANYWHERE in the system" (contract 16.1; the CardKB exception is D-15). The core's UNO Q variant lists `i2cs = <&i2c2>, <&i2c4>, <&i2c3>`, so `Wire2` is I2C3 on A4/A5 and `Wire1` (I2C4) is the Qwiic socket. The addresses are distinct, so no multiplexer is needed (fewer parts, fewer failure points); one controller polls one target at a time, and open-drain lines cannot clash. 100 kHz tolerates a long boom cable. A4/A5 are **3.3 V only** ("use pull-ups to 3.3 V only ... not 5 V-tolerant in any mode", ABX00162), so every pull-up goes to 3.3 V and no breakout whose pull-ups follow its supply is powered from 5 V. |
 | **Evidence** | Commit `eaefd3b`; variant overlay `i2cs`; `config.h` `SENSOR_WIRE`, `kI2cClockHz`; I2C bus clear (up to 9 SCL pulses + STOP) on the same pins (`kPinSensorSda` 18, `kPinSensorScl` 19). |
+| **Revision 2026-10-12** | On the owner's request the AS7265X may instead be plugged into the UNO Q Qwiic socket (`Wire1` = I2C4, `config.h` `QWIIC_WIRE`), the only Qwiic use in the system. `As7265x::begin()` takes the Qwiic bus as an alternate: every probe (boot wait, absent and fault re-probes) tries the bus in use, then the other, and the driver stays on the bus that answered; EVR 0x0706 names it. The Qwiic bus is a second `I2cBus` without GPIO bus clear (PD12/PD13 are not Arduino pin numbers): its errors add to HK `i2c_errors` and FDIR `I2C_BUS`, whose response there is a controller re-initialisation (EVR 0x0605 `Qwiic I2C bus fault ...`). On Qwiic the AS7265X no longer provides the A4/A5 pull-ups (03 section 4.7). |
 | **Status** | Current since `eaefd3b`. |
 
 <a id="d-14"></a>

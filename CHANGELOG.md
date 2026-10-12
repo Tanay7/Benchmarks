@@ -36,6 +36,12 @@ app-bricks-py release history) and are fixed; CI now builds the flight sketch on
   `test_cfdp.py` runs with and without `AppError` (fails on the previous `main.py`).
 
 ### Added
+- The AS7265X may be plugged into the UNO Q Qwiic socket (`Wire1`, `config.h` `QWIIC_WIRE`) instead
+  of A4/A5, on the owner's request (D-13 revision). The driver probes A4/A5 first, then Qwiic, at
+  boot and at every re-probe and stays on the bus that answers; EVR 0x0706 names it (`on A4/A5` /
+  `on Qwiic`). The Qwiic bus counts into HK `i2c_errors` and FDIR `I2C_BUS` (re-initialisation;
+  EVR 0x0605 `Qwiic I2C bus fault ...`). The boot wait for the AS7265X is now bounded by time,
+  not by a probe count. On Qwiic the A4/A5 bus needs its own pull-ups (docs/03 section 4.7).
 - `tools/llext_check.py`: every undefined symbol of a sketch's final ELF must be exported by the
   board's loader (`syms-dynamic.ld`) or also be undefined in a baseline sketch of the same core.
   CI runs it for both sketches and both radio options, and builds the flight sketch again on

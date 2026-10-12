@@ -165,7 +165,8 @@ compile time; all of them need a rebuild and upload. "MATCH" = must match the st
 
 | Setting | Default | Allowed | Unit | Meaning | Notes |
 |---|---|---|---|---|---|
-| `SENSOR_WIRE` | `Wire2` | `Wire2` | - | The single sensor I2C bus = I2C3 on header A4 (SDA, PC1) / A5 (SCL, PC0), 3.3 V only. No Qwiic | Every pull-up on this bus goes to 3.3 V |
+| `SENSOR_WIRE` | `Wire2` | `Wire2` | - | The sensor I2C bus = I2C3 on header A4 (SDA, PC1) / A5 (SCL, PC0), 3.3 V only. The AS7265X alone may use `QWIIC_WIRE` instead | Every pull-up on this bus goes to 3.3 V |
+| `QWIIC_WIRE` | `Wire1` | `Wire1` | - | The UNO Q Qwiic socket = I2C4 (PD12/PD13), 3.3 V: probed for the AS7265X after A4/A5 (D-13); nothing else uses it | No GPIO bus clear on these pins |
 | `kPinSensorSda` | 18 | fixed | GPIO index | A4 = PC1 as a GPIO for the bus clear | |
 | `kPinSensorScl` | 19 | fixed | GPIO index | A5 = PC0 as a GPIO for the bus clear | |
 | `kI2cClockHz` | 100000 | 100000 typical | Hz | Bus clock; 100 kHz tolerates a long boom cable | |

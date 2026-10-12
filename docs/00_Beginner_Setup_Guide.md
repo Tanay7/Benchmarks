@@ -565,13 +565,13 @@ time**, power off before each, and check after each. Where to look:
 
 | Order | Instrument | Wiring | Check after power-on: `sensors` in the status box |
 |---|---|---|---|
-| a | AS7265X (it carries the bus pull-ups) | its pins 3.3V, GND, SDA -> A4, SCL -> A5; INT not connected; front "I2C" jumper closed, JP2 open | `0x0080` (bit 7) |
+| a | AS7265X (it carries the bus pull-ups) | its pins 3.3V, GND, SDA -> A4, SCL -> A5; INT not connected; front "I2C" jumper closed, JP2 open. **Or** a Qwiic cable from its Qwiic socket to the UNO Q Qwiic socket: then the A4/A5 bus needs its own 4.7 kOhm pull-ups to 3.3 V for steps b-d (docs/03 section 4.7) | `0x0080` (bit 7) |
 | b | RM3100 outboard | 3.3 V, GND, SDA -> A4, SCL -> A5, I2CEN -> 3.3 V, SA0 -> GND, SA1 -> GND | `0x0180` (+ bit 8) |
 | c | RM3100 inboard (optional) | as b, but SA0 -> 3.3 V and SA1 -> 3.3 V | `0x0380` (+ bit 9) |
 | d | Nicla Sense ME | J2 pin 1 SDA -> A4, pin 2 SCL -> A5, pin 6 GND -> GND, pin 9 VIN -> buck 5 V; pin 7 not connected | `0x03BF` within seconds (+ bits 0-5), `0x03FF` once bit 6 (gas/air-quality fusion) is set after the gas sensor's warm-up |
 
 Without the inboard RM3100 the final value is `0x01FF`. If the start-up events reached the
-console, you also see `EVR 0x0706 INFO AS7265X HW ...` (spectrometer identified) and
+console, you also see `EVR 0x0706 INFO AS7265X HW ... on A4/A5` (or `on Qwiic`: spectrometer identified, and where) and
 `EVR 0x0910 INFO RM3100 OB BIST PASS X ok Y ok Z ok (reg ...)` (outboard self-test, with
 the value of the self-test register; 0x0911 for the inboard unit); the ground shows them later in any case. LED matrix row 6 lights one column per bit.
 

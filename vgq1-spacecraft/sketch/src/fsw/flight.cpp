@@ -489,6 +489,8 @@ void Flight::init_sensors() {
   bus_clear_failed_ = !bus_.begin_clear_ok();   // retried by reprobe_instruments()
   if (bus_clear_failed_)
     evr(3, 0x060A, "I2C bus clear: SDA or SCL still low after %u clocks", (unsigned)kI2cClearMaxPulses);
+  // The Qwiic connector: no bus clear (PD12/PD13 are not Arduino pin numbers).
+  qwiic_.begin(QWIIC_WIRE, kI2cClockHz);
   reprobe_.begin(millis());
   uint16_t h = 0;
   if (aru_.begin(bus_)) {
@@ -496,7 +498,7 @@ void Flight::init_sensors() {
     if (aru_.read_motion(aru_last_)) aru_valid_ = true;
   }
   // Bounded boot identification (<= ~2 s, as7265x.h begin()); lamps off afterwards.
-  const bool spec_ok = spec_.begin(bus_, kPinSpecInt);
+  const bool spec_ok = spec_.begin(bus_, kPinSpecInt, &qwiic_);   // A4/A5 first, then Qwiic
   if (spec_ok) h |= SNS_AS7265X;
   if (mag_ob_.begin(bus_, kRm3100ObAddr)) h |= SNS_RM3100_OB;
   if (mag_ib_.begin(bus_, kRm3100IbAddr)) h |= SNS_RM3100_IB;     // optional second unit
@@ -516,9 +518,9 @@ void Flight::init_sensors() {
 
 void Flight::report_spec_identity() {
   const As7265x::Info& i = spec_.info();
-  evr(1, 0x0706, "AS7265X HW %02X/%02X FW %u.%u.%u devices %s", (unsigned)i.hw_type,
+  evr(1, 0x0706, "AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s", (unsigned)i.hw_type,
       (unsigned)i.hw_version, (unsigned)i.fw_major, (unsigned)i.fw_patch, (unsigned)i.fw_build,
-      spec_device_names(i.dev_mask));
+      spec_device_names(i.dev_mask), spec_.on_alt_bus() ? "Qwiic" : "A4/A5");
 }
 
 // RM3100 self-test of the fitted units at boot (contract 24.5), never while an AS7265X
@@ -1634,7 +1636,7 @@ void Flight::gen_hk(bool beacon) {
   p.radio_fault_reports = radio_fault_reports_;
   p.loop_max_ms = loop_max_ms_;
   p.loop_overruns = loop_overruns_;
-  p.i2c_errors = sat16(bus_.errors());
+  p.i2c_errors = sat16(bus_.errors() + qwiic_.errors());
   p.ssr_fill_permille = ssr_.fill_permille();
   // C-06: overwrite drops (beacon) + export-pause drops, saturated.
   const uint64_t drops = (uint64_t)ssr_.dropped() + ssr_.paused_drops();
@@ -1899,8 +1901,18 @@ void Flight::fdir_1hz(uint32_t now) {
         (unsigned)bus_.consecutive_errors());
     bus_recover(now, "FDIR");
   }
+  // The same for the Qwiic connector (AS7265X only): controller re-initialisation.
+  if (qwiic_.consecutive_errors() > kI2cFdirErrors && (fdir_mask_ & FDIR_I2C_BUS) &&
+      (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs)) {
+    fdir_flags_ |= FDIR_I2C_BUS;
+    evr(3, 0x0605, "Qwiic I2C bus fault (%u consecutive errors) - re-init",
+        (unsigned)qwiic_.consecutive_errors());
+    recovered_once_ = true;
+    last_recover_ms_ = now;
+    (void)qwiic_.recover();
+  }
   // F-25: FDIR I2C_BUS clears after kI2cBusHealthyS seconds without a new bus error.
-  const uint32_t errs = bus_.errors();
+  const uint32_t errs = bus_.errors() + qwiic_.errors();
   if (errs != i2c_err_snapshot_) {
     i2c_err_snapshot_ = errs;
     i2c_quiet_s_ = 0;
@@ -2115,9 +2127,15 @@ void Flight::spec_health(uint32_t now) {
   if (recovered || became_ok) report_spec_identity();
   // PB-8.6 item 9 (AS-T6): a hung AS72651 may hold SDA; the FAULT path escalates to the
   // bus clear when the bus itself is failing (rate-limited with the FDIR response).
-  if (entered_fault && bus_.consecutive_errors() >= kSpecFaultBusErrors &&
-      (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs))
-    bus_recover(now, "AS7265X FAULT");
+  if (entered_fault && (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs)) {
+    if (!spec_.on_alt_bus()) {
+      if (bus_.consecutive_errors() >= kSpecFaultBusErrors) bus_recover(now, "AS7265X FAULT");
+    } else if (qwiic_.consecutive_errors() >= kSpecFaultBusErrors) {
+      recovered_once_ = true;                       // the Qwiic bus: re-initialisation only
+      last_recover_ms_ = now;
+      (void)qwiic_.recover();
+    }
+  }
 }
 
 // Attitude for the SPEC boresight: the Nicla fusion quaternion (device -> ENU world),

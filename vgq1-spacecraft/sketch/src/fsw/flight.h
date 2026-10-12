@@ -189,6 +189,7 @@ class Flight {
   RadioSettings rcfg_, pending_cfg_, revert_cfg_;
   RxPacket rx_pkt_;
   I2cBus bus_;
+  I2cBus qwiic_;                         // QWIIC_WIRE: only the AS7265X may be there
   NiclaAru aru_;                         // Nicla Sense ME (attitude reference unit)
   As7265x spec_;                         // AS7265X spectrometer driver
   SpecConfig spec_cfg_ = spec_default_config();   // SPECCFG / SPECMODE configuration in force

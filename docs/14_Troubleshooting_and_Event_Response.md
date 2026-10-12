@@ -306,7 +306,7 @@ Execution refusals with code 5 (HARDWARE) or 7 (BUSY) are reported in CMDVER onl
 | 0x0602 | ERROR | `radio change NOT confirmed by uplink - reverting to ch %u code %u` | No valid RF command within `revert_s` after a rate / channel change (FDIR `RATE_REVERT`, latched until `RSTCNT`) | The station must be on the old values: the GDS reverts too (LINK WARN); investigate the margin before retrying |
 | 0x0603 | INFO | `transmitter re-enabled` | End of `TXINHIBIT` or of the PA cool-down | Expect AOS |
 | 0x0604 | FATAL | `PA over-temperature: transmitter OFF for %u s, SAFE` | E22-400T37S over-temperature report with the FDIR response enabled | Cooling; reduce the duty cycle; wait 300 s |
-| 0x0605 | ERROR | `I2C bus fault (%u consecutive errors) - bus clear + re-init` | More than 10 consecutive bus errors (at most once per 10 s); FDIR `I2C_BUS` | Check the sensor wiring; 0x0609 when healthy |
+| 0x0605 | ERROR | `I2C bus fault (%u consecutive errors) - bus clear + re-init`; `Qwiic I2C bus fault (%u consecutive errors) - re-init` for the Qwiic socket (AS7265X there) | More than 10 consecutive bus errors (at most once per 10 s); FDIR `I2C_BUS` | Check the sensor wiring; 0x0609 when healthy |
 | 0x0606 | ERROR | `Nicla Sense ME stopped responding` | More than 5 failed reads; FDIR `SENSOR_LOST`; bus temperature becomes n/a | 2.6 |
 | 0x0607 | INFO | `Nicla Sense ME responding again` | Reads succeed again; `SENSOR_LOST` cleared | None |
 | 0x0608 | WARN | `brownout reset: TX power derated (code %u) - check radio supply` | Boot after a BROWNOUT reset | Fix the supply, then `TXPWR 0` (2.5) |
@@ -324,7 +324,7 @@ Execution refusals with code 5 (HARDWARE) or 7 (BUSY) are reported in CMDVER onl
 | 0x0703 | INFO | SPECDIAG line: `AS7265X dev%u HW %02X%02X FW %u.%u.%u SEL %02X LED %02X CFG %02X IT %u T %d C` or `AS7265X dev%u COEF %02u-%02u: <words>` | One line per loop pass after `SPECDIAG` | Diagnostic record; keep it with the test log |
 | 0x0704 | INFO / WARN | `BURST START n=%u s cycles=%u` / `BURST END samples=%u rate=%u.%u Hz dropped=%u readmax=%u ms tx=%u` / `BURST rice status %u` (WARN) | BURST mode start and end; WARN when the Rice encoder returned an unexpected status (that packet is sent raw) | After a burst return to SURVEY (07 §5.3); report a rice status WARN |
 | 0x0705 | WARN | `AS7265X recovered by soft reset` | The driver recovered the instrument after repeated timeouts | None if rare |
-| 0x0706 | INFO | `AS7265X HW %02X/%02X FW %u.%u.%u devices %s` | Boot and after a recovery: identity and devices present (NIR, VIS, UV) | A missing device: its six channels are invalid |
+| 0x0706 | INFO | `AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s` | Boot and after a recovery: identity, devices present (NIR, VIS, UV) and the bus it answered on (`A4/A5` or `Qwiic`) | A missing device: its six channels are invalid |
 | 0x0707 | WARN | `AS7265X %s`: `ABSENT`, `FAULT`, `available again`, `LAMP STATE UNKNOWN`, `not responding: SPECCFG stored for later`, `no lamp on a present device: LOCKIN/FLUOR invalid` | Driver state changes and configuration problems | 2.6 |
 
 ### 3.9 Hibernation 0x08xx

@@ -2,7 +2,8 @@
 //  I2C bus access with error accounting and bus recovery (the FDIR "I2C_BUS"
 //  response). All instruments have distinct addresses, so there is no
 //  multiplexer: one bus on the UNO Q header pins (Wire2 = I2C3, A4 SDA / A5 SCL,
-//  3.3 V) carries everything. No Qwiic connector is used anywhere.
+//  3.3 V) carries everything; only the AS7265X may instead sit on the Qwiic connector
+//  (Wire1 = I2C4, a second I2cBus without GPIO bus clear: its pins are not Arduino pins).
 //
 //  Bus clear (AS-T6, Phase B spec F-03). A target that was interrupted in the
 //  middle of a read (MCU reset, glitch, a hung AS72651) can hold SDA low for ever;
