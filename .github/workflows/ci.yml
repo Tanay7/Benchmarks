@@ -26,7 +26,12 @@
 #                   builds, every warning on and none allowed in this repository's code;
 #                   the compile logs must show the bundled copies in use. Then the
 #                   RouterBridge host test against the platform's Arduino_RPClite /
-#                   MsgPack and the bridge-thread stack bound of the patched library.
+#                   MsgPack, the bridge-thread stack bound of the patched library and
+#                   the loader symbol check (tools/llext_check.py: the board's loader
+#                   must resolve every undefined symbol of each sketch). Last, the UNO Q
+#                   flight sketch again on arduino:zephyr 0.90.0, the newest core before
+#                   1.0.0 (Zephyr SDK 0.16.8 toolchain), which older App Lab installations
+#                   still use.
 #
 #  Actions are pinned to full commit hashes (version in the comment).
 # =============================================================================
@@ -197,6 +202,25 @@ jobs:
               echo "$ours"; echo "::error::compiler warnings in this repository's code ($label)"; return 1
             fi
           }
+          # baseline <board> <label>: a sketch that uses nothing but the core, the reference
+          # of tools/llext_check.py (symbols every sketch needs from the core's own loading).
+          baseline() {
+            local board="$1" label="$2" d="$RUNNER_TEMP/baseline-$2/baseline-$2"
+            mkdir -p "$d"
+            printf '%s\n' 'void setup() { pinMode(LED_BUILTIN, OUTPUT); }' \
+              'void loop() { digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN)); delay(500); }' > "$d/baseline-$label.ino"
+            printf '%s\n' 'profiles:' '  default:' "    fqbn: arduino:zephyr:$board" '    platforms:' \
+              '      - platform: arduino:zephyr' 'default_profile: default' > "$d/sketch.yaml"
+            if ! arduino-cli compile --profile default -v --build-path "$RUNNER_TEMP/build-baseline-$label" "$d" \
+                 >"$RUNNER_TEMP/build-baseline-$label.log" 2>&1; then
+              cat "$RUNNER_TEMP/build-baseline-$label.log"; return 1
+            fi
+          }
+          # llext <label> <baseline label>: tools/llext_check.py on a build made by build()
+          llext() {
+            python3 tools/llext_check.py --log "$RUNNER_TEMP/build-$1.log" --build "$RUNNER_TEMP/build-$1" \
+              --baseline-log "$RUNNER_TEMP/build-baseline-$2.log" --baseline-build "$RUNNER_TEMP/build-baseline-$2"
+          }
           EOF
 
       - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
@@ -257,3 +281,52 @@ jobs:
             python3 tools/host_test/routerbridge/stackcalc.py --log "$out.log" --cut egse_ --cut z_log_msg_runtime \
               --check "$sketch/libraries/Arduino_RouterBridge/src/bridge.h" "$out"
           done
+
+      # The sketch is a Zephyr loadable extension: the board's loader refuses all of it if one
+      # undefined symbol is not in its export table, weak references included. The core's
+      # check link does not catch every case (a weak C++ TLS init reference links fine).
+      - name: Loader symbol check (both sketches, both radio options)
+        run: |
+          source "$RUNNER_TEMP/build.sh"
+          baseline unoq unoq
+          baseline ventunoq ventunoq
+          llext flight unoq
+          llext flight-sx126x unoq
+          llext station ventunoq
+          llext station-sx126x ventunoq
+
+      # Boards whose App Lab has not been updated build with arduino:zephyr 0.90.0 or older
+      # (Zephyr SDK 0.16.8 toolchain, GCC 12.2): the sketch is linked with newlib-nano libm,
+      # which needs __errno (src/libc_compat.cpp), compiled without -fno-extern-tls-init and
+      # loaded by a Zephyr 4.2 loader (src/fsw/rpc_mailbox.h, current_thread()). The UNO Q
+      # flight sketch must build and load there too; no core before 1.0.0 has the VENTUNO Q.
+      # This replaces the platform installed above, so these steps come last.
+      - name: Install arduino:zephyr 0.90.0 (the last core before 1.0.0)
+        run: |
+          ver="$(arduino-cli core search arduino:zephyr --all --format json | python3 -c '
+          import json, sys
+          rel = [r for p in json.load(sys.stdin).get("platforms", []) if p.get("id") == "arduino:zephyr"
+                 for r in (p.get("releases") or {})]
+          old = sorted((v for v in rel if v.startswith("0.") and "-" not in v),
+                       key=lambda v: tuple(int(x) for x in v.split(".")))
+          print("0.90.0" if "0.90.0" in old else (old[-1] if old else ""))')"
+          if [[ -z "$ver" ]]; then
+            echo "::warning::no arduino:zephyr 0.x release in the platform index: older-core build skipped"
+            exit 0
+          fi
+          [[ "$ver" == "0.90.0" ]] || echo "::warning::arduino:zephyr 0.90.0 not in the index: using $ver"
+          arduino-cli core install "arduino:zephyr@$ver"
+          arduino-cli core list
+          echo "LEGACY_CORE=$ver" >> "$GITHUB_ENV"
+
+      - name: UNO Q flight sketch on the older core (both radio options, loader symbol check)
+        if: env.LEGACY_CORE != ''
+        run: |
+          source "$RUNNER_TEMP/build.sh"
+          build vgq1-spacecraft/sketch flight-legacy
+          build vgq1-spacecraft/sketch flight-legacy-sx126x \
+            --build-property "compiler.cpp.extra_flags=-DVGQ_RADIO=3 -DVGQ_SX126X_CHIP=1268"
+          grep -h "arm-zephyr-eabi-g++" "$RUNNER_TEMP/build-flight-legacy.log" | head -1 | grep -o "arm-zephyr-eabi/[^/]*/" || true
+          baseline unoq unoq-legacy
+          llext flight-legacy unoq-legacy
+          llext flight-legacy-sx126x unoq-legacy

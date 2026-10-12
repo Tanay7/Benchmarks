@@ -32,7 +32,7 @@ Yagi and no fade margin (free-space budget from `dssq/link.py`).
 [02_Link_Budget_and_RF_Analysis.md](02_Link_Budget_and_RF_Analysis.md).
 
 ### Has it been tested on real hardware?
-**Not yet.** Every automated check passes (964 host checks; 749 ground tests, of which 746
+**Not yet.** Every automated check passes (964 host checks; 750 ground tests, of which 747
 pass and 3 skip for optional reference files; the firmware type-check; the real Arduino builds;
 CI on every push), but the boards and radios have not been run together. Every value that only
 hardware can confirm is tagged VERIFY and has a test.
@@ -281,7 +281,7 @@ An external NVMe or USB drive works only if the App container can see it (VERIFY
 1. **Host tests:** the flight C++ compiled for a PC, 964 checks (standards' test vectors, official
    CCSDS data, radio maths, spectral, autonomy, integration streams), built twice: warnings as
    errors, and with memory and undefined-behaviour checkers.
-2. **Ground tests:** 749 pytest tests on Python 3.11 and 3.13: the ground decodes exactly what
+2. **Ground tests:** 750 pytest tests on Python 3.11 and 3.13: the ground decodes exactly what
    the flight encodes (vectors the C++ writes), SDLS, COP-1, CFDP, products, magcal, AFC, web UI,
    data logger, station identification, and two documentation checks (every dashboard key is
    documented; every citation tag in the code is indexed).

@@ -1454,9 +1454,20 @@ def test_egse_hardline_queue(tmp_path, caplog):
     assert br.called("hl_cltu")[-1] == ("aa",)
 
 
-def test_egse_main_under_fake_app_lab(tmp_path, monkeypatch):
+# arduino.app_utils has AppError from app-bricks-py 0.13.0 on (commit 9a95825); release 0.12.0
+# and older, still on UNO Q boards whose App Lab was not updated, do not.
+@pytest.mark.parametrize("has_app_error", [True, False], ids=["app_utils-0.13", "app_utils-0.12"])
+def test_egse_main_under_fake_app_lab(tmp_path, monkeypatch, has_app_error):
     br = FakeBridge()
     passes = []
+    seen = {}
+    egse_cls = egse_main.Egse
+
+    def capture_egse(*a, **kw):
+        seen.update(kw)
+        return egse_cls(*a, **kw)
+
+    monkeypatch.setattr(egse_main, "Egse", capture_egse)
 
     class FakeApp:
         @staticmethod
@@ -1479,13 +1490,17 @@ def test_egse_main_under_fake_app_lab(tmp_path, monkeypatch):
 
     arduino = types.ModuleType("arduino")
     app_utils = types.ModuleType("arduino.app_utils")
-    app_utils.App, app_utils.Bridge, app_utils.AppError = FakeApp, BridgeFacade, FakeAppError
+    app_utils.App, app_utils.Bridge = FakeApp, BridgeFacade
+    if has_app_error:
+        app_utils.AppError = FakeAppError
     arduino.app_utils = app_utils
     monkeypatch.setitem(sys.modules, "arduino", arduino)
     monkeypatch.setitem(sys.modules, "arduino.app_utils", app_utils)
     data = tmp_path / "data"
     assert egse_main.main(["--data", str(data)]) == 0
     assert passes == [0, 1, 2, 3] and len(br.handlers) == 8
+    assert (FakeAppError in seen["call_errors"]) == has_app_error    # retried as "no answer" when present
+    assert set(egse_main.CALL_ERRORS) <= set(seen["call_errors"])
     assert br.called("set_partition") == [(1,), (2,)] and (data / "boot_count.txt").read_text() == "2\n"
     # outside App Lab (no arduino package) the entry point refuses with exit code 2
     monkeypatch.setitem(sys.modules, "arduino", None)

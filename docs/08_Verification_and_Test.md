@@ -23,11 +23,11 @@ telecommand (T-TM, T-TC) - 10 Instruments (T-SC) - 11 Fault protection (T-FD) - 
 | Layer | What it is | Size and result on the Phase D tree | Where it runs |
 |---|---|---|---|
 | 1 Host tests | The flight C++ (protocols, algorithms, radio tables) compiled for a PC and checked | **964 checks** in 89 groups, 0 failures (963 when the official CCSDS 121.0 test data is absent). Built twice: warnings as errors, and under AddressSanitizer + UBSan | PC, CI |
-| 2 Ground tests | The ground data system and the spacecraft EGSE under pytest | **749 tests: 746 passed, 3 skipped** (optional reference files not on the bench), on Python 3.13 and 3.11 | PC, CI |
-| 3 Firmware type-check | `check_firmware.sh`: every Arduino file compiled against strict stand-ins of the board API, in every build option | **64 ok, 0 fail, 0 warn**, incl. 80 of 80 RadioLib units for each board and a negative control | PC, CI |
+| 2 Ground tests | The ground data system and the spacecraft EGSE under pytest | **750 tests: 747 passed, 3 skipped** (optional reference files not on the bench), on Python 3.13 and 3.11 | PC, CI |
+| 3 Firmware type-check | `check_firmware.sh`: every Arduino file compiled against strict stand-ins of the board API, in every build option | **65 ok, 0 fail, 0 warn**, incl. 80 of 80 RadioLib units for each board and a negative control | PC, CI |
 | 4 Station sketch harness | The real VENTUNO Q station sketch built for a PC and run on real threads | **26 checks**, 0 failures (12 E22 + 7 SX1268 + 7 SX1262) | PC, CI (ASan + UBSan, TSan) |
 | 5 RouterBridge harness and stack bound | The bundled patched Arduino_RouterBridge against its real dependencies; the bridge thread's worst-case stack from the real build | **12 checks** pass (the stock library must fail 4: negative control); worst case **1084 of 1536 octets** (452 margin) for both sketches | PC, CI |
-| 6 Real Arduino builds | The exact compiler, board package and settings App Lab uses | 7 sketch builds (flight E22 and SX1268 on core main and 1.0.0; station E22 on both cores, SX1268 on main), **0 warnings in our code** (sizes in 2.6) | PC, CI |
+| 6 Real Arduino builds | The exact compiler, board package and settings App Lab uses | 9 sketch builds (flight E22 and SX1268 on core main, 1.0.0 and 0.90.0; station E22 on main and 1.0.0, SX1268 on main), **0 warnings in our code** (sizes in 2.6); the loader symbol check passes for every flight build | PC, CI |
 | 7 Lint | ruff and mypy over the Python code, shellcheck over the shell scripts, text-file hygiene | clean (CI job `lint`) | PC, CI |
 | 8 Simulator acceptance | The ground station driven by the software spacecraft, the web UI in a headless browser | All 11 tabs, 0 page, console or HTTP errors (E22 and SX126x modes) | PC |
 | 9 Adversarial review | Phase C: 18 read-only reviewers, each finding challenged by 1-2 skeptics | 62 confirmed findings fixed (3 critical, 25 major, 34 minor), regression test wherever feasible | once |
@@ -85,7 +85,7 @@ skips cleanly.
 | File | Tests | What is checked |
 |---|---|---|
 | test_ccsds.py | 14 | CRC, randomizer, RS against the independent `reedsolo` codec, frame and packet extraction, CLTU + FARM, SCLK fit |
-| test_cfdp.py | 120 | CFDP receiver (complete, incomplete, checksum failure, cancelled, abandoned, reordering, duplicates) and the **spacecraft EGSE** (`vgq1-spacecraft/python/main.py`): epoch rules, counter files, relay, CADU archive, nonce-reuse interleavings |
+| test_cfdp.py | 121 | CFDP receiver (complete, incomplete, checksum failure, cancelled, abandoned, reordering, duplicates) and the **spacecraft EGSE** (`vgq1-spacecraft/python/main.py`): epoch rules, counter files, relay, CADU archive, nonce-reuse interleavings, the App Lab entry point with and without `arduino.app_utils.AppError` |
 | test_cross_check.py | 24 | **Flight-made vectors decoded bit-exactly by the ground**: CADUs, RS, CLTUs, packets, SDLS AUTH/AE frames, USLP, CFDP, Rice, spectra; the offline replay with `--app-data` finds the station's `station.toml` and key as the GDS does |
 | test_end_to_end.py | 49 | The whole GDS with the software spacecraft on a virtual clock: telemetry flow, COP-1 command round trip, hazardous confirmation, SDLS uplink, the TC counter hold and its release on the time floor without an SN file (every numbered TC service, also with `--no-archive`; a replayed first-pass HK after an archive loss, a forged HK under TM NONE and the boot HK before the EGSE restore cannot cause reuse; the simulator never touches the real counter; no key means no hold), coordinated rate change, RF survey, dashboard and `/metrics` |
 | test_fop.py | 9 | FOP-1: lockout, suspension, N(R) validation, BD/BC confirmation (232.1-B-2) |
@@ -103,7 +103,7 @@ skips cleanly.
 | test_tc.py | 5 | TC frames and CLTUs |
 | test_uslp.py | 16 | USLP frames, flight/ground bit-exact |
 | test_web.py | 26 | Web server security (token, Host/Origin checks, limits, CSP), App Lab entry point, a headless render of every tab with injected markup |
-| **Total** | **738** | 735 passed, 3 skipped (Orekit TDM examples, the XTCE schema file, the full official Rice data: not on the bench) |
+| **Total** | **739** | 736 passed, 3 skipped (Orekit TDM examples, the XTCE schema file, the full official Rice data: not on the bench) |
 
 Not in the table: the two documentation tests. `tests/test_docs.py` (**7 tests**) builds real
 snapshots and checks that every top-level snapshot key, every receiver `rx.rf` key, the logger
@@ -112,7 +112,7 @@ keys, the key-by-key blocks (e.g. `link.station_id`) and every HK and RF field a
 exists. `tests/test_citations.py` (**4 tests**) checks that every citation tag in the code
 ("contract N", "PB-x.y", "C-nn", "F-nn", "I1"-"I4") has a row in
 [12_Design_Decisions.md](12_Design_Decisions.md#appendix-b---citation-tags-in-code) appendix B
-and every row is still cited. Together: the **749 tests, 746 passed, 3 skipped** of section 1
+and every row is still cited. Together: the **750 tests, 747 passed, 3 skipped** of section 1
 (measured on Python 3.13 and 3.11 on the Phase D tree; the CI log of the final commit is the
 authority).
 
@@ -163,28 +163,44 @@ failures; CI also runs it under AddressSanitizer + UBSan and under ThreadSanitiz
 
 The sketches are compiled exactly as Arduino App Lab compiles them: the sketch's default
 profile, arduino-cli 1.5.2 (the version App Lab embeds), the `arduino:zephyr` platform built
-from source (core main `b08a650` and release 1.0.0), Zephyr SDK `arm-zephyr-eabi-g++` 14.3, FQBN
-`arduino:zephyr:<board>:wait_linux_boot=app`, `--warnings all`. Results after the Phase D final
-fix round (the flight sketch gained the hardware watchdog and the new duty meter; the station
-sketch did not change). Percentages are computed here from the sizes and the maxima arduino-cli
+from source (core main `b08a650` and release 1.0.0 with Zephyr SDK 1.0.1, `arm-zephyr-eabi-g++`
+14.3; release 0.90.0 with the SDK 0.16.8 it depends on, GCC 12.2), FQBN
+`arduino:zephyr:<board>:wait_linux_boot=app`, `--warnings all`. 0.90.0 is the last release
+before 1.0.0 and what an App Lab that was not updated still builds with; it has no VENTUNO Q.
+Flight results after the fix for those older cores (`src/libc_compat.cpp`,
+`RpcMailbox::current_thread()`); the station sketch did not change. Percentages are computed here from the sizes and the maxima arduino-cli
 prints (786 432 B flash on the UNO Q, 1 048 576 B on the VENTUNO Q, 262 144 B RAM on both):
 
 | Build | Flash (program storage) | Static RAM (global variables) | Warnings in our code |
 |---|---|---|---|
-| UNO Q flight, default E22 (T33D / T37S by strap), core main | 233 264 B (29.7 %) | 128 492 B (49.0 %) | 0 |
-| UNO Q flight, default E22, core 1.0.0 | 232 816 B | 128 412 B | 0 |
-| UNO Q flight, SX1268 (`VGQ_RADIO=3`), core main | 326 348 B (41.5 %) | 169 592 B (64.7 %) | 0 |
-| UNO Q flight, SX1268, core 1.0.0 | 325 892 B | 169 496 B | 0 |
+| UNO Q flight, default E22 (T33D / T37S by strap), core main | 233 316 B (29.7 %) | 128 484 B (49.0 %) | 0 |
+| UNO Q flight, default E22, core 1.0.0 | 232 860 B | 128 396 B | 0 |
+| UNO Q flight, default E22, core 0.90.0 | 222 148 B (28.2 %) | 120 913 B (46.1 %) | 0 |
+| UNO Q flight, SX1268 (`VGQ_RADIO=3`), core main | 326 388 B (41.5 %) | 169 576 B (64.7 %) | 0 |
+| UNO Q flight, SX1268, core 1.0.0 | 325 944 B | 169 488 B | 0 |
+| UNO Q flight, SX1268, core 0.90.0 | 316 448 B (40.2 %) | 163 030 B (62.2 %) | 0 |
 | VENTUNO Q station, default E22, core main | 100 828 B (9.6 %) | 40 716 B (15.5 %) | 0 |
 | VENTUNO Q station, default E22, core 1.0.0 | 100 324 B | 40 632 B | 0 |
 | VENTUNO Q station, SX1268 (`DSSQ_RADIO_SX126X=1`), core main | 207 692 B (19.8 %) | 89 216 B (34.0 %) | 0 |
 
-The only warnings in these logs (6 per build) are `-Wmissing-field-initializers` in the core's
-own `Wire.cpp`. The resource budgets built on these numbers are in
+The only warnings in these logs are in the platform's own code: 6 per build
+(`-Wmissing-field-initializers` in `Wire.cpp`) on main and 1.0.0, 13 on 0.90.0
+(`wiring_analog.cpp`, `Wire.cpp`, `zephyrSerial.cpp` and a Zephyr USB header). The resource budgets built on these numbers are in
 [01_System_Design.md](01_System_Design.md). Every log names the bundled copies: *"Using library Arduino_RouterBridge at
 version 0.4.3 in folder: `<sketch>`/libraries/Arduino_RouterBridge"* (and RadioLib 7.8.1 in the
 SX126x builds). The flight's recorder (SSR) is allocated from the heap at boot and is not part
 of the static RAM figure; its size on the board is a hardware check (T-HW-11).
+
+**Loader symbol check.** A sketch is a Zephyr loadable extension (LLEXT): the board's loader
+resolves its undefined symbols when it loads it and refuses the whole sketch if one is not in
+its export table, weak references included. The core's check link catches most of these at
+build time, not all: before the fix, the flight sketch built on 0.90.0 still referenced
+`_ZTH13z_tls_current` (the C++ thread-local init function behind `k_current_get()`; 1.0.0
+compiles with `-fno-extern-tls-init`), which links but does not load. `tools/llext_check.py`
+compares every undefined symbol of the final ELF with the variant's `syms-dynamic.ld` and with
+a baseline sketch of the same core (setup/loop, `pinMode`, `digitalWrite`): **0 unresolved**
+for the flight sketch, both radio options, on main, 1.0.0 and 0.90.0 (the pre-fix 0.90.0 build
+fails it with exactly that symbol: negative control). CI runs it for both sketches.
 
 ### 2.7 Lint
 
@@ -229,7 +245,7 @@ mkdir -p /tmp/vectors-san && tools/host_test/host_test /tmp/vectors-san
 CCSDS121_TESTDATA=/path/to/libaec/data/121B2TestData tools/host_test/host_test /tmp/vectors
 
 # 2. Ground tests (both App folders are put on the import path by tests/conftest.py)
-.venv/bin/python -m pytest -q                                      # "746 passed, 3 skipped"
+.venv/bin/python -m pytest -q                                      # "747 passed, 3 skipped"
 
 # 3. Firmware type-check (uses the bundled library copies, else fetches them from github.com)
 bash tools/host_test/check_firmware.sh                             # every line "ok", exit 0
@@ -278,11 +294,11 @@ every push, every pull request and on demand. Every action is pinned to a full c
 | `lint` | ruff over every `.py`, mypy over the station, EGSE and tool code (tool versions pinned in `requirements-dev.txt`), shellcheck of the shell scripts, and a text-file check: LF line ends, final newline, no trailing white space | any finding |
 | `host-tests` | Fetches the official CCSDS 121.0 test data (libaec, pinned commit); builds the host tests with `-Werror` and runs them, then rebuilds and runs them under ASan + UBSan; fetches and patches RadioLib and Arduino_RouterBridge into both sketches; runs `check_firmware.sh`; runs the station sketch harness under ASan + UBSan and under ThreadSanitizer | a compiler warning, a failed check, a sanitizer report, a stale library copy |
 | `ground-tests` | The pytest suite from the repository root on Python 3.11 and on 3.13 (matrix, both always run) | any test fails |
-| `arduino-build` | arduino-cli 1.5.1 with the released "Arduino Q Boards" platform (`arduino:zephyr`); bundles the patched libraries; builds the station and the flight sketch from their default profiles (default radio) and again with the SX126x option (SX1268), every warning on; checks that the logs name the bundled Arduino_RouterBridge 0.4.3 and RadioLib 7.8.1; runs the RouterBridge harness (also under ASan + UBSan) and the bridge-thread stack bound for both sketches | a compile error, a warning in this repository's code, a log that does not name a bundled copy, a harness failure, a worst-case stack above 1536 octets |
+| `arduino-build` | arduino-cli 1.5.1 with the released "Arduino Q Boards" platform (`arduino:zephyr`); bundles the patched libraries; builds the station and the flight sketch from their default profiles (default radio) and again with the SX126x option (SX1268), every warning on; checks that the logs name the bundled Arduino_RouterBridge 0.4.3 and RadioLib 7.8.1; runs the RouterBridge harness (also under ASan + UBSan), the bridge-thread stack bound and the loader symbol check (`tools/llext_check.py`) for both sketches; then installs `arduino:zephyr` 0.90.0 (the last core before 1.0.0; a warning and no build if the index has no 0.x release) and builds the flight sketch again, both radio options, with the loader symbol check | a compile error, a warning in this repository's code, a log that does not name a bundled copy, a harness failure, a worst-case stack above 1536 octets, a symbol the board's loader cannot resolve |
 
 CI does not run hardware tests and cannot reach the boards. Note the version difference: CI installs arduino-cli 1.5.1 and the latest released
-platform; the local real builds in 2.6 used arduino-cli 1.5.2 (as App Lab embeds it) and the
-platform built from source at core main and 1.0.0.
+platform (then 0.90.0); the local real builds in 2.6 used arduino-cli 1.5.2 (as App Lab embeds it) and the
+platform built from source at core main, 1.0.0 and 0.90.0.
 
 ---
 

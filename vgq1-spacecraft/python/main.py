@@ -113,7 +113,8 @@ _KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,23}", re.ASCII)
 
 # Bridge.call failures that mean "no answer": retried (arduino.app_utils.Bridge.call documents
 # ValueError / TimeoutError / ConnectionError / RuntimeError; socket errors are OSError).
-# main() adds arduino.app_utils.AppError (router unreachable within 5 s, derives from Exception).
+# main() adds arduino.app_utils.AppError where the installed app_utils has it (app-bricks-py 0.13.0
+# and later: router unreachable within 5 s, derives from Exception).
 CALL_ERRORS: tuple[type[Exception], ...] = (TimeoutError, ConnectionError, RuntimeError, ValueError,
                                             OSError)
 
@@ -1224,16 +1225,22 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     _setup_logging()
     try:
-        from arduino.app_utils import App, AppError, Bridge  # type: ignore[import-not-found]
+        from arduino.app_utils import App, Bridge  # type: ignore[import-not-found]
     except ImportError as e:
         log.error("not running under Arduino App Lab (%s): this is the UNO Q App's entry point", e)
         return 2
+    call_errors = CALL_ERRORS
+    try:   # AppError exists from app-bricks-py 0.13.0 on; older App Lab releases lack it
+        from arduino.app_utils import AppError
+        call_errors = (*CALL_ERRORS, AppError)
+    except ImportError:
+        pass
     try:
         data = prepare_data_dir(APP, args.data)
     except OSError as e:
         log.error("cannot prepare the data directory: %s", e)
         return 2
-    egse = Egse(data, Bridge, call_errors=(*CALL_ERRORS, AppError))
+    egse = Egse(data, Bridge, call_errors=call_errors)
     egse.start()
     App.run(user_loop=egse.loop_once)
     return 0

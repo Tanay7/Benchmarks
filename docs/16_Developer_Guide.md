@@ -71,6 +71,7 @@ vgq1-spacecraft/                 UNO Q App (flight software + Linux EGSE)
     commands.*  tlm_packets.*    flight half of the dictionary (host-tested)
     autonomy.*                   stored sequences, beacon level, MAGCAL store, BIST decode
     spectral.*  attitude.*  ssr.*  sclk.h  rpc_mailbox.h  status_display.*
+  sketch/src/libc_compat.cpp     __errno for cores before 1.0.0 (newlib-nano libm)
 dssq-groundstation/              VENTUNO Q App (station sketch + ground data system)
   app.yaml (ports: [8080]), README.md
   python/main.py                 App Lab entry: data folder, config copy, token, Runner
@@ -103,6 +104,7 @@ tools/
     routerbridge/run.sh, stackcalc.py   bundled RouterBridge: behaviour test, stack bound
   radiolib.py  routerbridge.py  libbundle.py  *.patch   bundled libraries (22_Bundled_Libraries.md)
   package_apps.py                builds / verifies the two App Lab zips
+  llext_check.py                 will the board's loader accept a built sketch (docs/08 section 2.6)
   gen_sdls_key.py                SDLS key for both ends
   gen_dictionary_doc.py          writes docs/05 from the code
   link_budget.py                 link budget; `sensitivity` = test T-RF-03 analysis

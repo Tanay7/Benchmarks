@@ -11,6 +11,48 @@ Nothing in this log has been run on the real boards yet ([docs/20_Known_Limitati
 
 ---
 
+## [Unreleased] - UNO Q flight App on arduino:zephyr before 1.0.0 (2026-10-12)
+
+The first import of the flight App on a real UNO Q (App Lab building with arduino:zephyr up to
+0.90.0, Zephyr SDK 0.16.8 toolchain) stopped at the link, and once that was fixed, the EGSE
+stopped at its first import. All three faults were reproduced (0.90.0 built from source; the
+app-bricks-py release history) and are fixed; CI now builds the flight sketch on that core too.
+
+### Fixed
+- Link error `undefined reference to '__errno'` from `libm_nano.a` (`expf`, `log10f`, `powf`):
+  cores before 1.0.0 link the sketch with newlib-nano's libm, whose errno-setting wrappers need
+  `__errno`, which neither the sketch link nor the loader provides. New
+  `vgq1-spacecraft/sketch/src/libc_compat.cpp` defines it (weak, never read; unused and dropped
+  from the build on 1.0.0, whose picolibc libm does not need it).
+- The sketch would then have linked but not loaded on those cores: `k_current_get()` (Router
+  Bridge mailbox, `src/fsw/rpc_mailbox.h`) left a weak reference to the C++ thread-local init
+  function `_ZTH13z_tls_current`, which the Zephyr 4.2 loader of 0.90.0 does not export and
+  therefore refuses (1.0.0 compiles with `-fno-extern-tls-init`). The mailbox now asks the
+  scheduler (`k_sched_current_thread_query()`, exported by every release).
+- EGSE start: `cannot import name 'AppError' from 'arduino.app_utils'`, exit code 2.
+  `arduino.app_utils.AppError` exists only from app-bricks-py 0.13.0 (commit 9a95825,
+  2026-08-13); the EGSE imported it unconditionally. It now treats it as an optional "no answer"
+  error, as the ground's `BridgeLink.from_app_utils` already did. The App Lab test of
+  `test_cfdp.py` runs with and without `AppError` (fails on the previous `main.py`).
+
+### Added
+- `tools/llext_check.py`: every undefined symbol of a sketch's final ELF must be exported by the
+  board's loader (`syms-dynamic.ld`) or also be undefined in a baseline sketch of the same core.
+  CI runs it for both sketches and both radio options, and builds the flight sketch again on
+  `arduino:zephyr` 0.90.0 with the same check.
+- [docs/14](docs/14_Troubleshooting_and_Event_Response.md) section 2.10: App Lab import and start
+  problems (`Invalid library directory in sketch project: libraries/RadioLib`, the link error
+  above, a sketch the loader refuses, the OpenOCD messages when flashing the VENTUNO Q).
+
+### Changed
+- `dist/vgq1-spacecraft-unoq.zip` rebuilt (the station package is unchanged; the ground App
+  already ran on the owner's VENTUNO Q, whose App Lab is newer). Flight sizes on
+  1.0.0: 232860 octets flash, 128396 RAM (+44 / -16); on 0.90.0: 222148 / 120913
+  ([docs/01](docs/01_System_Design.md) section 9.1). Bridge-thread worst-case stack unchanged
+  (1084 octets).
+
+---
+
 ## [Unreleased] - Phase D: repository layout, packaging, final fixes, documentation (2026-10-12)
 
 ### Changed

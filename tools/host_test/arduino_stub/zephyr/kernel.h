@@ -24,6 +24,8 @@ static inline k_tid_t k_current_get(void) {
   static struct k_thread main_thread;
   return &main_thread;
 }
+// The syscall wrapper (generated syscalls/kernel.h) of the scheduler's query.
+static inline k_tid_t k_sched_current_thread_query(void) { return k_current_get(); }
 static inline void k_yield(void) {}
 static inline int32_t k_msleep(int32_t ms) { return (void)ms, 0; }
 

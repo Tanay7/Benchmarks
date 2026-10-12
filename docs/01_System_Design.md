@@ -761,27 +761,34 @@ stateDiagram-v2
 ### 9.1 Flash and static RAM per build
 
 Real builds with the exact App Lab toolchain (arduino-cli 1.5.2 as App Lab embeds it,
-arduino:zephyr platform built from source, Zephyr SDK 1.0.1, `-Os`). "Static RAM" is what
+arduino:zephyr platform built from source, Zephyr SDK 1.0.1, `-Os`; for 0.90.0 the SDK 0.16.8
+it depends on). "Static RAM" is what
 arduino-cli reports as global variables; the limits come from the platform's `boards.txt`
 (`unoq.upload.maximum_size` 786432, `maximum_data_size` 262144; `ventunoq` 1048576 / 262144).
 
-The final tree was built against two versions of the ArduinoCore-zephyr platform: "main"
-(commit b08a650) and "rel100" (tag 1.0.0, commit 79b3f1a). The UNO Q has 2 MB of flash and
+The final tree was built against three versions of the ArduinoCore-zephyr platform: "main"
+(commit b08a650), "rel100" (tag 1.0.0, commit 79b3f1a) and, for the UNO Q flight sketch,
+"rel090" (tag 0.90.0, commit ad87416, GCC 12.2: the last release before 1.0.0, still used by
+App Lab installations that were not updated; it has no VENTUNO Q). The UNO Q has 2 MB of flash and
 786 kB of SRAM in total (ABX00162), but a sketch is loaded into a fixed partition, so the
 percentages below are of the `boards.txt` limits, not of the chip.
 
 | Build | Core | Flash (octets) | % of limit | Static RAM (octets) | % of limit |
 |---|---|---|---|---|---|
-| Flight, E22 (default) | main | 233264 | 29.7 % of 786432 | 128492 | 49.0 % of 262144 |
-| Flight, E22 (default) | rel100 | 232816 | 29.6 % | 128412 | 49.0 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 326348 | 41.5 % | 169592 | 64.7 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 325892 | 41.4 % | 169496 | 64.7 % |
+| Flight, E22 (default) | main | 233316 | 29.7 % of 786432 | 128484 | 49.0 % of 262144 |
+| Flight, E22 (default) | rel100 | 232860 | 29.6 % | 128396 | 49.0 % |
+| Flight, E22 (default) | rel090 | 222148 | 28.2 % | 120913 | 46.1 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 326388 | 41.5 % | 169576 | 64.7 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 325944 | 41.4 % | 169488 | 64.7 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel090 | 316448 | 40.2 % | 163030 | 62.2 % |
 | Station, E22 (default) | main | 100828 | 9.6 % of 1048576 | 40716 | 15.5 % of 262144 |
 | Station, E22 (default) | rel100 | 100324 | 9.6 % | 40632 | 15.5 % |
 | Station, SX1268 (`DSSQ_RADIO_SX126X = 1`) | main | 207692 | 19.8 % | 89216 | 34.0 % |
 
-Sources: the flight figures are the real builds of the final Phase D fix round (watchdog, TX
-duty meter included; 0 warnings in project code, 6 in the platform's own `Wire.cpp`). The
+Sources: the flight figures are the real builds after the fix for cores before 1.0.0
+(`src/libc_compat.cpp`, `RpcMailbox::current_thread()`; 0 warnings in project code, 6 in the
+platform's own `Wire.cpp`). The fix added 44 octets of flash and saved 16 of RAM on rel100
+(Phase D fix round: 232816 / 128412). The
 station sketch was not changed in that round: its figures are from the builds made for this
 document and the Phase D build log of [08_Verification_and_Test.md](08_Verification_and_Test.md)
 section 2.6 (station flash equal to commit 5b06a04). All builds used the bundled patched Arduino_RouterBridge 0.4.3 and,

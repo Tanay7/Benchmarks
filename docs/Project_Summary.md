@@ -40,11 +40,11 @@ both ends.
 | Layer | Result on the current tree |
 |---|---|
 | Flight C++ on a PC (host tests), strict warnings and AddressSanitizer + UBSan | 964 checks, 0 failures |
-| Ground and EGSE test suite (Python 3.11 and 3.13) | 749 tests: 746 passed, 3 skipped (optional reference files) |
+| Ground and EGSE test suite (Python 3.11 and 3.13) | 750 tests: 747 passed, 3 skipped (optional reference files) |
 | Flight-to-ground cross-checks | every packet, frame, CLTU, SDLS frame and CFDP file bit-exact |
 | Official CCSDS 121.0 test data | flight 56/56 and ground 74/74 files octet for octet |
-| Firmware type-check in every build option + station and RouterBridge harnesses | 64 ok, 26 and 12 checks, negative controls fail as intended |
-| Real Arduino builds (App Lab's compiler and board package) | 7 builds (both sketches, default and SX126x radio, two platform versions), 0 warnings in project code |
+| Firmware type-check in every build option + station and RouterBridge harnesses | 65 ok, 26 and 12 checks, negative controls fail as intended |
+| Real Arduino builds (App Lab's compiler and board package) | 9 builds (both sketches, default and SX126x radio; the flight sketch on three platform versions, back to 0.90.0), 0 warnings in project code, every symbol resolvable by the board's loader |
 | Adversarial review (18 reviewers with skeptic verification) | 62 confirmed findings fixed, with a regression test wherever one is feasible |
 | Continuous integration | lint, host tests, ground tests and real builds on every push |
 

@@ -118,7 +118,7 @@ class RpcMailbox {
 #ifdef VGQ_HOST_BUILD
     loop_ = std::this_thread::get_id();
 #else
-    loop_ = k_current_get();
+    loop_ = current_thread();
 #endif
     started_ = true;
   }
@@ -127,7 +127,7 @@ class RpcMailbox {
 #ifdef VGQ_HOST_BUILD
     return std::this_thread::get_id() == loop_;
 #else
-    return k_current_get() == loop_;
+    return current_thread() == loop_;
 #endif
   }
 
@@ -165,6 +165,15 @@ class RpcMailbox {
   }
 
  private:
+#ifndef VGQ_HOST_BUILD
+  // Not k_current_get(): with CONFIG_CURRENT_THREAD_USE_TLS it reads the extern
+  // thread_local z_tls_current, and C++ then also references its TLS init function
+  // _ZTH13z_tls_current (weak). arduino:zephyr up to 0.90.0 does not compile with
+  // -fno-extern-tls-init and its loader does not export that symbol, so it refuses to
+  // load the sketch ("Undefined symbol with no entry in symbol table"). The
+  // scheduler's query is exported by every core release.
+  static k_tid_t current_thread() { return k_sched_current_thread_query(); }
+#endif
   RpcSem req_, done_, free_;
   RpcRequest slot_;
   int32_t result_ = 0;
