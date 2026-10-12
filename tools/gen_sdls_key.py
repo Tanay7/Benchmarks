@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
 """Generate the SDLS (CCSDS 355.0-B) master key for BOTH ends.
 
-Writes (both git-ignored - never commit keys):
-  ground/config/sdls_key.hex                         used by the host GDS ([sdls] key_file)
-  spacecraft/vgq1_flight/sketch/src/sdls_key.h       compiled into the flight software
+Writes two files from ONE new 256-bit key (both git-ignored and never packaged - never
+commit or share them):
+  flight header  vgq1-spacecraft/sketch/src/sdls_key.h     compiled into the flight software
+                 (flight.cpp includes <sketch>/src/sdls_key.h when it exists)
+  ground key     dssq-groundstation/data/sdls_key.hex       the station's key: the ground App
+                 reads <App>/data/sdls_key.hex both under App Lab and in host mode
+                 (python -m dssq.gds --app-data <App>/data, host/install_station.sh) unless
+                 [sdls] key_file is an absolute path (Phase B PB-3.2 / PB-6.2)
+Those are the defaults, inside this repository. The App Lab zips never contain a key, so
+after importing the Apps generate the key straight into the imported App folders:
+  --flight-header ~/ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h      (UNO Q)
+  --ground-key    ~/ArduinoApps/dssq-groundstation/data/sdls_key.hex       (VENTUNO Q)
+The two Apps run on two boards, but there is ONE key: run this script ONCE, on one
+machine, and copy each of the two files it writes to its board's path above (e.g. scp).
+Running it again (on the other board) makes a DIFFERENT key, and the ends no longer
+understand each other. The parent folder of each output must exist, except that its last
+level is created (e.g. <App>/data before the App's first start).
 
-The ground App Lab app ignores a relative key_file: copy the .hex file to
-<App>/data/sdls_key.hex there (Phase B PB-3.2 / PB-6.2). Then choose the services with
-[sdls] tc_service / tm_service in station.toml (NONE, AUTH or AE; the flight's
-compile-time VGQ_SDLS_TC / VGQ_SDLS_TM must match) and rebuild/upload the flight sketch.
-Both ends must hold the same key and SPI. Encryption (AE) is generally not permitted on
-amateur frequencies: use AUTH or NONE there (docs/09).
+Then choose the services with [sdls] tc_service / tm_service in station.toml (NONE, AUTH
+or AE; the flight's compile-time VGQ_SDLS_TC / VGQ_SDLS_TM must match) and rebuild/upload
+the flight sketch. Both ends must hold the same key and SPI. Encryption (AE) is generally
+not permitted on amateur frequencies: use AUTH or NONE there (docs/09).
 
 A NEW key allows the spacecraft EGSE boot counter (the SDLS TM epoch) to restart; with an
 OLD key it must never go back, or TM nonces would repeat (PB-6.3).
 
 Usage:  python3 tools/gen_sdls_key.py [--spi 1] [--force]
+                                      [--flight-header PATH] [--ground-key PATH]
+Exit status: 0 written; 1 a key file exists (use --force) or cannot be written; 2 usage.
 """
 from __future__ import annotations
 
@@ -27,8 +41,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GROUND = ROOT / "ground" / "config" / "sdls_key.hex"
-FLIGHT = ROOT / "spacecraft" / "vgq1_flight" / "sketch" / "src" / "sdls_key.h"
+GROUND = ROOT / "dssq-groundstation" / "data" / "sdls_key.hex"
+FLIGHT = ROOT / "vgq1-spacecraft" / "sketch" / "src" / "sdls_key.h"
+FLIGHT_NAME = "sdls_key.h"                 # the only name the flight build includes
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -50,27 +65,52 @@ def flight_header(key: bytes, spi: int) -> str:
             f"static const uint8_t kVgqSdlsKey[32] = {{{body}}};\n")
 
 
+def _shown(path: Path) -> str:
+    return str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--spi", type=int, default=1, help="AUTH Security Parameter Index (1..65535)")
     ap.add_argument("--force", action="store_true", help="overwrite existing keys")
+    ap.add_argument("--flight-header", type=Path, default=None, metavar="PATH",
+                    help=f"flight key header (default {_shown(FLIGHT)})")
+    ap.add_argument("--ground-key", type=Path, default=None, metavar="PATH",
+                    help=f"ground key file (default {_shown(GROUND)})")
     a = ap.parse_args(argv)
     if not 1 <= a.spi <= 0xFFFF:
         print("--spi must be 1..65535", file=sys.stderr)
         return 2
-    if (GROUND.exists() or FLIGHT.exists()) and not a.force:
+    flight = (a.flight_header or FLIGHT).expanduser().absolute()
+    ground = (a.ground_key or GROUND).expanduser().absolute()
+    if flight == ground:
+        print("--flight-header and --ground-key must be two different files", file=sys.stderr)
+        return 2
+    if (ground.exists() or flight.exists()) and not a.force:
         print("keys already exist (use --force to replace them on BOTH ends)", file=sys.stderr)
         return 1
     key = secrets.token_bytes(32)                         # 256-bit key from the OS CSPRNG
-    _write_private(GROUND, key.hex() + "\n")
-    _write_private(FLIGHT, flight_header(key, a.spi))
-    print(f"SDLS key written:\n  {GROUND}\n  {FLIGHT}\nSPI = {a.spi}.\n"
+    written: list[Path] = []
+    try:
+        for path in (ground, flight):
+            path.parent.mkdir(exist_ok=True)              # last level only, e.g. <App>/data
+        _write_private(ground, key.hex() + "\n")
+        written.append(ground)
+        _write_private(flight, flight_header(key, a.spi))
+    except OSError as e:
+        for path in written:
+            path.unlink(missing_ok=True)                  # never leave half of a key pair
+        print(f"cannot write the key files: {e}", file=sys.stderr)
+        return 1
+    print(f"SDLS key written (SPI = {a.spi}):\n  flight: {_shown(flight)}\n  ground: {_shown(ground)}\n"
           "Next: set [sdls] tc_service / tm_service in station.toml (and the matching flight "
           "VGQ_SDLS_TC / VGQ_SDLS_TM), then rebuild and upload the flight sketch.\n"
-          f"Host GDS: uses {GROUND.relative_to(ROOT) if GROUND.is_relative_to(ROOT) else GROUND}. "
-          "Ground App Lab app: copy this file to <App>/data/sdls_key.hex "
+          "Ground App (App Lab and host mode --app-data): the key must be <App>/data/sdls_key.hex "
           "(the App ignores a relative key_file).\n"
           "A new key allows the EGSE boot counter to restart; with an old key it must never go back.")
+    if flight.name != FLIGHT_NAME:
+        print(f"warning: the flight build includes only <sketch>/src/{FLIGHT_NAME}, not {flight.name}",
+              file=sys.stderr)
     return 0
 
 

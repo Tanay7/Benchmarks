@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """VGQ-1 link budget and T-RF-03 receiver-sensitivity analysis (433 MHz, every radio model).
 
-Two subcommands (the radio tables come from ground/dssq/link.py, the single source):
+Two subcommands (the radio tables come from dssq-groundstation/python/dssq/link.py, the single source):
 
   budget (default)  free-space link budget for one model / rate code / power code
       python3 tools/link_budget.py --model E22-400T33D --rate-code 2 --distance-km 25 --gr 12
       python3 tools/link_budget.py budget --model SX126x --rate-code 1 --all-rates
-      python3 tools/link_budget.py budget --config ground/config/station.toml
+      python3 tools/link_budget.py budget --config dssq-groundstation/python/config/station.toml
   sensitivity       docs/08 test T-RF-03: stepped attenuation -> measured sensitivity
-      python3 tools/link_budget.py sensitivity --archive ground/archive --steps steps.csv --ref-dbm -40
-      python3 tools/link_budget.py sensitivity --archive ground/archive --live --rate-code 2
+      python3 tools/link_budget.py sensitivity --archive ARCHIVE --steps steps.csv --ref-dbm -40
+      python3 tools/link_budget.py sensitivity --archive ARCHIVE --live --rate-code 2
+  ARCHIVE is the station's [gds] archive_dir: <App>/data/archive for the App under App Lab,
+  <App>/python/archive in host mode (the default relative "archive", see host/).
 
 Physics (all standard):
   FSPL(dB)            = 20 log10(4 pi d f / c), c = 299 792 458 m/s (exact; in km and MHz
@@ -54,7 +56,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "ground"))
+sys.path.insert(0, str(ROOT / "dssq-groundstation" / "python"))   # the dssq package
 from dssq import link  # noqa: E402
 
 FER_THRESHOLD = 0.10                   # sensitivity criterion (T-RF-03)
@@ -502,7 +504,8 @@ def sensitivity(argv: list[str], input_fn: Callable[[str], str] = input, clock: 
     print_report(report, out)
     lines = toml_lines(report, datetime.fromtimestamp(t0, UTC).strftime("%Y-%m-%d"))
     if lines:
-        out("\n# add to ground/config/station.toml:\n[radio.sensitivity_measured]")
+        out("\n# add to station.toml (the station's copy: <App>/data/station.toml under App Lab):\n"
+                "[radio.sensitivity_measured]")
         for line in lines:
             out(line)
     refused = [f"{v['model']}:{v['rate_code']}" for v in report["verdicts"] if v["sensitivity_dbm"] is None]

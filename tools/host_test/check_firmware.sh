@@ -59,8 +59,8 @@ FLAGS=(-std=gnu++17 -fsyntax-only -Wall -Wextra -Wshadow -Wno-unused-parameter)
 LIBFLAGS=(-std=gnu++17 -fsyntax-only -Wall -Wextra)
 UNOQ=(-DARDUINO=10607 -DARDUINO_UNO_Q -DARDUINO_ARCH_ZEPHYR)
 VENTUNOQ=(-DARDUINO=10607 -DARDUINO_VENTUNO_Q -DARDUINO_ARCH_ZEPHYR)
-SK="$ROOT/spacecraft/vgq1_flight/sketch"
-FP="$ROOT/ground/station_io/sketch/sketch.ino"
+SK="$ROOT/vgq1-spacecraft/sketch"                     # UNO Q flight sketch (App vgq1-spacecraft)
+FP="$ROOT/dssq-groundstation/sketch/sketch.ino"       # VENTUNO Q station sketch (App dssq-groundstation)
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 LOG="$TMP/log"

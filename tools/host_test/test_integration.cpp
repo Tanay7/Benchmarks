@@ -2,7 +2,7 @@
 //  Phase B integration of the flight data & protocol layer (fsw/datalink.*,
 //  fsw/commands.*, fsw/tlm_packets.*, fsw/ssr.*, the SPECBURST packer) and the
 //  flight <-> ground vectors decoded by the independent Python ground stack
-//  (ground/tests/test_cross_check.py, test_spectral.py).
+//  (tests/test_cross_check.py, test_spectral.py).
 //
 //  Checks (Phase B specification PB-8.5, "WS1 extra"): apid_index; every packer's
 //  length and the v3 offsets of PB-1.3 / 1.4 / 1.11; parse_tc_header /
@@ -1507,7 +1507,7 @@ HOST_TEST(tc_accept_chain) {
   }
 }
 
-// Ground-built uplink frames (written by ground/tests/test_cross_check.py) through the
+// Ground-built uplink frames (written by tests/test_cross_check.py) through the
 // flight acceptance chain.
 HOST_TEST(ground_tc_roundtrip) {
   FILE* in = std::fopen((out + "/ground_tc.txt").c_str(), "r");

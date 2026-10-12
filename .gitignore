@@ -1,20 +1,37 @@
+# ---- Secrets: SDLS keys written by tools/gen_sdls_key.py, wherever they are (never committed,
+#      never packaged; tools/package_apps.py refuses a tree that contains one)
+sdls_key.h
+sdls_key.hex
+
+# ---- App Lab persistent data of the two Apps (<App>/data: EGSE archive and SCLK/SDLS state,
+#      station archive, station.toml copy, keys and the web token) - never committed
+vgq1-spacecraft/data/
+dssq-groundstation/data/
+# Host-mode station archive (relative [gds] archive_dir "archive", resolved in <App>/python)
+dssq-groundstation/python/archive/
+# v2 EGSE data location, migrated once into <App>/data by the EGSE
+vgq1-spacecraft/python/egse_data/
+
+# ---- RadioLib and Arduino_RouterBridge copies written by tools/radiolib.py and
+#      tools/routerbridge.py fetch (bundled into the App Lab zips, never committed)
+vgq1-spacecraft/sketch/libraries/
+dssq-groundstation/sketch/libraries/
+
+# ---- Host test build outputs (tools/host_test; the station and RouterBridge harnesses
+#      build into a temporary directory)
 tools/host_test/host_test
 tools/host_test/vectors/
+tools/host_test/*.bin
+tools/host_test/*.txt
+
+# ---- Packaging temporaries (tools/package_apps.py; the zips in dist/ are committed)
+dist/.*
+dist/*.tmp
+
+# ---- Python caches and local environments
 __pycache__/
 *.pyc
 .pytest_cache/
-ground/archive/
-spacecraft/vgq1_flight/python/egse_data/
-# App Lab persistent data of the two Apps (<App>/data: EGSE archive and SCLK/SDLS state,
-# station archive, keys and tokens) - never committed
-spacecraft/vgq1_flight/data/
-ground/station_io/data/
-ground/config/sdls_key.hex
-spacecraft/vgq1_flight/sketch/src/sdls_key.h
-ground/.venv/
-tools/host_test/*.bin
-tools/host_test/*.txt
-# RadioLib and Arduino_RouterBridge copies written by tools/radiolib.py and
-# tools/routerbridge.py fetch (bundled into the App Lab packages, never committed)
-spacecraft/vgq1_flight/sketch/libraries/
-ground/station_io/sketch/libraries/
+.mypy_cache/
+.ruff_cache/
+.venv/

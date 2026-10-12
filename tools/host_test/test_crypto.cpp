@@ -3,13 +3,13 @@
 //    AES-256 forward cipher      FIPS-197 Appendix C.3
 //    AES-256-GCM                 McGrew-Viega GCM specification, test cases 13-16
 //                                (cross-checked by the independent ground code
-//                                ground/dssq/ccsds/aes_gcm.py, + `cryptography`
-//                                when installed: ground/tests/test_sdls.py)
+//                                dssq/ccsds/aes_gcm.py, + `cryptography` when
+//                                installed: tests/test_sdls.py)
 //    key derivation, TC AE (TC v1 and USLP TFPH as AAD), AUTH v2 compatibility,
 //    tamper and replay rejection, TM AE / null-SA protection (TM and USLP
 //    geometry) and the epoch rules that keep GCM nonces unique.
 //
-//  Writes <out>/sdls_ae_vectors.txt for ground/tests/test_sdls.py, one case per
+//  Writes <out>/sdls_ae_vectors.txt for tests/test_sdls.py, one case per
 //  line: "<name> key=value ..." - octet strings in hex, the integer fields
 //  (hdr_len, prot_end, epoch, sn) in decimal.
 // =============================================================================
@@ -47,10 +47,10 @@ void vec(const std::string& out, const std::string& line) {
 std::string kv(const char* k, const uint8_t* p, size_t n) { return std::string(" ") + k + "=" + hex(p, n); }
 std::string kv(const char* k, unsigned long v) { return std::string(" ") + k + "=" + std::to_string(v); }
 
-// Shared known answers (identical constants in ground/tests/test_sdls.py).
+// Shared known answers (identical constants in tests/test_sdls.py).
 // Master key 00 01 .. 1f; the derived keys and frames are reproduced by the ground's
-// independent implementation (Python hmac/hashlib + ground/dssq/ccsds/aes_gcm.py, and
-// `cryptography` when installed): ground/tests/test_sdls.py.
+// independent implementation (Python hmac/hashlib + dssq/ccsds/aes_gcm.py, and
+// `cryptography` when installed): tests/test_sdls.py.
 const char* const kKatTcKey = "6a0fc847b89c96f2a51182cb604701ce276d706174bda2907b13e4d1e7bdacf1";
 const char* const kKatTmKey = "e2344f0a091558afade4702042d0a9c9a9209464743e95fca02c3bd2ac3d6a59";
 // TC v1 AD frame, SCID 0x0A7, VC 0, N(S) 0, SPI 2, sn 7, NOOP packet 18c0c000000001.

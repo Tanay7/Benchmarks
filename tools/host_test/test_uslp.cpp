@@ -1,7 +1,6 @@
 // =============================================================================
 //  USLP framing mode (CCSDS 732.1-B-2): flight framer and TC parser checks, and
-//  the vectors ground/tests/test_uslp.py decodes with the independent Python
-//  stack:
+//  the vectors tests/test_uslp.py decodes with the independent Python stack:
 //
 //    <out>/uslp_cadus.bin       USLP CADUs: VC0/VC1/VC3 data + VCID 63 OID frames
 //    <out>/uslp_packets.txt     "<vc> <hex packet>" for every packet queued

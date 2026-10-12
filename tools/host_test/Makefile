@@ -1,6 +1,6 @@
 # Builds the flight protocol code on a PC and generates cross-check vectors.
 #   make -C tools/host_test          -> builds ./host_test and runs it into ./vectors
-FLIGHT := ../../spacecraft/vgq1_flight/sketch/src
+FLIGHT := ../../vgq1-spacecraft/sketch/src
 # Every pure-C++ (Arduino-free) flight source, plus every test_*.cpp in this folder:
 # all of src/ccsds, src/drivers/radio.cpp (tables, LoRa maths, SX126x duty-cycle periods)
 # and src/fsw except the two files that need the Arduino core (flight.cpp,

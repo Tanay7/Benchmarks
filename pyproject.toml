@@ -1,0 +1,28 @@
+# Tool settings for the repository's Python code (development / CI only: nothing here is
+# installed or packaged; the two App folders run on the Python standard library).
+#   python -m pytest -q          the test suite in tests/ (from the repository root)
+#   ruff check .                 lint, every .py in the tree (CI job "lint")
+#   mypy                         static types of the station, EGSE and tool code (CI job "lint")
+# Versions: requirements-dev.txt.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["vgq1-spacecraft/sketch/libraries", "dssq-groundstation/sketch/libraries"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "C4", "RUF"]
+
+# `mypy` checks the files below; the ground App's entry point needs a second run,
+# `mypy dssq-groundstation/python/main.py`, because both Apps name theirs main.py.
+[tool.mypy]
+python_version = "3.11"
+files = ["dssq-groundstation/python/dssq", "vgq1-spacecraft/python", "tools"]
+mypy_path = "dssq-groundstation/python:vgq1-spacecraft/python:tools"
+explicit_package_bases = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true

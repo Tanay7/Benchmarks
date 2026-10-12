@@ -22,7 +22,7 @@
 //     for other legal parameter sets: round trip through an independent
 //     test-local decoder, output bound, option coverage (every option of the
 //     mission's 4-bit ID set must occur), argument and overflow handling.
-//  4. <out>/rice_vectors.txt for ground/tests/test_rice.py, one stream per line:
+//  4. <out>/rice_vectors.txt for tests/test_rice.py, one stream per line:
 //       name n J r restricted count samples_hex(u16 big-endian) encoded_hex
 //     The ground decoder must restore the samples and the ground reference
 //     encoder must reproduce the encoded stream bit for bit.
@@ -44,7 +44,7 @@ using host_test::hex;
 namespace {
 
 // ---- Official CCSDS test data (subset) -----------------------------------------------------
-// ground/tests/test_rice.py parses this table (between the BEGIN/END markers): keep the layout.
+// tests/test_rice.py parses this table (between the BEGIN/END markers): keep the layout.
 struct OfficialInput {
   const char* file;        // path below 121B2TestData
   unsigned width;          // octets per sample in the file (little-endian), 1 or 2

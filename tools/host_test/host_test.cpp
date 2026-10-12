@@ -1,9 +1,10 @@
 // =============================================================================
 //  Host (PC) verification harness for the VGQ-1 flight protocol code.
 //
-//  Compiles the EXACT flight sources from spacecraft/vgq1_flight/sketch/src/ccsds
+//  Compiles the EXACT flight sources from vgq1-spacecraft/sketch/src/ccsds
 //  with a desktop compiler, runs self-checks, and writes test vectors that the
-//  independent ground decoder (Python, ground/dssq) must decode bit-exactly:
+//  independent ground decoder (Python, dssq-groundstation/python/dssq) must
+//  decode bit-exactly (tests/ at the repository root):
 //
 //    <outdir>/cadus.bin       stream of 236-octet CADUs produced by the flight mux
 //    <outdir>/packets.txt     "<vc> <hex packet>" for every real packet queued
@@ -16,24 +17,23 @@
 //
 //  Build & run:   make -C tools/host_test   (or see Makefile)
 // =============================================================================
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/ccsds_types.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/crc16.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/randomizer.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/reed_solomon.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/sdls.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/sha256.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tc.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tm.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/attitude.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/ssr.h"
-#include <cmath>
-
+#include "ccsds/ccsds_types.h"
+#include "ccsds/crc16.h"
+#include "ccsds/randomizer.h"
+#include "ccsds/reed_solomon.h"
+#include "ccsds/sdls.h"
+#include "ccsds/sha256.h"
+#include "ccsds/tc.h"
+#include "ccsds/tm.h"
+#include "fsw/attitude.h"
+#include "fsw/ssr.h"
 #include "host_test.h"
 
 using namespace ccsds;

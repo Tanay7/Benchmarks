@@ -1,477 +1,1005 @@
 # 00 - Beginner Setup Guide (step by step)
 
-This guide takes you from a box of parts to a working link: the **UNO Q "spacecraft"
-(VGQ-1, the transmitter)** sending CCSDS telemetry over the E22 radio to the
-**VENTUNO Q "ground station" (DSS-Q1, the receiver)**, which decodes it, shows it on a
-web dashboard and sends commands back - typed on the CardKB keyboard or in the browser.
+This guide takes you from a box of parts to a working two-way radio link:
 
-You do not need to know CCSDS, LoRa or Linux to follow it. Every step says **what to do**,
-**what you should see** and **what to do if you do not see it**. Work through the parts in
-order; each one ends with a check, so a problem is caught where it happens.
+* the **VGQ-1 spacecraft** - an Arduino UNO Q with a radio and three instruments - sends
+  CCSDS telemetry, and
+* the **DSS-Q1 ground station** - an Arduino VENTUNO Q with a radio - receives it, shows it
+  on a web dashboard and sends commands back, typed on a small keyboard or in the browser.
 
-| Part | What you do | Time |
+You do not need to know CCSDS, LoRa or Linux. Every step says what to **do**, what you should
+**see** (the check), and what to do **if you do not see it**. Work through the parts in order:
+each part ends with a check, so a problem is caught where it happens.
+
+| Part | What you do | About |
 |---|---|---|
-| A | Safety rules (read once) | 5 min |
-| B | Check you have every part | 15 min |
-| C | Try the whole system with NO hardware (simulator) | 20 min |
-| D | Prepare the two radios | 30 min |
-| E | Build the spacecraft (UNO Q) one instrument at a time | 2-3 h |
-| F | Build the ground station (VENTUNO Q) | 1-2 h |
-| G | First contact on the bench | 30 min |
-| H | Send your first commands | 15 min |
-| I | Switch on uplink authentication (SDLS) | 15 min |
-| J | Go for distance | a day out |
-| K | Troubleshooting | - |
+| [1](#part-1---safety-rules) | Safety rules | 5 min |
+| [2](#part-2---what-you-need) | Check you have every part and tool | 15 min |
+| [3](#part-3---pc-tools-and-project-files) | Install the PC tools, get the project files, optional dry run | 30 min |
+| [4](#part-4---flash-the-nicla-sense-me) | Flash the Nicla Sense ME | 15 min |
+| [5](#part-5---set-up-the-boards-and-import-the-two-apps) | Set up both boards, import the two App Lab zips | 45 min |
+| [6](#part-6---generate-the-security-keys-after-the-import) | Generate the security keys (after the import) | 15 min |
+| [7](#part-7---settings-for-your-station-and-site) | Enter your callsign (both ends) and site settings | 15 min |
+| [8](#part-8---wire-the-spacecraft-step-by-step) | Wire the spacecraft, one piece at a time | 2-3 h |
+| [9](#part-9---wire-the-ground-station-step-by-step) | Wire the ground station, one piece at a time | 1-2 h |
+| [10](#part-10---first-power-up-of-the-complete-system) | First power-up of the complete system | 15 min |
+| [11](#part-11---first-contact-on-the-bench) | First contact on the bench | 30 min |
+| [12](#part-12---your-first-commands) | Your first commands | 15 min |
+| [13](#part-13---switching-to-the-5-w-e22-400t37s-the-a0-strap) | Optional: the 5 W radio (A0 strap) | 1 h |
+| [14](#part-14---going-for-distance) | Going for distance | a day out |
+| [15](#part-15---host-mode-fallback-for-the-ground-station) | Fallback: run the ground software as a Linux service | 30 min |
+| [16](#part-16---updating-or-re-importing-an-app-without-losing-state) | Updating an App without losing its state | 15 min |
+| [17](#part-17---troubleshooting-pointers) | Troubleshooting pointers | - |
 
-Words used below: **TX** = transmit, **RX** = receive, **GDS** = ground data system (the
-receiver software), **FSW** = flight software (the spacecraft program), **App Lab** =
-Arduino's tool for UNO Q / VENTUNO Q apps.
+Words used below:
 
----
+| Word | Meaning |
+|---|---|
+| TX / RX | transmit / receive |
+| MCU | the small real-time microcontroller on each board (runs the "sketch") |
+| Linux side | the board's main processor running Linux (runs the Python part of an App) |
+| App | an Arduino App Lab project: a sketch for the MCU plus Python for the Linux side |
+| FSW | flight software (the spacecraft sketch) |
+| EGSE | the spacecraft's Linux-side helper program (keeps counters, archives what is sent) |
+| GDS | ground data system (the ground station's Linux-side program and web dashboard) |
+| EVR | an event report line from the spacecraft, e.g. `EVR 0x0306 INFO radio ... OK` |
+| SDLS | the link security (encryption and/or authentication of the radio frames) |
 
-## Part A - Safety rules (read before anything else)
-
-1. **Never power an E22-400T37S without an antenna or a 50-ohm load on its SMA socket.**
-   EBYTE: "The module must be connected to a 50 ohm impedance antenna when sending. No-load
-   transmission may cause permanent damage to the module." The module transmits 5 W (37 dBm)
-   and its power **cannot be turned down in software** (all power codes are 37 dBm).
-2. **Never put two E22s close together with antennas on.** The receiver input is rated for at
-   most +10 dBm. On the bench use the attenuator set-up in Part G, or keep the stations more
-   than ~100 m apart.
-3. **Licence.** 433 MHz at 5 W is amateur-radio territory almost everywhere: you need an
-   amateur licence and your callsign in `config.h` (`VGQ_CALLSIGN`). See
-   [09 Regulatory & Safety](09_Regulatory_and_Safety.md). Encryption is not allowed on amateur
-   bands, which is why the uplink is *authenticated* but not encrypted.
-4. **RF exposure.** Do not stand next to a transmitting antenna; keep at least 1 m from a
-   5 W 433 MHz antenna while it transmits.
-5. **Logic levels.** The UNO Q, the VENTUNO Q, the E22 (TTL 3.3 V), the AS7265X and the RM3100
-   all use 3.3 V logic. **Never connect a 5 V signal to them.** Only the *power* inputs of the
-   Nicla boards and the CardKB take 5 V.
-6. **Polarity.** The E22 test board and the Nicla boards have no reverse-polarity protection on
-   every input. Check + and - with a meter before switching on.
+Wiring tables, pin maps, the power budget and the full parts list are in
+[03_Hardware_Integration.md](03_Hardware_Integration.md). This guide refers to them as
+"docs/03 section x".
 
 ---
 
-## Part B - Parts list
+## Part 1 - Safety rules
 
-### B.1 What you already have (used in this project)
+Read these once before you touch anything.
+
+1. ⚠ **Never power a radio without an antenna or a 50 Ohm dummy load on its SMA socket.**
+   EBYTE: "No-load transmission may cause permanent damage to the module."
+   The spacecraft starts transmitting as soon as its software runs. During the build (parts 8-10)
+   keep a 50 Ohm dummy load on each radio.
+2. ⚠ **Never put two radios close together with antennas fitted.** The receiver input is rated
+   for at most +10 dBm. Two 2 W radios one metre apart exceed that. On the bench use the
+   attenuator set of part 11, or keep the antennas at least 10 m apart (100 m is better).
+   Numbers: docs/03 section 10.
+3. ⚠ **Licence.** Transmitting at 433 MHz needs a licence; in most countries this is the
+   amateur-radio licence, and your callsign goes into the software at both ends (part 7).
+   5 W needs a licence that allows 5 W. Encryption is generally **not** allowed on amateur frequencies:
+   part 6 shows how to switch it off. Details: [09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md).
+4. ⚠ **RF exposure.** Do not stand next to an antenna that is transmitting
+   ([09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md)).
+5. **3.3 V logic everywhere.** Every signal wire in this project is 3.3 V. 5 V and 12 V go only
+   to the power pins named in the tables. Never connect a 5 V signal to a board pin.
+6. **Polarity and fuses.** Check + and - with a meter before you connect a board. Reversed
+   polarity destroys the radio modules. Put the fuse at the battery end.
+7. **Lithium batteries.** Use a pack with a protection board. Never heat it, never charge it
+   unattended, never charge it inside the spacecraft structure.
+8. **Heat tests.** Only with a hair dryer at a distance, never an oven or a flame (record TMP in
+   [21_Test_Records.md](21_Test_Records.md)).
+
+---
+
+## Part 2 - What you need
+
+### 2.1 Parts
+
+The complete list with part numbers is in docs/03 section 7. The minimum for the default
+system:
 
 | Qty | Part | Role |
 |---|---|---|
-| 1 | Arduino UNO Q | **Spacecraft** flight computer (transmitter) |
-| 1 | Arduino VENTUNO Q | **Ground station** (receiver, web dashboard, command uplink) |
-| 2 | EBYTE E22-400T37S on E22-400TBH-02 test board | Radios: one on each end |
-| 1 | Arduino Nicla Sense ME | Attitude reference unit: orientation, IMU, magnetometer, pressure, gas |
-| 1 | Arduino Nicla Sense Env | Temperature, humidity, indoor/outdoor air quality |
-| 1 | SparkFun AS7265X Spectral Triad | 18-channel spectrometer (410-940 nm) |
-| 1-2 | RM3100 magnetometer breakout | Science magnetometer on a boom (second one optional) |
-| 2 | M5Stack CardKB mini keyboard | #1 command entry, #2 second-operator approval (ground side) |
-| 2 | 433 MHz antennas (SMA) | One per radio |
+| 1 | Arduino UNO Q (ABX00162) | spacecraft computer |
+| 1 | Arduino VENTUNO Q (ABX00181) | ground station computer |
+| 2 | EBYTE E22-400T33D radio module | one per end |
+| 2 | 433 MHz antennas (SMA) and 2 x 50 Ohm dummy loads (>= 5 W) | one per end |
+| 1 | Arduino Nicla Sense ME (ABX00050) | attitude and environment sensor |
+| 1 | SparkFun Spectral Triad AS7265x (SEN-15050) | spectrometer |
+| 1 (+1) | RM3100 magnetometer breakout | magnetometer on a boom (second one optional) |
+| 1 | 3.3 V-logic USB-UART adapter | ground radio to the VENTUNO Q |
+| 1 | M5Stack CardKB (U035 or v1.1) + Grove-to-jumper cable | command keyboard |
+| 1 | 12 V battery or bench supply (>= 4 A), 4 A fuse, 12 V to 5 V buck converter (>= 3 A) | spacecraft power |
+| 1 | 12 V / 5 A power supply, 5.5 x 2.1 mm plug | VENTUNO Q power |
+| - | resistors (10 kOhm x 4, 330 Ohm x 3, 1 kOhm, 4.7 kOhm x 2 spare), 3 LEDs, 5 V buzzer, NPN transistor, 470-1000 uF + 100 nF capacitors x 2 | small parts |
+| - | jumper wires, header pins, heat-shrink, a non-magnetic boom (wood or plastic, 0.5-1 m) | mechanics |
+| 1 set | bench RF set: 2 x 30 dB (>= 5 W) + 1 x 40 dB SMA attenuators, short SMA cables | first contact (part 11) |
 
-About the antennas: a small 433 MHz antenna sold as "35 dBi" cannot have that gain - a 35 dBi
-antenna at 433 MHz would need about 120 m² of effective area (a dish ~16 m across). Treat each
-as a ~2 dBi whip/dipole. For more distance use a 433 MHz Yagi on the ground (see Part J).
+### 2.2 Tools
 
-### B.2 Parts to buy (small)
+Multimeter, soldering iron, wire stripper, small screwdriver. A USB-C cable for each board,
+a micro-USB cable for the Nicla Sense ME.
 
-| Qty | Part | Why |
-|---|---|---|
-| 1 | 12 V supply or battery for the spacecraft, >= 4 A (e.g. 3S Li-ion 11.1 V, 12.6 V full) | E22 needs 4.5-15 V; at 12 V it draws 1.1 A typ / 1.3 A max when transmitting (EBYTE asks for a supply of >= 1.5 A) |
-| 1 | 12 V -> 5 V buck converter, >= 1 A | Powers both Nicla boards (the UNO Q takes 12 V on its VIN pin) |
-| 2 | Fuse + holder: 4 A (spacecraft 12 V line), 2 A (ground E22 12 V line) | Protects wiring and battery |
-| 1 | 12 V, >= 1.5 A supply for the ground E22 | Separate from the VENTUNO Q supply |
-| 1 | VENTUNO Q power supply: 12 V/3 A or more on the barrel jack (60 W, 12 V/5 A, for full headroom) | Arduino recommends >= 60 W for heavy AI/USB loads; this station is light (13.3 W measured peak for a simple app) |
-| 4 | 10 kOhm resistors | M0/M1 pull-ups on each E22 board |
-| 3 + 1 | 3 mm LEDs (green, red, yellow) + 330 Ohm resistors | AOS / ALARM / UPLINK lamps |
-| 1 | 5 V active buzzer, NPN transistor (2N2222/BC547), 1 kOhm resistor | Alarm sound |
-| 2 | 4-channel bidirectional I2C level shifter (BSS138 type) | CardKB (5 V) to VENTUNO Q (3.3 V) |
-| 3-5 | Qwiic cables (100-500 mm) + 2 Qwiic-to-jumper "breadboard" cables | Sensor bus |
-| - | Jumper wires (female-female), heat-shrink, small breadboard | Wiring |
-| 1 | Multimeter | Checks in every part |
-| Bench RF set | One 40 dB / 10 W and two 30 dB / 2 W SMA attenuators, SMA cables, or a 50 Ohm 10 W dummy load | Safe bench tests (Part G) |
+### 2.3 Other things
 
-### B.3 Software you will install
-
-* On a PC: **Arduino App Lab** (for the UNO Q and the VENTUNO Q) and **Arduino IDE 2** (only to
-  program the Nicla Sense ME). Python 3.11 or newer if you want to run the simulator on the PC.
-* Nothing to buy; everything else is in this repository.
+* A PC (Windows, macOS or Linux) and a Wi-Fi network that the PC and both boards can join.
+* Internet access during setup (App Lab, the Arduino IDE board package, the board updates).
+* Your licence and callsign.
 
 ---
 
-## Part C - Try everything with no hardware (simulator)
+## Part 3 - PC tools and project files
 
-This proves the software works before you touch a wire, and teaches you the dashboard. You can
-do it on any Linux/macOS/Windows PC with Python 3.11+ (or later on the VENTUNO Q itself).
+### 3.1 Install the tools
+
+1. **Arduino App Lab** (from arduino.cc, Software page). It programs the UNO Q and the VENTUNO Q.
+   *Linux PCs:* follow the "USB permissions" (udev rules) section of Arduino's UNO Q user manual,
+   otherwise App Lab and `adb` cannot see the board.
+2. **Arduino IDE 2** (from arduino.cc). Only for the Nicla Sense ME.
+3. **Python 3.11 or newer** (python.org; Linux and macOS usually have it). Needed for the key
+   generator and the optional dry run. Check: `python3 --version` (Windows: `py -3 --version`)
+   prints 3.11 or higher.
+4. A terminal with `ssh` and `scp`. They are built into Windows 10/11, macOS and Linux.
+
+### 3.2 Get the project files
+
+Either clone the repository:
 
 ```bash
-git clone <this repository URL> Benchmarks
-cd Benchmarks/ground
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt        # Windows: .venv\Scripts\pip install -r requirements.txt
-.venv/bin/python -m dssq.gds --sim                # Windows: .venv\Scripts\python -m dssq.gds --sim
+git clone https://github.com/Tanay7/vgq1-deep-space-link.git
+cd vgq1-deep-space-link
 ```
 
-**You should see** log lines such as `SIMULATION MODE - software spacecraft, no RF`, then
-`RX AOS` and every 10 s a `STATUS AOS sync=LOCK RSSI=... frames=...` line.
+or download it as a ZIP from the GitHub page and unpack it. You need:
 
-Open **http://127.0.0.1:8080** in a browser. Click through the tabs:
-
-* **OVERVIEW** - big tiles: signal, RSSI, SNR, margin, frames, spacecraft mode.
-* **RECEIVER** - the detailed receiver: link budget, FSPL, RSSI statistics to 4 decimals with
-  their standard error, decoder and frame counters, histograms.
-* **SCIENCE** - magnetometers, attitude, environment and the spectrum (simulated values).
-* **COMMANDING** - type `NOOP` and press Enter. Watch it go QUEUED -> RADIATED -> ACCEPTED ->
-  EXECUTED in the history table. Then try `MODE ENCOUNTER`, `PING 42`, `HELP`.
-
-Stop the program with **Ctrl+C**. If this part works, every later problem is hardware/wiring.
-
-**Did not work?** `No module named ...` -> you skipped the `pip install` step.
-`TOML support needs Python 3.11+` -> install a newer Python (Ubuntu 24.04 has 3.12).
-
----
-
-## Part D - Prepare the two radios
-
-The E22-400TBH-02 board (EBYTE manual "E22/E32-xxxTBH-02") has:
-
-* a **20-pin header** in two rows (bottom row pins 1-10, top row 11-20, see the picture in the
-  EBYTE manual): `1 GND, 2 GND, 3 RESET, 4 AUX, 5 TXD, 6 RXD, 7 M1, 8 GND, 9 GND, 10 M0` and
-  `11 3.3V, 12 GND, ..., 19 STATE, 20 GND`;
-* **two jumper caps on the bottom header** that short **M1-GND (pins 7-8)** and **GND-M0
-  (pins 9-10)**. Cap fitted = 0, cap removed = 1 (the module pulls the pin up);
-* **two orange jumper caps labelled RXD and TXD** next to the USB-C socket - they connect the
-  on-board USB-serial chip (CH340X) to the radio;
-* a **DC jack and a green screw terminal** for 4.5-15 V (the terminal is disabled when the DC
-  jack is plugged in), an **SMA antenna socket**, and an **AUX LED**.
-
-Mode table (EBYTE manual, chapter 6): M1 M0 = `0 0` normal, `0 1` Wake-on-Radio,
-`1 0` configuration (always 9600 8N1), `1 1` deep sleep.
-
-### D.1 Look at the factory settings (optional but recommended)
-
-1. Screw an antenna (or a 50 Ohm load) onto the SMA socket. **Always, before power.**
-2. Leave all four caps fitted. Remove only the **M1** cap -> configuration mode.
-3. Connect the board's USB-C to the PC/VENTUNO Q and 12 V to the DC jack.
-4. Run (in `Benchmarks/ground`):
-
-   ```bash
-   .venv/bin/python -m dssq.radio.e22 --port /dev/ttyUSB0      # Windows: --port COM5
-   ```
-
-   **You should see** `product info: ...` and a table: `channel 23`, `freq_mhz 433.125`,
-   `air_rate 2.4k`, `uart_bps 9600` (EBYTE factory default: address 0, channel 0x17 = 23,
-   2.4 kbit/s, 9600 8N1).
-5. Put the M1 cap back.
-
-You do not need to change the spacecraft radio's settings - the flight software writes the
-complete configuration into it at every boot and reads it back to verify it. The ground radio
-is configured the same way by the GDS when the Radio Control Unit is wired (Part F), or once
-by hand:
-
-```bash
-# M1 cap removed (configuration mode):
-.venv/bin/python -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config config/station.toml
-```
-
-This sets channel 23 (433.125 MHz), 2.4 kbit/s, RSSI byte on, ambient-noise reading on and the
-abnormal-status reports on. **Check your band plan/licence before choosing a channel**
-(`allowed_channels` in `config/station.toml`).
-
----
-
-## Part E - Build the spacecraft (UNO Q), one piece at a time
-
-Wiring tables and diagrams: [03 Hardware Integration](03_Hardware_Integration.md) section 3.
-Here you build it in small steps and test after each.
-
-### E.1 Set up the UNO Q and App Lab
-
-1. Install **Arduino App Lab** on your PC and connect the UNO Q by USB-C. Follow App Lab's
-   first-start wizard (it updates the board, sets the board's name, password and Wi-Fi).
-2. Get the repository onto the board. Easiest: in App Lab open a terminal on the board (or
-   `ssh arduino@<board-name>.local`, or `adb shell`) and run
-   `git clone <repository URL> ~/Benchmarks`.
-3. Copy the spacecraft app into App Lab's apps folder:
-
-   ```bash
-   cp -r ~/Benchmarks/spacecraft/vgq1_flight ~/ArduinoApps/vgq1-flight
-   ```
-
-   (Alternative: zip the `spacecraft/vgq1_flight` folder on your PC and use App Lab **My Apps ->
-   open any app -> the arrow next to its name -> Import App**. Imported apps land in
-   `~/ArduinoApps/` on the board.)
-4. In App Lab open **VGQ-1 Flight Software**. App Lab installs the two instrument libraries
-   listed in `sketch/sketch.yaml` (SparkFun Spectral Triad AS7265X, Arduino_NiclaSenseEnv).
-
-### E.2 Step 1 - flight computer alone (no wires yet)
-
-Press **Run** in App Lab. The sketch is built for the STM32U585 (`arduino:zephyr:unoq`) and the
-Linux-side EGSE (`python/main.py`) starts.
-
-**You should see** in the console: `VGQ-1 flight software boot`, `SSR 256 KiB allocated from the
-heap` (or a smaller power of two), `E22 config FAILED` (correct - no radio yet),
-`instruments: ... ABSENT`, and from the EGSE every 10 s a box titled
-`VGQ-1 TRANSMITTER (EGSE)`. The LED matrix on the UNO Q shows the status lights (row 7: one
-lit column = SAFE mode).
-
-### E.3 Step 2 - power plan
-
-Wire the power before signals (diagram in 03 section 3.1):
-
-* 12 V battery/supply -> 4 A fuse -> E22 board DC jack (or green terminal).
-* Same fused 12 V -> UNO Q **VIN** (JANALOG header pin 8, accepts 7-24 V); GND to a UNO Q GND pin.
-  (Arduino asks for a dedicated 5 V / 3 A source if you power the UNO Q through USB-C instead.)
-* 12 V -> buck converter -> 5 V -> Nicla Sense ME VIN, Nicla Sense Env 5 V.
-* **One common ground** for everything.
-
-Check with the meter: 12 V at the E22 terminal and at the UNO Q VIN pin, 5.0-5.2 V at the buck
-output, correct polarity.
-
-### E.4 Step 3 - the spacecraft radio
-
-1. Antenna (or 50 Ohm load) on the SMA socket. **Always.**
-2. Remove **all four caps**: M0, M1 (bottom header) and RXD, TXD (by the USB socket). The RXD/TXD
-   caps must go: they connect the board's USB chip to the same radio pins the UNO Q will drive.
-3. Fit a **10 kOhm resistor from M0 to 3.3 V and one from M1 to 3.3 V** (EBYTE specifies the
-   module's own pull-ups as "very weak"; with these the radio sleeps safely while the UNO Q boots).
-4. Wire (TBH-02 header -> UNO Q):
-
-   | E22 board pin | UNO Q pin |
-   |---|---|
-   | 1 GND | GND |
-   | 4 AUX | D7 |
-   | 5 TXD | header pin printed **SDA** (it is used as UART RX, USART3) |
-   | 6 RXD | header pin printed **SCL** (UART TX) |
-   | 7 M1 | D3 |
-   | 10 M0 | D2 |
-
-   The UNO Q's D0/D1 serial port is *not* used: it also carries the Zephyr console, whose text
-   would be transmitted over the air. The SDA/SCL header pins become a UART; all sensors use the
-   Qwiic connector instead.
-5. Power up and **Run**. **You should see** `E22 product info ...` and
-   `E22 config verified: ch=23 (433.125 MHz) air=2 pwr=0`. The board's AUX LED blinks every few
-   seconds and row 0 of the LED matrix lights while it transmits.
-
-**"E22 config FAILED"?** Check: TXD/RXD crossed correctly (board TXD -> UNO Q SDA), caps removed,
-common ground, 12 V present. The verify step proves both directions of the serial link work.
-
-### E.5 Step 4 - the sensor bus (Qwiic), one instrument at a time
-
-The UNO Q's **Qwiic connector** is a 3.3 V I2C bus (`Wire1`). All four instruments share it -
-each has its own address, so no multiplexer is needed:
-
-| Instrument | Address | How to connect |
-|---|---|---|
-| AS7265X (SparkFun) | 0x49 | Qwiic cable (it has two Qwiic sockets: daisy-chain through it) |
-| RM3100 outboard | 0x20 | Qwiic-to-jumper cable: 3.3V, GND, SDA, SCL; address pins SA0 = SA1 = GND |
-| RM3100 inboard (optional) | 0x23 | as above, SA0 = SA1 = 3.3 V. **Never 0x21** (that is the Nicla Sense Env) |
-| Nicla Sense Env | 0x21 | ESLOV cable: SDA/SCL/GND to the Qwiic bus, 5V wire to the 5 V rail |
-| Nicla Sense ME | 0x2A | J2 header: pin 1 SDA, pin 2 SCL, pin 6 GND to the bus; pin 9 VIN to 5 V |
-
-Qwiic colours: black GND, red 3.3 V, blue SDA, yellow SCL.
-
-Add them **one at a time**, pressing Run after each and reading the `instruments:` log line
-(also the LED-matrix row 6 - one column per healthy item):
-
-1. **AS7265X** -> `AS7265X ok`. Every few minutes a SPEC packet is produced.
-2. **RM3100 outboard** -> `RM3100 OB ok`. Put it on a non-magnetic boom (wood/plastic), as far
-   as practical (0.5-1 m) from the radio and the battery; use a twisted 4-wire cable of at most
-   ~1 m (100 kHz I2C). Optional second RM3100 at mid-boom (address 0x23) -> `RM3100 IB ok`.
-   Enter the two boom distances in `ground/config/station.toml` `[science]`.
-3. **Nicla Sense Env** -> `Nicla Env ok`. It runs Arduino's factory firmware; nothing to flash.
-4. **Nicla Sense ME** -> first flash its firmware (next step), then connect -> `Nicla ME ok`.
-
-If an instrument shows `ABSENT`: check SDA/SCL are not swapped, 3.3 V/5 V present, and run the
-I2C scan by watching the boot log after each addition. Too many pull-up resistors on one bus
-can also stop it: SparkFun boards have I2C pull-up jumpers - leave them on one board only if
-the bus misbehaves.
-
-### E.6 Step 5 - program the Nicla Sense ME (attitude reference unit)
-
-1. Install **Arduino IDE 2**. In Boards Manager install **Arduino Mbed OS Nicla Boards**; in
-   Library Manager install **Arduino_BHY2**.
-2. Open `spacecraft/nicla_sense_me_aru/nicla_sense_me_aru.ino`, select **Nicla Sense ME** and
-   its USB port, click **Upload**.
-3. Open the Serial Monitor at 115200: **you should see**
-   `VGQ-1 ARU (Nicla Sense ME) ready at I2C 0x2A, accel +/-8 g, gyro +/-2000 dps`.
-4. Disconnect USB, wire it to the Qwiic bus (table above), power from 5 V, Run the UNO Q app.
-
-### E.7 Step 6 - set your site's magnetic field
-
-In `spacecraft/vgq1_flight/sketch/src/config.h` set `kGeomagInclDeg` and `kGeomagDeclDeg` for
-your location (NOAA or BGS "World Magnetic Model calculator", free online) - used by the TRIAD
-attitude solution - and your callsign in `VGQ_CALLSIGN`.
-
----
-
-## Part F - Build the ground station (VENTUNO Q)
-
-Wiring: [03 Hardware Integration](03_Hardware_Integration.md) section 4.
-
-### F.1 The VENTUNO Q itself
-
-1. Power it from 12 V or 24 V on the barrel jack (12 V/3 A is enough here; 60 W gives full
-   headroom). A USB-C supply must be USB PD (9-20 V). Keep its fan running.
-2. Do App Lab's first-start set-up (Wi-Fi, password). Open a terminal on the board
-   (`ssh arduino@<board-name>.local` or `adb shell`).
-3. Get the code and the Python environment (the board runs Ubuntu 24.04, which does not allow
-   `pip install` into the system Python - hence the virtual environment):
-
-   ```bash
-   git clone <repository URL> ~/Benchmarks
-   cd ~/Benchmarks/ground
-   python3 -m venv .venv
-   .venv/bin/pip install -r requirements.txt
-   sudo usermod -aG dialout $USER        # permission to open the E22 USB port; log out and in again
-   ```
-
-4. Quick check: `.venv/bin/python -m dssq.gds --sim` and open `http://<board>:8080` from your PC
-   after setting `http_host = "0.0.0.0"` and an `http_token` in `config/station.toml` (or browse
-   on the board itself at `http://127.0.0.1:8080`). Ctrl+C to stop.
-
-### F.2 The ground radio
-
-1. Antenna on the SMA socket (or the attenuator chain of Part G for the bench test).
-2. **Keep the RXD/TXD caps fitted** (the GDS uses the board's USB port). Remove the **M0 and M1
-   caps** if you wire the Radio Control Unit (F.3); otherwise leave all caps fitted.
-3. USB-C from the E22 board to a VENTUNO Q USB port; 12 V >= 1.5 A to its DC jack.
-4. `ls /dev/serial/by-id/` should show a CH340 device; it is usually `/dev/ttyUSB0`. Put the
-   right name in `config/station.toml` `[radio] port`.
-
-### F.3 Station I/O: CardKB keyboards, lamps, Radio Control Unit
-
-The VENTUNO Q's own microcontroller (STM32H5) runs the small App `ground/station_io`. It reads
-the keyboards, drives the lamps and switches the ground radio's mode pins (so the GDS can
-configure the radio, scan the band, and wake a hibernating spacecraft).
-
-| Item | Wire to VENTUNO Q |
+| File | Used in |
 |---|---|
-| E22 board header pin 10 (M0) | D2 (+ optional 10 kOhm to 3.3 V) |
-| E22 board header pin 7 (M1) | D3 (+ optional 10 kOhm to 3.3 V) |
-| E22 board header pin 4 (AUX) | D4 |
-| E22 board header pin 8 (GND) | GND |
-| AOS lamp (green LED + 330 Ohm) | D5 -> LED -> GND |
-| ALARM lamp (red) | D6 |
-| UPLINK lamp (yellow) | D7 |
-| Buzzer | A0 -> 1 kOhm -> NPN base; buzzer from 5 V to collector; emitter to GND |
-| CardKB #1 (commands) | through a 3.3 V <-> 5 V I2C level shifter to the header SDA/SCL (`Wire`); CardKB 5 V and GND |
-| CardKB #2 (2nd operator, optional) | through a level shifter to the VENTUNO Q's **Qwiic connector** (`Wire1`) |
+| `dist/vgq1-spacecraft-unoq.zip` | part 5 (UNO Q App) |
+| `dist/dssq-groundstation-ventunoq.zip` | part 5 (VENTUNO Q App) |
+| `nicla_sense_me_aru/nicla_sense_me_aru.ino` | part 4 |
+| `tools/gen_sdls_key.py` | part 6 |
 
-On the VENTUNO Q, `Wire1` is the Qwiic connector (I2C3) and `Wire` is the header SDA/SCL (I2C4),
-per Arduino's board files. The sketch auto-detects CardKB #2; if it is not found, the second operator approves from the web page.
+**Do not unzip the two App zips**: App Lab imports them as they are. They already contain
+everything the boards need, including the two bundled libraries, so the boards download nothing
+([22_Bundled_Libraries.md](22_Bundled_Libraries.md)). They never contain a key (part 6).
 
-Install the App: copy `~/Benchmarks/ground/station_io` to `~/ArduinoApps/dssq-station-io`, open
-**DSS-Q Station IO** in App Lab and press **Run** (it flashes the STM32H5;
-`arduino:zephyr:ventunoq`).
+Check: both zips are in the `dist/` folder. Optionally check that they arrived intact:
+`cd dist && sha256sum -c SHA256SUMS` (macOS: `shasum -a 256 -c SHA256SUMS`; Windows:
+`certutil -hashfile <zip> SHA256` and compare with the line in `SHA256SUMS`). Every line must
+say OK. (Developers rebuild the zips with `tools/package_apps.py`,
+[16_Developer_Guide.md](16_Developer_Guide.md).)
 
-### F.4 Start the GDS as a service
+### 3.3 Optional: dry run on the PC with the simulator
+
+This proves the ground software works and teaches you the dashboard before any wiring.
 
 ```bash
-cd ~/Benchmarks/ground
-nano config/station.toml      # station name, antenna gain, distance, radio port, frontpanel/rcu
-sudo cp deploy/dssq-gds.service /etc/systemd/system/   # edit User/WorkingDirectory first if needed
-sudo systemctl daemon-reload && sudo systemctl enable --now dssq-gds
-journalctl -u dssq-gds -f      # live log; Ctrl+C leaves it running
+cd dssq-groundstation/python
+python3 -m dssq.gds --sim          # Windows: py -3 -m dssq.gds --sim
 ```
 
-With the Radio Control Unit wired, the log shows `ground E22: ch 23 (433.125 MHz) ... matches
-station.toml` a few seconds after start. The lamps: AOS off, ALARM steady/flashing if there is
-an alarm. **If the GDS stops, the ALARM lamp flashes fast** - the MCU's link-down warning.
+Check:
+
+* The log shows `SIMULATION MODE - software spacecraft, no RF`, the warning
+  `[station] callsign is the placeholder N0CALL: ...` (you set it in part 7), and every 10 s a
+  line like `STATUS AOS sync=LOCK RSSI=... dBm ... frames=...`.
+* Open **http://127.0.0.1:8080** in a browser. The header shows **AOS** and **LOCK** and the
+  frame counter rises. **ALARM RED** with the reasons "beacon URGENT" (the simulated spacecraft
+  boots in SAFE mode and asks for attention, as the real one does, part 10) and "SDLS key file
+  not found: config/sdls_key.hex" (no key yet) is expected here.
+* COMMANDING tab: type `NOOP` and press Enter. The command goes QUEUED -> RADIATED ->
+  ACCEPTED -> EXECUTED. Try `HELP` and `PING 42`, then `MODE CRUISE`: the event list shows
+  `[0x0012] MODE SAFE -> CRUISE (command)` and `spacecraft beacon URGENT -> NOMINAL`, and the
+  alarm drops to YELLOW (only the key reason is left). After the first command the event list
+  also shows `station identification (periodic): DE N0CALL DSS-Q1`: the station identifies its
+  own transmissions (part 7.2).
+
+Stop it with Ctrl+C. The tabs are explained in [13_Web_UI_Reference.md](13_Web_UI_Reference.md).
+
+If not: `python3: command not found` or a message about TOML -> install Python 3.11+ (step 3.1.3).
+Port 8080 in use -> close the other program, or edit `[gds] http_port` in
+`dssq-groundstation/python/config/station.toml`.
 
 ---
 
-## Part G - First contact (bench)
+## Part 4 - Flash the Nicla Sense ME
 
-Two 5 W transmitters on one table can damage each other's receivers. Use one of these:
+The Nicla Sense ME needs this project's own firmware ("ARU", attitude reference unit). It is the
+only part flashed with the Arduino IDE, and it needs the internet once (board package and
+library).
 
-* **Coax with attenuators (best):** spacecraft SMA -> **40 dB / 10 W** attenuator -> 30 dB ->
-  30 dB -> ground SMA. Total 100 dB: the ground receives about 37 - 100 = **-63 dBm**, safe and
-  realistic. The first attenuator must be rated for the full 5 W.
-* **Antennas far apart:** at least ~100 m of separation.
+1. Arduino IDE 2 -> **Boards Manager** -> search `Nicla` -> install **Arduino Mbed OS Nicla Boards**.
+2. **Library Manager** -> search `Arduino_BHY2` -> install version **1.0.8** (the version the
+   firmware was checked against). If the IDE offers to install dependencies, choose
+   "Install all".
+3. Connect **only** the Nicla Sense ME to the PC with a micro-USB cable (nothing else wired to it).
+4. File -> Open -> `nicla_sense_me_aru/nicla_sense_me_aru.ino`. Tools -> Board -> **Nicla Sense ME**,
+   Tools -> Port -> the Nicla's port.
+5. Click **Upload**. Check: "Done uploading".
+6. Tools -> Serial Monitor, 115200 baud. Check: a line starting
+   `VGQ-1 ARU (Nicla Sense ME) ready at I2C 0x2A, accel +/-... g, gyro +/-... dps, mag +/-... uT`.
+   If it ends with `(fallback, range not reported)`, write that down for test T-SC-06
+   (record MAG in [21_Test_Records.md](21_Test_Records.md)); it is not an error.
+7. Unplug the USB cable. The Nicla is wired to the spacecraft in part 8.
 
-Then:
-
-1. Power the ground station first (GDS running), then the spacecraft.
-2. Within one frame period (about 5 s in SAFE mode at 2.4 kbit/s) the web page header turns
-   **AOS** and **LOCK**, the AOS lamp lights, and frames start counting.
-3. On the **RECEIVER** tab check: `Frames lost` 0, `Uncorrectable` 0, RSSI near your expected
-   value, and the link budget's *measured* column filled in.
-
-**No AOS?** Same channel and air rate on both ends (`config.h` `kE22Channel`/`kE22AirRate` and
-`station.toml` `[radio]`)? Spacecraft log shows `E22 config verified`? Ground port correct
-(`journalctl` shows no serial error)? `sync=SEARCH` with bytes arriving means wrong settings on
-one end.
+If not: the board does not appear or the upload fails -> double-tap the Nicla's reset button
+right after power-up to enter the bootloader (Arduino ABX00050 datasheet) and upload again.
 
 ---
 
-## Part H - Your first commands
+## Part 5 - Set up the boards and import the two Apps
 
-Type on **CardKB #1** (the dashboard shows the line as you type) or in the web console:
+### 5.1 First start of each board
+
+Do this once per board, with nothing wired to it yet.
+
+1. **VENTUNO Q**: plug the 12 V / 5 A supply into the barrel jack and connect the board's USB-C
+   to the PC. **UNO Q**: connect its USB-C to the PC.
+2. Start App Lab and click the board. The first-start wizard asks for a **board name**, keyboard
+   language, **Wi-Fi** and a **password**, and installs board updates. Let it finish.
+3. Note each board's **IP address** (App Lab shows it; or in a terminal on the board,
+   `hostname -I`). This guide writes them as `<UNO-Q-IP>` and `<VENTUNO-Q-IP>`.
+
+Check: from the PC, `ssh arduino@<UNO-Q-IP>` and `ssh arduino@<VENTUNO-Q-IP>` log in with the
+password you chose (type `exit` to leave).
+
+If the UNO Q resets or disappears from App Lab: the PC's USB port may not supply enough current
+(Arduino asks for a 5 V / 3 A source). Use a powered USB-C hub, or power it from 12 V on VIN as
+in part 8.2 (USB-C and VIN can be connected at the same time).
+
+### 5.2 Import the Apps
+
+1. Connect App Lab to the **UNO Q**.
+2. **My Apps** -> open any App -> click the **▼** next to its name -> **Import App** -> choose
+   `dist/vgq1-spacecraft-unoq.zip`.
+3. Check: the App **VGQ-1 Flight Software** appears under My Apps. On the board it is the folder
+   `/home/arduino/ArduinoApps/vgq1-spacecraft`.
+4. Connect App Lab to the **VENTUNO Q** and import `dist/dssq-groundstation-ventunoq.zip` the
+   same way.
+5. Check: the App **DSS-Q Ground Station** appears; folder
+   `/home/arduino/ArduinoApps/dssq-groundstation`.
+
+⚠ If an App of the same folder name already exists, App Lab imports the zip into a second folder
+with the date added. To replace an App, follow part 16 first: deleting an App also deletes its
+`data` folder, which holds counters that must never go back.
+
+### 5.3 First run of the spacecraft App (nothing wired)
+
+1. Open **VGQ-1 Flight Software** and press **Run**. App Lab compiles the sketch (no download:
+   the libraries are inside the App), flashes the MCU and starts the Python EGSE. The first
+   build takes a few minutes.
+2. Check the App Lab console, on the tab with the Python output (App Lab shows three tabs: the
+   launch log, the Python output and the sketch's serial output; the flight sketch prints
+   nothing there by default). You should see (inside App Lab's container the App folder is
+   called `/app`; your numbers differ):
+
+   ```
+   ... EGSE WARNING first start or counter lost (boot_count.txt missing): if this flight key was used before, generate a new key (tools/gen_sdls_key.py)
+   ... EGSE INFO SCLK partition / SDLS TM epoch 1 issued (EGSE start)
+   ... EGSE INFO VGQ-1 EGSE started: data in /app/data, boot counter 1
+   ... EGSE INFO notifications provided to the MCU: cfdp_cancel, cfdp_req, sc_boot, sc_evr, ...
+   ```
+
+   "first start or counter lost" is normal on a first start (part 6.5 explains when it is not).
+3. Every 10 s the EGSE prints a **status box**. This box is your main check while the spacecraft
+   has no radio link. Example (your numbers differ):
+
+   ```
+   +--------------------------- VGQ-1 SPACECRAFT EGSE ----------------------------+
+   | MODE SAFE  SCLK 1/95 s  BEACON URGENT(3)  SEQ IDLE/EMPTY(0)  (status age core 0 s, ext 2 s)
+   | RADIO E22-400T33D(1) ch 23 = 433.125 MHz  rate code 2  pwr code 0  LBT/CAD 0  framing TM(0)
+   | TX off  frames 18 (OID 14)  MCFC 18  period 5068 ms  busy 1267 ms  duty 25.0 %
+   | UPLINK RSSI n/a  SNR n/a  noise n/a  FARM OPEN(1) V(R) 0  CMD acc 0 rej 0  rescued 0
+   | FDIR 0x0001  sensors 0x0000  bus -999.0 C  radio fault 0  VC0 0 VC1 0 VC2 0 VC3 0 B  SSR 0.2 %
+   | SDLS TC NONE(0)  TM NONE(0) OFF(0) epoch 1 sn 0  cadence stretch x1.00
+   ...
+   ```
+
+   Right now, with nothing wired, `FDIR 0x0001` (bit 0 = RADIO_CFG: the radio could not be
+   configured), `sensors 0x0000` and `bus -999.0 C` (no temperature reading: the Nicla Sense ME
+   is not connected yet) are correct. `TC NONE TM NONE`: no key yet (part 6). The
+   frame counter rises even without a radio, so it proves nothing yet.
+4. Check the board: the 13 x 8 LED matrix on the UNO Q lights. Row 7, second column = SAFE mode;
+   the right-hand end of row 7 blinks while a fault flag is set (layout in
+   [06_Displays.md](06_Displays.md)).
+5. Click **▼** next to the App name and switch **Run at startup** on (a DEFAULT badge appears).
+   The spacecraft then starts by itself at every power-up, without a PC.
+
+The flight software also reports **events** (EVR lines such as
+`EGSE INFO EVR 0x0001 INFO BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio=E22-400T33D TM TC NONE TM NONE`).
+Its start-up events reach this console only if the EGSE was already listening when the MCU
+started, and at most 8 per second are forwarded (config.h `kEvrNotifyMaxPerS`). All of them
+also go into the telemetry, so the ground station shows them once the radio link works (part 11).
+
+If not: a build error -> make sure you imported the zip from `dist/` (a folder copied from the
+repository lacks the bundled libraries). The EGSE prints `waiting for the flight software status
+(sc_status) ...` instead of the box for more than a minute -> the MCU is not running the flight
+sketch: press Stop and Run again; see
+[14_Troubleshooting_and_Event_Response.md](14_Troubleshooting_and_Event_Response.md).
+
+### 5.4 First run of the ground App (nothing wired)
+
+1. Open **DSS-Q Ground Station** and press **Run**. App Lab flashes the station sketch to the
+   VENTUNO Q MCU and starts the ground data system.
+2. Check the console:
+
+   ```
+   DSS-Q web commanding token created in /app/data/http_token: 3f9c... (enter it once in the dashboard)
+   ... DSS-Q ground station running: dashboard on port 8080 (bound to 0.0.0.0); archive /app/data/archive; ...
+   ```
+
+   Copy the **token** (32 hexadecimal characters). It is also stored on the board in
+   `/home/arduino/ArduinoApps/dssq-groundstation/data/http_token`.
+3. On the PC open **http://&lt;VENTUNO-Q-IP&gt;:8080**. Check: the dashboard "DSS-Q1 GROUND STATION"
+   loads. Click **TOKEN** in the header and paste the token (the browser keeps it for this
+   session; without it the dashboard is read-only).
+4. Expected for now: ALARM RED with "radio backend unavailable: E22-400T33D serial port: ..."
+   (no radio yet) and YELLOW "SDLS key file not found" (no key yet). The console and the event
+   list also show the warning `[station] callsign is the placeholder N0CALL: set your amateur
+   callsign in station.toml before transmitting (the uplink identifies with it)` until you do
+   part 7.2.
+5. Switch **Run at startup** on for this App too.
+
+If the dashboard does not load from the PC: check first with
+`curl http://<VENTUNO-Q-IP>:8080/api/state` (it should print JSON). Whether App Lab makes the
+App's port reachable from the network has not yet been confirmed on hardware (VERIFY). If it is
+not reachable but the App runs, use the host mode of part 15.
+
+---
+
+## Part 6 - Generate the security keys (after the import)
+
+The radio link is protected by SDLS ([17_Security_Model.md](17_Security_Model.md)): only
+holders of the key can command the spacecraft and, with encryption, read the telemetry. One
+256-bit key is shared by both ends. The keys are generated **after** importing the Apps
+because the zips never contain one.
+
+### 6.1 Choose the protection (both ends must match)
+
+| Use | Flight `config.h` (spacecraft) | `station.toml` `[sdls]` (ground) |
+|---|---|---|
+| **Amateur radio** (no encryption allowed): commands authenticated, telemetry readable | `#define VGQ_SDLS_TC 1` and `#define VGQ_SDLS_TM 0` | `tc_service = "AUTH"`, `tm_service = "NONE"` |
+| Licence that allows encryption (the default in the code) | `#define VGQ_SDLS_TC 2` and `#define VGQ_SDLS_TM 2` | `tc_service = "AE"`, `tm_service = "AE"` |
+
+Where to edit:
+
+* **Spacecraft**: in App Lab open VGQ-1 Flight Software, file `sketch/src/config.h`, section
+  "Downlink framing and SDLS". Change the two `#define` lines. (Or in a terminal on the UNO Q:
+  `nano ~/ArduinoApps/vgq1-spacecraft/sketch/src/config.h`.)
+* **Ground**: in a terminal on the VENTUNO Q:
+  `nano ~/ArduinoApps/dssq-groundstation/data/station.toml`. The App copied its default there on
+  the first run; always edit this `data/` copy, never `python/config/station.toml` (the App, and
+  host mode of part 15, read only the `data/` copy).
+
+### 6.2 Generate one key pair on the PC
+
+In the repository folder on the PC:
+
+```bash
+python3 tools/gen_sdls_key.py --flight-header ~/vgq1-keys/sdls_key.h --ground-key ~/vgq1-keys/sdls_key.hex
+```
+
+(Windows: `py -3 tools/gen_sdls_key.py ...` with the same options; `~` means your user folder.)
+
+Check: it prints `SDLS key written (SPI = 1):` with the two paths, and the folder `vgq1-keys`
+in your home folder holds `sdls_key.h` and `sdls_key.hex`. Both files come from **one** key.
+
+* Run the generator **once**, on one machine, and copy each of the two files to its board
+  (6.3). Running it again, for example on the other board, makes a **different** key, and the
+  two ends no longer understand each other.
+* Keep `vgq1-keys` **outside** the repository folder: keys must never be committed or shared.
+* `keys already exist (use --force to replace them on BOTH ends)` -> you already have a pair.
+  Use `--force` only when you are replacing the key on both boards.
+
+### 6.3 Copy each file to its board
+
+```bash
+scp ~/vgq1-keys/sdls_key.h   arduino@<UNO-Q-IP>:ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h
+scp ~/vgq1-keys/sdls_key.hex arduino@<VENTUNO-Q-IP>:ArduinoApps/dssq-groundstation/data/sdls_key.hex
+```
+
+The file names must stay exactly `sdls_key.h` (the flight build includes only that name) and
+`sdls_key.hex` (the ground station, as an App and in host mode, reads `data/sdls_key.hex`
+unless `[sdls] key_file` is an absolute path). The `data` folder exists after the ground App's
+first run (part 5.4).
+
+### 6.4 Restart both Apps
+
+1. Spacecraft: press **Run** again (the sketch is rebuilt with the key).
+2. Ground: press **Stop**, then **Run**.
+
+Check:
+
+* Spacecraft status box: `SDLS TC AUTH(1)  TM NONE(0) ...` (amateur choice) or
+  `SDLS TC AE(2)  TM AE(2) PROTECTED(1) epoch N` (AE). With AE the console also shows
+  `EVR 0x0120 INFO SDLS TM epoch N: downlink protected` when the EGSE hands over the epoch.
+* Ground: the "SDLS key file not found" alarm reason is gone; the LINK & SECURITY tab shows the
+  services you chose.
+* Ground, **normal at this point**: a new YELLOW alarm reason `TC uplink BLOCKED: no TC
+  sequence-number file ...` and a WARN event `no SDLS TC sequence-number file ...`. Every
+  command carries a sequence number that must never repeat with one key, and the station has
+  no counter file for the new key yet. It refuses commands until a housekeeping packet arrives
+  that the spacecraft made at least 2 minutes after it booted (part 11; earlier ones are
+  ignored, without any message). It then starts the counter by itself on the "time floor" - 4
+  numbers per second counted from 1 January 2026, about 98 million in October 2026, which is
+  above every number the key can have used - and releases the uplink: WARN event `SDLS TC
+  sequence number re-synchronised to <n> (the time floor: 4 per second since 2026-01-01;
+  sdls_last_sn 0) ...: TC uplink released`. Nothing to do, as long as the station's clock is
+  right ([17_Security_Model.md](17_Security_Model.md) section 7.6).
+
+If the box still shows `TC NONE(0) TM NONE(0)`: the header is not at
+`ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h`, or the sketch was not rebuilt (press Run).
+
+### 6.5 Keep the key safe - three rules
+
+1. The PC copies in `vgq1-keys` are secrets. Keep them on offline storage (you need the
+   `sdls_key.h` again when you update the spacecraft App, part 16), or delete them.
+2. Always change the key on **both** ends together.
+3. If the spacecraft App's `data` folder is ever lost (App deleted without a backup, board
+   re-installed), **generate a new key pair** before transmitting again. The folder holds the
+   boot counter that the encryption depends on; with the same key it must never go back
+   (`tools/gen_sdls_key.py`). After any key change on a system that already used another key,
+   type `SDLS RESETREPLAY` on the ground and confirm it
+   ([07_Operations_Procedures.md](07_Operations_Procedures.md),
+   [17_Security_Model.md](17_Security_Model.md)).
+
+---
+
+## Part 7 - Settings for your station and site
+
+Each setting is explained in [15_Configuration_Reference.md](15_Configuration_Reference.md).
+After editing `config.h` press **Run** on the spacecraft App; after editing `station.toml`
+restart the ground App.
+
+**Your callsign goes in at both ends.** Both transmitters identify themselves in plain text, and
+both settings default to the placeholder `N0CALL`, which is not a licensed callsign. Set
+`VGQ_CALLSIGN` (7.1) **and** `[station] callsign` (7.2) before anything transmits on air. The
+rules behind it: [09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.3.
+
+### 7.1 Spacecraft (`sketch/src/config.h`)
+
+| Setting | Default | Set it to |
+|---|---|---|
+| `VGQ_CALLSIGN` | `"N0CALL"` | your callsign. The spacecraft sends it in clear text at boot and every 600 s (EVR 0x0002 `DE <callsign>`) and in every idle frame as `DE <callsign> VGQ-1` |
+| `kGeomagInclDeg` | 60.0 | the magnetic inclination at your site, degrees (positive = field points down) |
+| `kGeomagDeclDeg` | 0.0 | the magnetic declination at your site, degrees east of true north |
+
+Get both angles from a World Magnetic Model calculator (NOAA or BGS, free online).
+
+### 7.2 Ground (`data/station.toml` on the VENTUNO Q)
+
+| Table | Keys to check |
+|---|---|
+| `[station]` | `callsign` (default `"N0CALL"`): your callsign, see below; `name`, `latitude_deg`, `longitude_deg`, `altitude_m`, `antenna_gain_dbi`, `rx_line_loss_db` |
+| `[spacecraft]` | `antenna_gain_dbi`, `tx_line_loss_db`, `distance_km` (enter it when you know it) |
+| `[radio]` | `allowed_channels`: only channels your licence and band plan allow (default 20-24 = 430.125-434.125 MHz); `channel` (default 23 = 433.125 MHz) |
+| `[science]` | `field_ut`: total magnetic field at your site in uT, from the same WMM calculator (needed for the magnetometer calibration) |
+
+What the ground transmits with `[station] callsign`: whenever it sends commands, the station
+also radiates the plain-text identification `DE <callsign> <name>` (for example
+`DE G4ABC DSS-Q1`, with `<name>` from `[station] name`) through the same radio as the
+commands: right after the first uplink of a run, then at least every 10 minutes while it keeps
+transmitting, and once more when the uplink has been idle for 120 s (or the command
+retransmission timer, if that is longer) (`gds.py` `StationIdent`).
+The spacecraft cannot mistake it for a command: it counts the packet in its RF `cltu_bad`
+counter and ignores it.
+
+Check after restarting the ground App:
+
+* The console and event list no longer show
+  `[station] callsign is the placeholder N0CALL: set your amateur callsign in station.toml before
+  transmitting (the uplink identifies with it)`.
+* If the App does not start and names `[station] callsign`: a callsign has 3-16 letters and
+  digits (at least one of each), optionally with `/` parts such as `G4ABC/P`.
+
+These pairs must be equal at both ends, or the link does not work
+([15_Configuration_Reference.md](15_Configuration_Reference.md) lists every pair):
+
+| Spacecraft `config.h` | Ground `station.toml` | Default |
+|---|---|---|
+| `kRadioChannel` | `[radio] channel` | 23 |
+| `kRadioRateCode` | `[radio] air_rate` | 2 (2.4 kbit/s) |
+| radio model (`VGQ_RADIO` + A0 strap) | `[radio] model` | E22-400T33D |
+| `VGQ_SDLS_TC` / `VGQ_SDLS_TM` | `[sdls] tc_service` / `tm_service` | AE / AE |
+
+---
+
+## Part 8 - Wire the spacecraft step by step
+
+Before each step: **power off** (unplug the battery and USB). After each step: power on and do
+the check. The full tables are in docs/03 section 4; the wiring diagram is docs/03 section 4.8.
+
+### 8.1 Prepare
+
+1. Put the UNO Q on a non-conductive surface.
+2. Screw a **50 Ohm dummy load** onto the E22-400T33D's SMA socket now. It stays there until
+   part 11.
+3. Fit the two 10 kOhm resistors: one from the E22's M0 pin and one from its M1 pin to the
+   3.3 V wire that will go to UNO Q JANALOG pin 4.
+
+### 8.2 Power (configuration A, docs/03 section 4.2.1)
+
+1. Battery (+) -> 4 A fuse -> UNO Q **JANALOG pin 8 (VIN)** and -> buck converter input.
+2. Battery (-) -> UNO Q GND (JANALOG pin 6 or 7) and buck GND. One common ground for everything.
+3. Do not connect the buck output to anything yet.
+
+Check (meter, battery connected, boards not yet powered from the buck):
+
+* Buck output: 5.0 V +/- 0.2 V, never above 5.5 V (the E22's absolute limit).
+* JANALOG pin 8 to GND: the battery voltage (7-24 V allowed; a 3S pack reads 9-12.6 V), positive.
+
+Then the UNO Q starts (power LED on) and the App runs by itself (Run at startup).
+
+### 8.3 Radio E22-400T33D (docs/03 section 4.3)
+
+| E22 pin | to UNO Q |
+|---|---|
+| 1 M0 | D2 (+ 10 kOhm to 3.3 V) |
+| 2 M1 | D3 (+ 10 kOhm to 3.3 V only) |
+| 3 RXD | header pin printed **SCL** |
+| 4 TXD | header pin printed **SDA** |
+| 5 AUX | D7 |
+| 6 VCC | buck 5 V (+ 470-1000 uF and 100 nF directly at the pins) |
+| 7 GND | GND |
+
+The UNO Q pins printed SDA/SCL are used as a serial port (UART) here, not as I2C. The sensors use
+A4/A5 instead (step 8.5).
+
+Check (power on, wait for the App and its status box):
+
+* The status box shows `FDIR 0x0000`: bit 0 (RADIO_CFG) is clear. At boot the software wrote
+  the module's configuration and read it back, which proves both UART directions and the
+  M0/M1/AUX wires. If the start-up events reached the console you also see
+  `EVR 0x0306 INFO radio E22-400T33D OK: ch 23 code 2 pwr 33 dBm sens -128.0 dBm datasheet`.
+* `busy` is about 1270 ms and `duty` about 25 % (SAFE mode); LED matrix row 0 lights during
+  every transmission; the right-hand end of row 7 no longer blinks.
+
+If not: `FDIR 0x0001` (or `EVR 0x0306 ... FAILED`) -> TXD/RXD swapped (E22 TXD goes to "SDA"),
+no 5 V at VCC, missing common ground, M0/M1 swapped. `FDIR 0x0002` (AUX_TIMEOUT) -> the AUX wire.
+See [14_Troubleshooting_and_Event_Response.md](14_Troubleshooting_and_Event_Response.md).
+
+### 8.4 Model strap: leave A0 open
+
+For the E22-400T33D, nothing is connected to JANALOG pin 9 (A0).
+
+Check: the status box line `RADIO E22-400T33D(1) ...` (if the start-up events reached the
+console: `EVR 0x0308 INFO radio model E22-400T33D (strap open, 0/5 low; build E22-400T33D)`).
+
+### 8.5 Sensor bus, one instrument at a time (docs/03 section 4.7)
+
+All instruments share A4 (SDA) and A5 (SCL) and 3.3 V from JANALOG pin 4. Add them **one at a
+time**, power off before each, and check after each. Where to look:
+
+* the EGSE status box line `FDIR ... sensors 0x....` (the HK `sensor_health` bits: b0..b6 Nicla
+  Sense ME and its sensors, b7 AS7265X, b8 RM3100 outboard, b9 RM3100 inboard), and
+* LED matrix row 6: one lit column per healthy bit.
+
+| Order | Instrument | Wiring | Check after power-on: `sensors` in the status box |
+|---|---|---|---|
+| a | AS7265X (it carries the bus pull-ups) | its pins 3.3V, GND, SDA -> A4, SCL -> A5; INT not connected; front "I2C" jumper closed, JP2 open | `0x0080` (bit 7) |
+| b | RM3100 outboard | 3.3 V, GND, SDA -> A4, SCL -> A5, I2CEN -> 3.3 V, SA0 -> GND, SA1 -> GND | `0x0180` (+ bit 8) |
+| c | RM3100 inboard (optional) | as b, but SA0 -> 3.3 V and SA1 -> 3.3 V | `0x0380` (+ bit 9) |
+| d | Nicla Sense ME | J2 pin 1 SDA -> A4, pin 2 SCL -> A5, pin 6 GND -> GND, pin 9 VIN -> buck 5 V; pin 7 not connected | `0x03BF` within seconds (+ bits 0-5), `0x03FF` once bit 6 (gas/air-quality fusion) is set after the gas sensor's warm-up |
+
+Without the inboard RM3100 the final value is `0x01FF`. If the start-up events reached the
+console, you also see `EVR 0x0706 INFO AS7265X HW ...` (spectrometer identified) and
+`EVR 0x0910 INFO RM3100 OB BIST PASS X ok Y ok Z ok (reg ...)` (outboard self-test, with
+the value of the self-test register; 0x0911 for the inboard unit); the ground shows them later in any case. LED matrix row 6 lights one column per bit.
+
+Bus check if an instrument stays absent: with power **off**, the resistance from A4 to 3.3 V and
+from A5 to 3.3 V reads roughly 1-5 kOhm (docs/03 section 4.7.2). Open circuit = no pull-ups.
+Under 1 kOhm = too many pull-ups (open a breakout's pull-up jumper).
+
+If an instrument is plugged in after boot, it is found later by itself
+(`EVR 0x060B INFO instrument acquired: ...`).
+
+### 8.6 Mount the magnetometers
+
+Put the RM3100(s) on the non-magnetic boom, the outboard unit at the tip, as far as practical
+(0.5-1 m) from the radio, the battery and the power wires. Twist the boom cable pairs. Rules:
+docs/03 section 9. Enter the two boom distances in `station.toml` `[science] r_outboard_m` and
+`r_inboard_m`.
+
+Check: the EGSE status box shows the radio line, `FDIR 0x0000`, `frames` rising, the sensors you
+fitted, and (with a key) the SDLS line `TC AE(2) TM AE(2) PROTECTED(1) epoch N` or
+`TC AUTH(1) TM NONE(0)`.
+
+---
+
+## Part 9 - Wire the ground station step by step
+
+Full tables: docs/03 section 5; diagram: docs/03 section 5.5.
+
+### 9.1 Power and radio supply
+
+1. The VENTUNO Q runs from its 12 V / 5 A supply (barrel jack).
+2. Screw a **50 Ohm dummy load** onto the ground E22-400T33D.
+3. Supply the module: 5 V to pin 6 VCC from VENTUNO Q **JANALOG pin 5** (+5V_LIMITED) or from its
+   own 5 V supply (>= 2 A); GND to pin 7; 470-1000 uF + 100 nF at the pins.
+
+Check: 4.75-5.25 V at the module's VCC pin.
+
+### 9.2 One-time configuration of the ground radio
+
+A new E22 has the RSSI byte and the noise register switched off; the ground needs both. The
+spacecraft configures its own radio at every boot, the ground radio is configured **once** now,
+before the M0/M1 control wires are connected.
+
+1. In App Lab press **Stop** on the ground App: while it runs it holds the serial port.
+2. Wire the USB-UART adapter (3.3 V logic): adapter TXD -> E22 pin 3 RXD, adapter RXD -> E22
+   pin 4 TXD, adapter GND -> E22 pin 7 GND. Plug the adapter into a VENTUNO Q USB-A port.
+3. Put the module in configuration mode: E22 pin 2 **M1 -> 3.3 V** (JANALOG pin 4), pin 1
+   **M0 -> GND**.
+4. In a terminal on the VENTUNO Q (`ssh arduino@<VENTUNO-Q-IP>`):
+
+   ```bash
+   ls /dev/serial/by-id/                    # the adapter must be listed
+   cd ~/ArduinoApps/dssq-groundstation/python
+   python3 -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config ~/ArduinoApps/dssq-groundstation/data/station.toml
+   ```
+
+Check: the output shows `model: E22-400T33D`, `product info: ...`, `written.` and a table with
+`channel 23`, `freq_mhz 433.125`, `air_rate 2.4k`, `uart_bps 9600`, `rssi_byte True`,
+`rssi_noise_enable True`.
+
+If not: `no reply: is the module in CONFIG mode` -> check M1 = 3.3 V, M0 = GND, VCC, and that
+adapter TXD goes to E22 RXD. `permission denied` -> `sudo usermod -aG dialout $USER`, log out and
+in again. A different device name (`/dev/ttyUSB1`, `/dev/ttyACM0`) -> use it here and in
+`station.toml` `[radio] port`.
+
+5. Remove the M1-to-3.3 V and M0-to-GND wires.
+
+### 9.3 Radio Control Unit (M0/M1/AUX)
+
+| E22 pin | VENTUNO Q |
+|---|---|
+| 1 M0 | D2 (+ 10 kOhm to 3.3 V) |
+| 2 M1 | D3 (+ 10 kOhm to 3.3 V) |
+| 5 AUX | D4 |
+| 7 GND | GND |
+
+Press **Run** on the ground App. Check: an event
+`ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k pwr 0 LBT/CAD False - matches station.toml`
+and the RED "radio backend unavailable" alarm is gone.
+
+If it says `MISMATCH [...]`: repeat 9.2. Without the RCU wires, tie M0 and M1 to GND and set
+`[gds] rcu = false` (docs/03 section 5.3.1).
+
+### 9.4 Lamps and buzzer
+
+| Item | Wiring |
+|---|---|
+| AOS (green LED) | D5 -> 330 Ohm -> LED -> GND |
+| ALARM (red LED) | D6 -> 330 Ohm -> LED -> GND |
+| UPLINK (yellow LED) | D7 -> 330 Ohm -> LED -> GND |
+| Buzzer (5 V active) | A0 -> 1 kOhm -> NPN base; buzzer + to 5 V (JANALOG pin 5), buzzer - to the collector; emitter to GND |
+
+Check:
+
+1. With the App running, ALARM is off or steady (a YELLOW reason) - see the dashboard header.
+2. Press **Stop** in App Lab: within 5 s AOS goes dark and ALARM blinks fast (5 Hz) = "no status
+   from the ground software". Press **Run**: it stops blinking.
+3. Buzzer: unplug the USB-UART adapter for 40 s. After 30 s the alarm turns RED: ALARM blinks
+   at 4 Hz and the buzzer sounds for 0.4 s. Plug it back in; the alarm clears.
+
+### 9.5 CardKB keyboard
+
+Option A (try first): CardKB GND -> GND, CardKB "5V" wire -> **3.3 V** (JANALOG pin 4), SDA ->
+the header pin printed **SDA**, SCL -> the header pin printed **SCL**. M5Stack colours: black GND,
+red 5V, yellow SDA, white SCL; check the print on your cable.
+
+Check: COMMANDING tab -> Station I/O shows the keyboard present; type `HELP` on the CardKB and
+press Enter: the dashboard shows the typing line and then the command list.
+
+If not: use option B (5 V through a BSS138 level shifter, docs/03 section 5.4). Type `KEYTEST` +
+Enter to see raw key codes; ESC leaves that mode.
+
+---
+
+## Part 10 - First power-up of the complete system
+
+Both radios still have their **dummy loads** on. This part checks power, start-up order and the
+software on both ends without a radio link.
+
+1. Power the **ground station** first and wait until its App runs (dashboard reachable).
+2. Power the **spacecraft**. Its MCU waits until the UNO Q's Linux side has started (this can
+   take a minute or more), then the flight software starts in **SAFE** mode.
+
+Check, spacecraft (App Lab console or LED matrix):
+
+* Status box: `MODE SAFE`; `RADIO E22-400T33D(1) ch 23 = 433.125 MHz rate code 2 pwr code 0`;
+  `frames` rising, `period` about 5070 ms, `busy` about 1270 ms, `duty` about 25 % (SAFE mode
+  sends one frame per about 5 s at 2.4 kbit/s: 4 x the radio busy time of one 236-octet frame,
+  `frame_period_ms()` in fsw/datalink.cpp); `FDIR 0x0000`; `sensors 0x03FF`; with a key the SDLS
+  line (`TC AE(2) TM AE(2) PROTECTED(1) epoch N` or `TC AUTH(1) TM NONE(0)`).
+* `BEACON URGENT(3)` is normal after a start: the spacecraft came up in SAFE mode by itself and
+  "asks" for attention until the ground acknowledges it (part 12).
+* LED matrix: row 0 lights during each frame; in row 7 the second column (SAFE) is lit.
+
+Check, ground: header **LOS** (no signal yet, the dummy loads stop it), no RED alarm.
+
+---
+
+## Part 11 - First contact on the bench
+
+Two transmitters on one table can damage each other's receivers. Use one of these:
+
+* **Coax (best)**: spacecraft SMA -> **30 dB (>= 5 W)** -> **40 dB** -> **30 dB (>= 5 W)** ->
+  ground SMA. 100 dB in total: the ground receives about 33 - 100 = **-67 dBm**. Both outer
+  attenuators must take the full power of the radio next to them (both ends transmit).
+* **Antennas far apart**: at least 10 m, better 100 m (docs/03 section 10).
+
+1. Power off both. Remove the dummy loads and connect the coax set (or the antennas).
+2. Power the ground station, then the spacecraft.
+
+Check (within one or two frame periods, about 5-10 s in SAFE mode):
+
+* Dashboard header: **AOS**, **LOCK**, frames counting; the green **AOS lamp** lights.
+* RECEIVER tab: RSSI about -67 dBm with the 100 dB set (the exact value depends on cable and
+  attenuator tolerances); frames lost 0; RS decoder: no uncorrectable code blocks.
+* LINK & SECURITY tab: the spacecraft identification `DE <your callsign> VGQ-1`; with AE the TM
+  epoch and "protected".
+* The ground console prints every 10 s: `STATUS AOS sync=LOCK RSSI=-67.0 dBm ... frames=...`.
+* **ALARM RED with the reason "beacon URGENT"**, the ALARM lamp blinking at 4 Hz and a short
+  buzzer tone with three chirps are expected now: it is the spacecraft's SAFE-mode beacon
+  (previous part). The spacecraft's start-up events also appear in the event list now.
+  Part 12 acknowledges it.
+* With a key: the YELLOW reason `TC uplink BLOCKED` from part 6.4 goes away with the first
+  housekeeping packet the spacecraft makes at least 2 minutes after its boot (so up to about
+  2 minutes after the spacecraft was switched on, plus one housekeeping period), with the WARN
+  event `SDLS TC sequence number re-synchronised to <n> (the time floor: 4 per second since
+  2026-01-01; sdls_last_sn <m>) ...: TC uplink released`.
+
+![Dashboard OVERVIEW tab with signal acquired](img/ui_overview.png)
+
+*The OVERVIEW tab with a signal (here from the simulator): AOS, LOCK and the alarm state in the
+header; signal, RSSI, SNR, margin and frame tiles below. Every tab and metric:
+[13_Web_UI_Reference.md](13_Web_UI_Reference.md).*
+
+If there is no AOS:
+
+| Check | How |
+|---|---|
+| Same channel and rate at both ends | EGSE box `ch 23 ... rate code 2` vs `station.toml` `[radio]` and the 9.3 event |
+| The ground radio is open | no RED "radio backend unavailable" |
+| `sync=SEARCH` while bytes arrive | settings differ between the ends, or the ground radio was never configured (9.2) |
+| Frames arrive but are rejected by SDLS | different keys or services at the two ends (part 6) |
+| Nothing at all | the attenuator chain is not connected; the spacecraft status box shows `FDIR 0x0000` and `frames` rising? |
+
+Then record the bench result (RSSI with a known attenuation) in record RSSI of
+[21_Test_Records.md](21_Test_Records.md): it is the start of the RSSI calibration (T-RF-02).
+
+---
+
+## Part 12 - Your first commands
+
+Type on the **CardKB** (Enter sends) or in the **COMMANDING** tab of the dashboard.
 
 | Type | You should see |
 |---|---|
-| `NOOP` + Enter | History: QUEUED -> RADIATED -> ACCEPTED -> EXECUTED; UPLINK lamp lit while outstanding |
-| `PING 1234` | EXECUTED with a round-trip time |
-| `MODE CRUISE` | spacecraft mode changes; MAG/ATT/SPEC/ENV packets start |
-| `SPECCFG 2 50 1` | spectrometer gain 16x, 140 ms integration, white lamp during measurements |
-| `HELP` | the command list in the console |
+| `NOOP` | the command history goes QUEUED -> RADIATED -> ACCEPTED -> EXECUTED; the yellow **UPLINK lamp** is lit while it is outstanding; LED matrix row 1 flashes when the spacecraft receives it |
+| `PING 1234` | EXECUTED, with the round-trip time |
+| `MODE CRUISE` | `EVR 0x0012 INFO MODE SAFE -> CRUISE (...)`; with the next housekeeping packet (within about a minute) the beacon drops from URGENT and the RED alarm clears (a mode command acknowledges the SAFE start-up); magnetometer, attitude, spectrometer and environment packets start (CRUISE cadence: MAG every 30 s, ATT 60 s, ENV 120 s, SPEC 300 s; fsw/datalink.cpp) |
+| `RADIO` | (ground only) reads back the ground radio configuration as an event |
+| `HELP` / `HELP SPECCFG` | the command list / one command's arguments and ranges |
 
-Hazardous commands (marked in `HELP`/dictionary, e.g. `TXINHIBIT 60`) ask for confirmation:
-press **Enter again on an empty line** (or the CONFIRM button). If
-`require_two_person_for_hazardous = true`, a second person presses **Y on CardKB #2** (or AUTH
-on the web page). Full list: [05 Dictionary](05_Telemetry_and_Command_Dictionary.md).
+Station identification: right after your first command the event list shows
+`station identification (periodic): DE <your callsign> DSS-Q1`, and the LINK & SECURITY tab
+(uplink table, row "Station identification") counts each one. The spacecraft's RF counter
+`cltu_bad` (RECEIVER tab, two-way link table, "Frames / CLTUs ... bad") rises by 1 for each
+identification it hears: that is normal, it is the identification text, not a damaged
+command. The station repeats it at least every 10 minutes while you command, and once more
+about 2 minutes after your last command
+([09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.3).
 
----
+Why the beacon behaves like this: the beacon level is latched until the ground makes contact
+(an accepted command), and "came up in SAFE by fault protection" keeps it URGENT until a `MODE`
+command is executed (fsw/autonomy.cpp `beacon_level()`). `MODE SAFE` acknowledges it too, if you
+want to stay in SAFE mode.
 
-## Part I - Switch on uplink authentication (SDLS)
+Every command and its arguments: [05_Telemetry_and_Command_Dictionary.md](05_Telemetry_and_Command_Dictionary.md).
 
-Without it anyone on the channel could command your spacecraft. Authentication proves each
-command came from your station (HMAC-SHA-256, CCSDS 355.0-B), without encrypting it.
+**Hazardous commands** (marked [HAZARDOUS] by `HELP`, e.g. `TXINHIBIT 60`) are not sent at once:
+the dashboard asks for **CONFIRM** (on the CardKB: press Enter on an empty line). With
+`[commanding] require_two_person_for_hazardous = true` a second person also presses **AUTH** in
+the web dashboard. Routine operations: [07_Operations_Procedures.md](07_Operations_Procedures.md).
 
-```bash
-cd ~/Benchmarks                       # on the machine that builds BOTH ends
-python3 tools/gen_sdls_key.py         # writes ground/config/sdls_key.hex and the flight sdls_key.h
-```
+If a command stays RADIATED: the spacecraft did not receive it. Check the uplink RSSI on the
+SPACECRAFT tab, the key/services (part 6), and that `FARM` is not in LOCKOUT (type `UNLOCK`).
 
-1. Copy `spacecraft/vgq1_flight/sketch/src/sdls_key.h` into the UNO Q app folder
-   (`~/ArduinoApps/vgq1-flight/sketch/src/`) and press Run - the log says
-   `SDLS uplink authentication ENABLED`.
-2. Copy `ground/config/sdls_key.hex` to the VENTUNO Q (`~/Benchmarks/ground/config/`) and set
-   `[sdls] enabled = true` in `station.toml`; restart the GDS.
-3. Send `NOOP`: it still works. The COMMANDING tab shows `SDLS authentication ON`.
-
-The key files are in `.gitignore` - never commit or share them.
-
----
-
-## Part J - Going for distance
-
-1. The air rate is already at the most sensitive setting the E22-400T37S has: **2.4 kbit/s**
-   (EBYTE: codes 0, 1 and 2 are all 2.4k). Faster rates cost about 3 dB per doubling.
-2. **Height beats everything.** The radio horizon for antennas at h1 and h2 metres is
-   4.12 x (sqrt(h1) + sqrt(h2)) km: 2 m + 10 m -> 18.9 km; a hilltop at 500 m + 10 m -> 105 km.
-3. **Ground antenna**: a 433 MHz Yagi (10-13 dBi), low-loss coax (short, LMR-400 class) - every
-   dB of feeder loss is a dB of margin.
-4. Keep the first Fresnel zone clear (about 42 m radius at mid-path for 10 km).
-5. Enter the real distance in `station.toml` `[spacecraft] distance_km`: the RECEIVER tab then
-   shows predicted vs measured received power and the *excess loss*.
-6. Use `tools/link_budget.py` to plan: see [02 Link Budget & RF Analysis](02_Link_Budget_and_RF_Analysis.md).
+If a command is REJECTED with `TC uplink BLOCKED: ...`: the station is still waiting for the
+first housekeeping packet after the key was installed that the spacecraft made at least
+2 minutes after its boot (part 6.4). Wait until the WARN event
+`... re-synchronised ...: TC uplink released` appears, then send it again.
 
 ---
 
-## Part K - Troubleshooting
+## Part 13 - Switching to the 5 W E22-400T37S (the A0 strap)
 
-| Symptom | Likely cause | Fix |
+One spacecraft binary serves both E22 modules: a jumper on A0 selects the 5 W module at boot,
+no code edit (docs/03 section 4.5).
+
+Before you start: a licence that allows 5 W; a 12 V supply of at least 1.5 A per module with a
+2 A fuse; attenuators rated >= 10 W for the bench; the module on its E22-400TBH-02 board.
+
+### 13.1 Spacecraft
+
+1. Power off. Antenna or a >= 10 W dummy load on the TBH-02's SMA socket.
+2. On the TBH-02 board remove **all four jumper caps**: M0, M1 (bottom header, pins 7-8 and
+   9-10) and RXD, TXD (next to the USB-C socket).
+3. Wire the header (docs/03 section 4.4): 10 M0 -> D2, 7 M1 -> D3, 6 RXD -> "SCL",
+   5 TXD -> "SDA", 4 AUX -> D7, 1 GND -> GND; 10 kOhm pull-ups from M0 and M1 to 3.3 V.
+4. Power the board from its own fused 12 V branch (DC jack or green terminal, 4.5-15 V).
+5. Fit the strap: a wire from **JANALOG pin 9 (A0)** to a **GND** pin (JANALOG pin 6 or 7).
+   ⚠ Never connect A0 to 5 V or VIN.
+6. Power on (the strap is read once at boot).
+
+Check:
+
+* Status box: `RADIO E22-400T37S(2) ...` and `FDIR 0x0000` (radio configured and verified).
+* Events (EGSE console, or the ground's event list once the link works):
+  `EVR 0x0308 INFO radio model E22-400T37S (strap to GND, 5/5 low; build E22-400T33D)` and
+  `EVR 0x0306 INFO radio E22-400T37S OK: ch 23 code 2 pwr 37 dBm sens -126.0 dBm datasheet`.
+  `EVR 0x0308 WARN ... (strap SPLIT, ...)` means a loose jumper.
+* The transmit duty stays at or below 50 % (status box `duty`).
+* Ground SPACECRAFT tab: the RF packet's radio model reads E22-400T37S.
+
+### 13.2 Ground station
+
+* **Ground keeps the E22-400T33D**: set `[radio] model = "auto"` in `data/station.toml`; the
+  station then follows the model the spacecraft reports.
+* **Ground also uses an E22-400T37S**: first set `[radio] model = "E22-400T37S"` and
+  `fault_log = true` in `data/station.toml` (the one-time configuration writes them into the
+  module). Give the TBH-02 its own 12 V >= 1.5 A supply and a dummy load, plug its USB-C into the
+  VENTUNO Q and keep its RXD/TXD caps fitted. Do the one-time configuration of 9.2 with only the
+  M1 cap removed (configuration mode) instead of the wires. Then remove both M0/M1 caps and wire
+  the RCU: 10 M0 -> D2, 7 M1 -> D3, 4 AUX -> D4, 8 GND -> GND, 10 kOhm pull-ups on M0/M1.
+
+Check: no YELLOW "radio model mismatch" reason on the dashboard.
+
+⚠ The ground station has no model strap: on the VENTUNO Q, A0 drives the buzzer transistor
+(part 9.4). Never wire it to GND as a strap; the ground's model is chosen only in
+`station.toml`.
+
+Going back to the T33D: remove the A0 wire and power-cycle the UNO Q.
+
+---
+
+## Part 14 - Going for distance
+
+Plan first, then measure. The link budget is explained in
+[02_Link_Budget_and_RF_Analysis.md](02_Link_Budget_and_RF_Analysis.md).
+
+1. **Predict**: on the PC,
+   `python3 tools/link_budget.py --model E22-400T33D --rate-code 2 --distance-km 25 --gr 12`
+   prints the free-space budget and the margin.
+2. **Height beats everything.** Radio horizon = 4.12 x (sqrt(h1) + sqrt(h2)) km with the antenna
+   heights in metres: 2 m and 10 m -> 18.9 km; a 500 m hill and 10 m -> 105 km
+   (`tools/link_budget.py`).
+3. **Keep the first Fresnel zone clear**: radius 17.32 x sqrt(d1 x d2 / (f_GHz x d)) m; at
+   433 MHz over 10 km that is about 42 m at mid-path.
+4. **Ground antenna**: a 430-440 MHz Yagi with a published gain and a short, low-loss cable. Enter
+   the real gain and cable loss in `station.toml` (`antenna_gain_dbi`, `rx_line_loss_db`).
+5. **Slowest rate is the most sensitive.** The E22 is already at its most sensitive setting,
+   2.4 kbit/s (codes 0-2 are all 2.4 kbit/s). Faster rates cost about 10 x log10(rate / 2400) dB.
+   Change rate or channel only with the coordinated ground directives `LINKRATE` and `LINKCHAN`:
+   both ends switch, and the spacecraft reverts by itself if the new setting loses the uplink.
+6. **More range**: the SX126x option (SPI) at SF12 is computed to be about 12-15 dB more
+   sensitive than the E22 at 2.4 kbit/s (docs/03 section 4.6, docs/02).
+7. Enter the measured distance in `[spacecraft] distance_km`: the RECEIVER tab then shows
+   predicted against measured received power ("excess loss").
+8. Write everything down in records RNG and RSSI of [21_Test_Records.md](21_Test_Records.md).
+
+---
+
+## Part 15 - Host-mode fallback for the ground station
+
+Use this only if the App mode does not work for you:
+
+* the dashboard cannot be reached from the network while the App runs (part 5.4), or
+* the App cannot open the radio's serial port (RED "radio backend unavailable: ... serial port"
+  although `ls /dev/serial/by-id/` lists the adapter), or
+* you want the ground software as a plain Linux service.
+
+In host mode the same ground software runs directly on the VENTUNO Q's Linux (a systemd
+service) instead of in App Lab's container. The station sketch on the MCU stays the same.
+
+1. In App Lab, **Stop** the ground App and switch its **Run at startup** off. Never run the App
+   and the service at the same time (they would fight over the radio port, port 8080 and the
+   Router Bridge). The station sketch flashed by the App should stay on the MCU after the App is
+   stopped (not yet confirmed on hardware, VERIFY): if the dashboard later shows the station I/O
+   offline, press Run once in App Lab to flash it, then Stop again before starting the service.
+2. Nothing to copy. Host mode runs `python -m dssq.gds --app-data <App>/data`, so it uses the
+   App's own `data` folder exactly as the App does: `data/station.toml` (your settings from
+   part 7), the archive `data/archive` with the uplink sequence-number file `sdls_sn.txt`, the
+   key `data/sdls_key.hex` and the web token `data/http_token`. Both modes therefore share
+   **one** archive and **one** set of security counters. As in the App, the dashboard listens on
+   the network and commanding needs the same token.
+
+   ⚠ Always start the ground software on the board with `--app-data` (the service below does).
+   A run without it (`python3 -m dssq.gds` in `python/`) keeps a separate, fresh archive with its
+   own uplink sequence-number file: it refuses commands until a housekeeping packet arrives
+   (YELLOW `TC uplink BLOCKED`), and switching between the two archives with the same key can
+   re-use sequence numbers, which with encryption (AE) re-uses encryption nonces.
+3. Install and start the service:
+
+   ```bash
+   ~/ArduinoApps/dssq-groundstation/host/install_station.sh --service
+   ```
+
+   It installs `python3-venv` if needed, creates the virtual environment `~/.venvs/dssq-gds`
+   with the `arduino-router-bridge` package (needs the internet once; App Lab's container already
+   has it) and installs and starts the `dssq-gds` systemd service for this App folder and your
+   user. Without that package the front panel, the RCU and the SX126x radio stay disabled
+   ("router bridge unavailable"). Without `--service` the script only prepares the environment
+   and prints the command for a run in the terminal.
+4. Watch the log: `journalctl -u dssq-gds -f`. After editing `data/station.toml`:
+   `sudo systemctl restart dssq-gds`. To keep the dashboard on the board only, add
+   `Environment=DSSQ_HTTP_HOST=127.0.0.1` under `[Service]` in
+   `/etc/systemd/system/dssq-gds.service`, then `sudo systemctl daemon-reload` and restart.
+
+Check: the dashboard loads at http://&lt;VENTUNO-Q-IP&gt;:8080 and shows the same data as before.
+
+Back to App mode: `sudo systemctl disable --now dssq-gds`, then Run the App and switch its
+Run at startup on again.
+
+---
+
+## Part 16 - Updating or re-importing an App without losing state
+
+Deleting an App in App Lab also deletes its `data` folder. On the spacecraft that folder holds the
+boot counter (`boot_count.txt`) and the last accepted command number (`sdls_last_sn.txt`); on
+the ground it holds `station.toml`, the key, the token and the archive with the uplink counter.
+Move the folder out of the way on the board before deleting the App, and move it back before the
+new App runs for the first time. A move on the same board is instant and needs no free space.
+
+1. In App Lab press **Stop** on the App.
+2. In a terminal on the board, move the state out of the App folder:
+
+   ```bash
+   # UNO Q (spacecraft): the data folder and the flight key header
+   mv ~/ArduinoApps/vgq1-spacecraft/data ~/vgq1-data-keep
+   mv ~/ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h ~/vgq1-sdls_key.h.keep
+   # VENTUNO Q (ground): the data folder
+   mv ~/ArduinoApps/dssq-groundstation/data ~/dssq-data-keep
+   ```
+
+3. In App Lab: **▼ -> Delete App**, then import the new zip (part 5.2). Do **not** press Run yet.
+4. Move the state back:
+
+   ```bash
+   # UNO Q
+   mv ~/vgq1-data-keep ~/ArduinoApps/vgq1-spacecraft/data
+   mv ~/vgq1-sdls_key.h.keep ~/ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h
+   # VENTUNO Q
+   mv ~/dssq-data-keep ~/ArduinoApps/dssq-groundstation/data
+   ```
+
+   If `mv` reports that `data` already exists in the new App folder, the new App has already run
+   once: stop it, look inside with `ls ~/ArduinoApps/<App>/data`, and only then replace it.
+5. Press **Run**. Check: the spacecraft console says `boot counter N` with N higher than before,
+   and does **not** say "first start or counter lost"; the ground keeps its settings and archive.
+
+If the spacecraft data was lost: generate a new key pair for both ends (part 6.5, rule 3).
+For a copy off the board, `scp -r` the folder to the PC as well. More on key management:
+[07_Operations_Procedures.md](07_Operations_Procedures.md) and
+[17_Security_Model.md](17_Security_Model.md).
+
+---
+
+## Part 17 - Troubleshooting pointers
+
+The complete fault tree and every event: [14_Troubleshooting_and_Event_Response.md](14_Troubleshooting_and_Event_Response.md).
+
+| Symptom | First thing to check | Part |
 |---|---|---|
-| `E22 config FAILED` on the spacecraft | serial wires swapped, RXD/TXD caps still fitted, no 12 V | Part E.4 |
-| Instrument `ABSENT` | SDA/SCL swapped, no power, address clash | Part E.5 |
-| `Nicla ME ABSENT` but powered | firmware not flashed, or VIN below 3.5 V | Part E.6 |
-| Web page "GDS LINK DOWN" | GDS not running | `systemctl status dssq-gds` |
-| ALARM lamp flashing fast | station I/O MCU gets no status from the GDS | start the GDS; check `frontpanel = true` |
-| `sync=SEARCH`, bytes arriving | channel/air rate differ between ends | Part G |
-| Frames OK but many `Uncorrectable` | interference or very weak signal | GSCAN, change channel (`LINKCHAN`) |
-| Commands stay RADIATED | spacecraft not receiving the uplink | check uplink RSSI on RECEIVER "two-way" table; antennas |
-| `FARM LOCKOUT` event | sequence lost | type `UNLOCK` |
-| `SDLS rejected TC frame: bad MAC` | different keys on the two ends | redo Part I with the same key files |
-| `E22 reports UNDER-VOLTAGE` | supply sags under the 1.1 A transmit load | thicker wires, bigger supply/battery |
-| CardKB #2 "not detected" | not on the Qwiic connector, no 5 V, or level shifter wired LV/HV the wrong way round | check the wiring, or use the web AUTH button |
+| Build error in App Lab | import the zip from `dist/`, not a copied folder | 5 |
+| Ground WARN `[station] callsign is the placeholder N0CALL`, or the ground App does not start and names `[station] callsign` | set your callsign in `data/station.toml` (and `VGQ_CALLSIGN` on the spacecraft) | 7 |
+| RF `cltu_bad` rises by 1 about every 10 minutes while commanding | normal: the station's own identification `DE <callsign> <name>` | 12 |
+| Status box `FDIR 0x0001` / `EVR 0x0306 ... FAILED` (spacecraft radio) | E22 TXD -> "SDA", RXD -> "SCL"; 5 V at VCC; common ground | 8.3 |
+| Instrument absent | one at a time; SDA/SCL swapped; pull-ups 1-5 kOhm; 3.3 V present | 8.5 |
+| Nicla Sense ME absent although powered | firmware not flashed; VIN below 3.5 V | 4, 8.5 |
+| Dashboard not reachable from the PC | `curl http://<VENTUNO-Q-IP>:8080/api/state`; host mode | 5.4, 15 |
+| RED "radio backend unavailable" | USB-UART plugged in; `[radio] port`; the App was stopped for 9.2? | 9 |
+| `MISMATCH` in the ground radio event | one-time configuration | 9.2 |
+| ALARM lamp blinking fast, AOS dark | the ground App is not running | 9.4 |
+| `sync=SEARCH` with bytes arriving | channel/rate differ, ground radio not configured | 11 |
+| Frames rejected by SDLS | keys or services differ between the ends | 6 |
+| YELLOW `TC uplink BLOCKED: no TC sequence-number file ...`, commands REJECTED, after installing the key | normal until the first housekeeping packet made at least 2 minutes after the spacecraft's boot arrives; the station then releases the uplink by itself (its clock must be right) | 6.4, 11 |
+| Commands stay RADIATED | uplink path; keys; `UNLOCK` after a FARM lockout | 12 |
+| YELLOW "reset cause BROWNOUT" | the radio supply sags while transmitting; restore with `TXPWR 0` after fixing it | docs/03 4.2.2 |
+| `EVR 0x0311` (T37S under-voltage) | supply below 4.5 V under the transmit load: thicker wires, bigger supply | 13 |
+| Spacecraft console: "first start or counter lost" after an update | the data folder was not restored: generate a new key pair | 16 |
+
+The hardware tests that close the remaining open items are in
+[08_Verification_and_Test.md](08_Verification_and_Test.md); write your measurements into
+[21_Test_Records.md](21_Test_Records.md).

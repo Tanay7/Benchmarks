@@ -1,20 +1,32 @@
 # =============================================================================
 #  Continuous integration for the VGQ-1 spacecraft / DSS-Q ground station.
 #
-#  Runs on every push and pull request:
-#    host-tests     The flight protocol code (src/ccsds, src/fsw, radio tables)
-#                   built with the host compiler: warnings are errors, then a
-#                   second build under AddressSanitizer + UBSan. Includes the
-#                   full official CCSDS 121.0 test data (libaec 121B2TestData).
-#    ground-tests   The ground data system test suite on the oldest and newest
-#                   supported Python (3.11, 3.13). The station needs no pip
-#                   package at run time; ground/requirements.txt lists only the
-#                   test tools and the optional independent references.
-#    arduino-build  The real Arduino build (official arduino:zephyr platform via
-#                   arduino-cli, the same compiler App Lab uses) of the
-#                   VENTUNO Q station sketch and of the UNO Q flight sketch
-#                   (default E22 radio build), each with its default profile and
-#                   the bundled patched RadioLib and Arduino_RouterBridge.
+#  The repository is the two Arduino App Lab Apps (vgq1-spacecraft: UNO Q flight
+#  software + EGSE; dssq-groundstation: VENTUNO Q station sketch + ground data
+#  system), the Nicla firmware, tools/ and tests/. Runs on every push and pull request:
+#    lint           ruff (every .py) and mypy (station, EGSE and tool code), versions
+#                   pinned in requirements-dev.txt, settings in pyproject.toml; shellcheck
+#                   of the shell scripts; every text file has LF line ends, a final
+#                   newline, no trailing white space.
+#    host-tests     The flight protocol code (src/ccsds, src/fsw, radio tables) built
+#                   with the host compiler: warnings are errors, then a second build
+#                   under AddressSanitizer + UBSan. Includes the full official CCSDS
+#                   121.0 test data (libaec 121B2TestData). Then the firmware compile
+#                   check of both sketches with every build switch (check_firmware.sh)
+#                   and the station sketch regression harness on real threads under
+#                   ASan + UBSan and under ThreadSanitizer.
+#    ground-tests   The test suite (tests/, run from the repository root) on the oldest
+#                   and newest supported Python (3.11, 3.13). The station needs no pip
+#                   package at run time; requirements-dev.txt lists only the test and
+#                   lint tools and the optional independent references.
+#    arduino-build  The real Arduino builds (official arduino:zephyr platform via
+#                   arduino-cli, the compiler App Lab uses) of both sketches with their
+#                   default profiles and the bundled patched RadioLib and
+#                   Arduino_RouterBridge: the default radio builds and the SX126x
+#                   builds, every warning on and none allowed in this repository's code;
+#                   the compile logs must show the bundled copies in use. Then the
+#                   RouterBridge host test against the platform's Arduino_RPClite /
+#                   MsgPack and the bridge-thread stack bound of the patched library.
 #
 #  Actions are pinned to full commit hashes (version in the comment).
 # =============================================================================
@@ -33,11 +45,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install the lint tools (pinned)
+        run: python -m pip install -r requirements-dev.txt
+      - name: ruff
+        run: ruff check .
+      - name: mypy
+        # Two runs: both Apps name their entry point main.py (pyproject.toml).
+        run: |
+          mypy
+          mypy dssq-groundstation/python/main.py
+      - name: shellcheck (shell scripts; preinstalled on the runner)
+        run: shellcheck tools/host_test/check_firmware.sh tools/host_test/station/run.sh tools/host_test/routerbridge/run.sh dssq-groundstation/host/install_station.sh
+      - name: Text files (LF line ends, final newline, no trailing white space)
+        # *.patch: a unified diff's context line for an empty line is a single space.
+        run: |
+          fail=0
+          if git grep -nI -e $'\r' -- .; then echo "::error::CR (CRLF) line ends above"; fail=1; fi
+          if git grep -nIE '[[:blank:]]+$' -- . ':(exclude)*.patch'; then
+            echo "::error::trailing white space above"; fail=1
+          fi
+          while IFS= read -r -d '' f; do
+            if [[ -s "$f" && "$(tail -c 1 "$f" | od -An -tx1 | tr -d ' \n')" != "0a" ]]; then
+              echo "::error::$f: no final newline"; fail=1
+            fi
+          done < <(git grep -zIl '' -- .)
+          exit "$fail"
+
   host-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      FLIGHT: ../../spacecraft/vgq1_flight/sketch/src
+      FLIGHT: ../../vgq1-spacecraft/sketch/src
       CCSDS121_TESTDATA: ${{ github.workspace }}/libaec/data/121B2TestData
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -63,6 +109,25 @@ jobs:
           mkdir -p "$RUNNER_TEMP/vectors-san"
           tools/host_test/host_test "$RUNNER_TEMP/vectors-san"
 
+      - name: Bundle the patched RadioLib and Arduino_RouterBridge into both sketches
+        run: |
+          for sketch in vgq1-spacecraft/sketch dssq-groundstation/sketch; do
+            python3 tools/radiolib.py fetch "$sketch/libraries/RadioLib"
+            python3 tools/routerbridge.py fetch "$sketch/libraries/Arduino_RouterBridge"
+          done
+
+      # Every translation unit of both sketches against the Arduino stubs, every build
+      # switch (radio models, USLP, SDLS modes, keyed, debug monitor), RadioLib for both
+      # boards and its negative control (the stock tag must fail for the VENTUNO Q).
+      - name: Firmware compile check (check_firmware.sh)
+        run: bash tools/host_test/check_firmware.sh
+
+      - name: Station sketch regression harness under AddressSanitizer + UBSan
+        run: SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined" bash tools/host_test/station/run.sh
+
+      - name: Station sketch regression harness under ThreadSanitizer
+        run: SAN=-fsanitize=thread bash tools/host_test/station/run.sh
+
   ground-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -76,33 +141,28 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install test tools
-        run: python -m pip install -r ground/requirements.txt
-      - name: Run the ground test suite
-        working-directory: ground
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run the test suite (from the repository root)
         run: python -m pytest -q
 
   arduino-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02  # v2.0.0
         with:
           version: "1.5.1"
 
-      - name: Bundle the patched RadioLib where a sketch profile references it
+      # Contracts 25.2 / 30 / 41: both sketch profiles name libraries/RadioLib and
+      # libraries/Arduino_RouterBridge ("- dir:"); the copies are fetched, verified and
+      # patched here exactly as for the App Lab zips.
+      - name: Bundle the patched libraries where a sketch profile references them
         run: |
-          for sketch in ground/station_io/sketch spacecraft/vgq1_flight/sketch; do
+          for sketch in vgq1-spacecraft/sketch dssq-groundstation/sketch; do
             if grep -q "dir: libraries/RadioLib" "$sketch/sketch.yaml"; then
               python3 tools/radiolib.py fetch "$sketch/libraries/RadioLib"
             fi
-          done
-
-      # Contract 41: both profiles use the patched Arduino_RouterBridge 0.4.3 in place of
-      # the platform's copy (the compile log names <sketch>/libraries/Arduino_RouterBridge).
-      - name: Bundle the patched Arduino_RouterBridge where a sketch profile references it
-        run: |
-          for sketch in ground/station_io/sketch spacecraft/vgq1_flight/sketch; do
             if grep -q "dir: libraries/Arduino_RouterBridge" "$sketch/sketch.yaml"; then
               python3 tools/routerbridge.py fetch "$sketch/libraries/Arduino_RouterBridge"
             fi
@@ -117,22 +177,83 @@ jobs:
           arduino-cli core install arduino:zephyr
           arduino-cli core list
 
+      # build <sketch> <label> [arduino-cli args]: verbose real build with every warning
+      # on; fails on a warning in this repository's code (sketch.ino and src/, compiled
+      # from <build>/sketch) - the platform's and the bundled libraries' are not ours.
+      - name: Build helper
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'EOF'
+          build() {
+            local sketch="$1" label="$2"; shift 2
+            local out="$RUNNER_TEMP/build-$label" log="$RUNNER_TEMP/build-$label.log" ours
+            if ! arduino-cli compile --profile default --warnings all -v --build-path "$out" "$@" "$sketch" \
+                 >"$log" 2>&1; then
+              cat "$log"; return 1
+            fi
+            grep -E "^(Sketch uses|Global variables|Using library)" "$log"
+            ours="$(grep -E ': warning: ' "$log" | grep -E "^($out/sketch/|$PWD/$sketch/)" \
+                    | grep -v "^$PWD/$sketch/libraries/" || true)"
+            if [[ -n "$ours" ]]; then
+              echo "$ours"; echo "::error::compiler warnings in this repository's code ($label)"; return 1
+            fi
+          }
+          EOF
+
       - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
-        run: arduino-cli compile --profile default --warnings all ground/station_io/sketch
+        run: |
+          source "$RUNNER_TEMP/build.sh"
+          build dssq-groundstation/sketch station
 
       # Default E22 build (E22-400T33D; the T37S is selected by a strap at boot, so the
-      # same binary covers it). The profile names the FQBN (arduino:zephyr:unoq) and the
-      # bundled RadioLib, which the E22 build stages but never compiles.
+      # same binary covers it). The bundled RadioLib is staged but never compiled.
       - name: UNO Q flight sketch (default radio, E22-400T33D / T37S by strap)
-        run: arduino-cli compile --profile default --warnings all spacecraft/vgq1_flight/sketch
-
-      # The verbose log of the (cached) rebuild names each library's folder: fail unless
-      # the bundled patched Arduino_RouterBridge, not the platform's copy, was used.
-      - name: Check that the bundled patched Arduino_RouterBridge was compiled
         run: |
-          for sketch in ground/station_io/sketch spacecraft/vgq1_flight/sketch; do
-            log="$RUNNER_TEMP/$(basename "$(dirname "$sketch")").log"
-            arduino-cli compile --profile default -v "$sketch" > "$log" 2>&1
-            grep "Using library Arduino_RouterBridge" "$log"
-            grep -q "Using library Arduino_RouterBridge at version 0.4.3 in folder: $PWD/$sketch/libraries/Arduino_RouterBridge" "$log"
+          source "$RUNNER_TEMP/build.sh"
+          build vgq1-spacecraft/sketch flight
+
+      - name: VENTUNO Q station sketch, SX126x radio option (SX1268)
+        run: |
+          source "$RUNNER_TEMP/build.sh"
+          build dssq-groundstation/sketch station-sx126x \
+            --build-property "compiler.cpp.extra_flags=-DDSSQ_RADIO_SX126X=1 -DDSSQ_SX_CHIP=1268"
+
+      - name: UNO Q flight sketch, SX126x radio option (SX1268)
+        run: |
+          source "$RUNNER_TEMP/build.sh"
+          build vgq1-spacecraft/sketch flight-sx126x \
+            --build-property "compiler.cpp.extra_flags=-DVGQ_RADIO=3 -DVGQ_SX126X_CHIP=1268"
+
+      # The verbose logs name each library's folder: fail unless the bundled patched
+      # copies, not the platform's, were compiled.
+      - name: Check that the bundled patched libraries were compiled
+        run: |
+          for spec in station:dssq-groundstation flight:vgq1-spacecraft; do
+            label="${spec%%:*}" sketch="${spec#*:}/sketch"
+            grep -q "Using library Arduino_RouterBridge at version 0.4.3 in folder: $PWD/$sketch/libraries/Arduino_RouterBridge" \
+              "$RUNNER_TEMP/build-$label.log"
+            grep -q "Using library RadioLib at version 7.8.1 in folder: $PWD/$sketch/libraries/RadioLib" \
+              "$RUNNER_TEMP/build-$label-sx126x.log"
+          done
+
+      # Patch hunk 2: update() (bridge thread) never runs provide_safe methods; the stock
+      # 0.4.3 tag must fail the same checks (negative control). The platform's
+      # Arduino_RPClite / MsgPack come from the build log.
+      - name: RouterBridge host test (patched copy and the stock negative control)
+        run: |
+          bash tools/host_test/routerbridge/run.sh "$RUNNER_TEMP/build-flight.log"
+          SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined" \
+            bash tools/host_test/routerbridge/run.sh "$RUNNER_TEMP/build-station.log"
+
+      # Patch hunk 1: the bridge thread's worst case (GCC call graphs of every TU + the
+      # core image) must fit the bundled copy's UPDATE_THREAD_STACK_SIZE.
+      - name: Bridge thread stack bound (both sketches)
+        run: |
+          for spec in flight:vgq1-spacecraft station:dssq-groundstation; do
+            label="${spec%%:*}" sketch="${spec#*:}/sketch"
+            out="$RUNNER_TEMP/stack-$label"
+            arduino-cli compile --profile default -v --build-path "$out" \
+              --build-property "compiler.cpp.extra_flags=-fstack-usage -fcallgraph-info=su" \
+              "$sketch" >"$out.log" 2>&1 || { cat "$out.log"; exit 1; }
+            python3 tools/host_test/routerbridge/stackcalc.py --log "$out.log" --cut egse_ --cut z_log_msg_runtime \
+              --check "$sketch/libraries/Arduino_RouterBridge/src/bridge.h" "$out"
           done

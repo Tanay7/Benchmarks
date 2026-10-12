@@ -29,6 +29,11 @@ manifest "<sha256 of file>  <path>\\n" sorted by path, i.e. the same value as
    xargs sha256sum | sha256sum)
 over a stock copy.
 
+Examples (the two App sketches of this repository; run from the repository root):
+  python3 tools/radiolib.py fetch vgq1-spacecraft/sketch/libraries/RadioLib
+  python3 tools/radiolib.py fetch dssq-groundstation/sketch/libraries/RadioLib
+  python3 tools/radiolib.py check vgq1-spacecraft/sketch/libraries/RadioLib
+
 Exit status: 0 success; 1 verification or patch failure (do not use the copy);
 2 usage error; 3 git is missing or the repository cannot be reached.
 Python 3.11+, standard library only; needs the git command line for fetch.

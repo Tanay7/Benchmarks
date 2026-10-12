@@ -37,6 +37,11 @@ sorted by path, i.e. the same value as
    xargs sha256sum | sha256sum)
 over a stock copy.
 
+Examples (the two App sketches of this repository; run from the repository root):
+  python3 tools/routerbridge.py fetch vgq1-spacecraft/sketch/libraries/Arduino_RouterBridge
+  python3 tools/routerbridge.py fetch dssq-groundstation/sketch/libraries/Arduino_RouterBridge
+  python3 tools/routerbridge.py check dssq-groundstation/sketch/libraries/Arduino_RouterBridge
+
 Exit status: 0 success; 1 verification or patch failure (do not use the copy);
 2 usage error; 3 git is missing or the repository cannot be reached.
 Python 3.11+, standard library only; needs the git command line for fetch.

@@ -2,7 +2,7 @@
 //  CFDP class 1 (CCSDS 727.0-B-5): flight PDU header bit layout, builders and
 //  parser, the modular checksum (incremental, unaligned offsets), file-name
 //  rules, CfdpSender and CfdpRelayMonitor, plus the vectors
-//  ground/tests/test_cfdp.py feeds to the independent Python receiver:
+//  tests/test_cfdp.py feeds to the independent Python receiver:
 //
 //    <out>/cfdp_source.bin        the pseudo-random 1000-octet file
 //    <out>/cfdp_pdus.txt          one hex PDU per line: its complete transfer
