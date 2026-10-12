@@ -602,12 +602,20 @@ Wiring (photos): E22 GND -> GND, VCC -> 5V, AUX -> D7, TXD -> header pin "SDA", 
 | 6 | Board-powered radio, no bulk capacitor, code 0 at 25 % duty | SCLK 1/14 -> 1/115 s without a restart, no new boot | no reset in 111 s; supply voltage not measured | docs/20 V-27 |
 | 7 | Start-up EVRs | `8 EVRs not forwarded by the MCU since its boot (+8)` once at 23:12:39Z, constant afterwards; SCLK 14 s at 23:12:48Z puts the MCU boot about 4 s before the EGSE start | the start-up EVRs did not reach the console: raised before the EGSE was listening, and 8 of them refused by the MCU's own notification limits; they are in the downlink | docs/00 section 5.3 |
 | 8 | AS7265X on the Qwiic connector | `sensors 0x0080` (bit 7) | detected; its lamps not exercised (SAFE mode schedules no SPEC, docs/07 5.3.3), so only the board's red power LED was lit | D-13 revision |
-| 9 | Empty A4/A5 bus | `EVR 0x060A ERROR I2C bus clear: SDA or SCL still low after 9 clocks` at 23:13:05Z and 23:14:06Z (re-probes of the absent Nicla Sense ME / RM3100) | a false bus fault: no pull-up on an empty bus; fixed by D-67, to be confirmed on the next run | D-67 |
-| 10 | Spacecraft radio noise reading | `noise` -70 to -75 dBm | recorded only: absolute values are uncalibrated (T-RF-02) and the cause was not investigated | docs/13 |
+| 9 | Empty A4/A5 bus | `EVR 0x060A ERROR I2C bus clear: SDA or SCL still low after 9 clocks` at 23:13:05Z and 23:14:06Z (re-probes of the absent Nicla Sense ME / RM3100) | a false bus fault: no pull-up on an empty bus; fixed by D-67. Second run (below): no EVR 0x060A | D-67 |
+| 10 | Spacecraft radio noise reading | `noise` -70 to -75 dBm; -57 to -58 dBm in the second run | recorded only: absolute values are uncalibrated (T-RF-02); what changed between the runs was not recorded | docs/13 |
 | 11 | Transient flags after boot | `FDIR 0x0100` (bit 8 VC_CONGEST, VC0 579 octets) in the first box only | cleared by the second box: the start-up packets queued faster than one frame per 6 s drains them | - |
+
+Second run, the same evening (App re-imported from the zip of commit `f71475e`, D-67; hardware
+unchanged as far as recorded): EGSE start 23:49:34Z, last status box 23:50:24Z (50 s of log).
+Same build sizes; `RADIO E22-400T33D(1)`, `FDIR 0x0000` from the second box (0x0100 VC_CONGEST in
+the first, as before), `sensors 0x0080`, `busy 1528 ms`, `period 6112 ms`, `duty 25.0 %`, `frames`
+2 -> 9, CADUs archived 8, `CADUs 0` not forwarded, no restart. **No EVR 0x060A** (the first run
+logged it at the first re-probe, about 30 s after boot; this run reached SCLK 55 s without it), and
+`7 EVRs not forwarded` instead of 8. `noise` -57 to -58 dBm.
 
 | Result summary | |
 |---|---|
-| Open issues | D-67 not yet confirmed on the board; V-19 model error 20.6 % at code 2; RF output not seen by a receiver |
+| Open issues | V-19 model error 20.6 % at code 2; RF output not seen by a receiver; noise reading 12-18 dB higher in the second run, cause not known |
 | Signed (operator, date) | |
 

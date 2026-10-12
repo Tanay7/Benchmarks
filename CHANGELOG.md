@@ -55,7 +55,7 @@ app-bricks-py release history) and are fixed; CI now builds the flight sketch on
   SDA or SCL still low after 9 clocks` (owner's board, record 2026-10-12-A). D-67: the bus
   clear releases the lines with the MCU's weak pull-ups (`INPUT_PULLUP`, about 40 kOhm), so an
   empty bus reads high while a target holding a line low is still found
-  (`drivers/i2c_bus.cpp`). Not yet confirmed on the board.
+  (`drivers/i2c_bus.cpp`). Confirmed on the owner's board (second run of record 2026-10-12-A).
 
 ### Added
 - [docs/21](docs/21_Test_Records.md) record 2026-10-12-A, the first bench run of the flight App
