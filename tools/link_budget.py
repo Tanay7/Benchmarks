@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """VGQ-1 link budget and T-RF-03 receiver-sensitivity analysis (433 MHz, every radio model).
 
-Two subcommands (the radio tables come from ground/dssq/link.py, the single source):
+Two subcommands (the radio tables come from dssq-groundstation/python/dssq/link.py, the single source):
 
   budget (default)  free-space link budget for one model / rate code / power code
       python3 tools/link_budget.py --model E22-400T33D --rate-code 2 --distance-km 25 --gr 12
       python3 tools/link_budget.py budget --model SX126x --rate-code 1 --all-rates
-      python3 tools/link_budget.py budget --config ground/config/station.toml
+      python3 tools/link_budget.py budget --config dssq-groundstation/python/config/station.toml
   sensitivity       docs/08 test T-RF-03: stepped attenuation -> measured sensitivity
-      python3 tools/link_budget.py sensitivity --archive ground/archive --steps steps.csv --ref-dbm -40
-      python3 tools/link_budget.py sensitivity --archive ground/archive --live --rate-code 2
+      python3 tools/link_budget.py sensitivity --archive ARCHIVE --steps steps.csv --ref-dbm -40
+      python3 tools/link_budget.py sensitivity --archive ARCHIVE --live --rate-code 2
+  ARCHIVE is the station's [gds] archive_dir: <App>/data/archive for the App under App Lab,
+  <App>/python/archive in host mode (the default relative "archive", see host/).
 
 Physics (all standard):
-  FSPL(dB)            = 32.44 + 20 log10(f_MHz) + 20 log10(d_km)
+  FSPL(dB)            = 20 log10(4 pi d f / c), c = 299 792 458 m/s (exact; in km and MHz
+                        the constant is 20 log10(4 pi 1e9 / c) = 32.44778 dB, not 32.44)
   Radio horizon (km)  = 4.12 (sqrt(h1_m) + sqrt(h2_m))            (4/3-earth refraction)
   1st Fresnel radius  = 17.32 sqrt(d1 d2 / (f_GHz d))  m            (d in km)
   Shannon limit       = -174 + 10 log10(Rb) - 1.59 dB + NF          (no receiver can beat it)
@@ -49,11 +52,11 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "ground"))
+sys.path.insert(0, str(ROOT / "dssq-groundstation" / "python"))   # the dssq package
 from dssq import link  # noqa: E402
 
 FER_THRESHOLD = 0.10                   # sensitivity criterion (T-RF-03)
@@ -65,8 +68,17 @@ EXIT_OK, EXIT_NO_DATA, EXIT_REFUSED = 0, 1, 2
 
 
 # ============================================================= link budget
+C_M_S = 299_792_458.0                  # speed of light (SI definition)
+
+
 def fspl(f_mhz: float, d_km: float) -> float:
-    return 32.44 + 20 * math.log10(f_mhz) + 20 * math.log10(d_km)
+    """Free-space path loss 20 log10(4 pi d f / c), dB (d > 0, f > 0)."""
+    return 20 * math.log10(4 * math.pi * (d_km * 1e3) * (f_mhz * 1e6) / C_M_S)
+
+
+def range_km(loss_db: float, f_mhz: float) -> float:
+    """Inverse of fspl: the distance (km) at which free space costs `loss_db`."""
+    return C_M_S / (4 * math.pi * f_mhz * 1e6) * 10 ** (loss_db / 20) / 1e3
 
 
 def _load_radio_cfg(path: str | None) -> dict:
@@ -126,18 +138,18 @@ def budget(argv: list[str]) -> int:
     loss = fspl(f, a.distance_km)
     pr = eirp + a.gr - a.lr - loss
     allow = eirp + a.gr - a.lr - sens - a.fade_margin
-    d_max = 10 ** ((allow - 32.44 - 20 * math.log10(f)) / 20)
+    d_max = range_km(allow, f)
     horizon = 4.12 * (math.sqrt(a.h1) + math.sqrt(a.h2))
     r_fresnel = 17.32 * math.sqrt((a.distance_km / 2) ** 2 / (f / 1000 * a.distance_km))
     pwr_note = {link.E22_T33D: "  (power ladder VERIFY: T-RF-07)",
                 link.SX126X: f"  (drive + {s.pa_gain_db:g} dB module PA gain: VERIFY)"}.get(m.name, "")
     rows = [
         ("Radio model", f"{m.name} - {m.description}"),
-        ("Frequency", f"{f:.3f} MHz (CH{s.channel}), lambda = {299.792458 / f:.3f} m"),
+        ("Frequency", f"{f:.3f} MHz (CH{s.channel}), lambda = {C_M_S / (f * 1e6):.3f} m"),
         ("TX power (nominal for code)", f"{p:.1f} dBm = {10 ** (p / 10) / 1000:.2f} W (code {s.power_code}){pwr_note}"),
         ("TX antenna gain / feeder loss", f"{a.gt:+.2f} dBi / {a.lt:.1f} dB"),
         ("EIRP", f"{eirp:.1f} dBm"),
-        ("Distance", f"{a.distance_km:.2f} km  (OWLT {a.distance_km / 299792.458 * 1e6:.2f} us)"),
+        ("Distance", f"{a.distance_km:.2f} km  (OWLT {a.distance_km * 1e3 / C_M_S * 1e6:.2f} us)"),
         ("Free-space path loss", f"{loss:.1f} dB"),
         ("RX antenna gain / feeder loss", f"{a.gr:+.2f} dBi / {a.lr:.1f} dB"),
         ("Received power (free space)", f"{pr:.1f} dBm"),
@@ -167,7 +179,7 @@ def budget(argv: list[str]) -> int:
         for c in link.RATE_CODES:
             sc, sr = link.sensitivity(m, c, s.measured, s.rx_boost)
             at, _ = link.airtime_s(m, c)
-            dm = 10 ** ((eirp + a.gr - a.lr - sc - a.fade_margin - 32.44 - 20 * math.log10(f)) / 20)
+            dm = range_km(eirp + a.gr - a.lr - sc - a.fade_margin, f)
             print(f"| {c} | {link.rate_label(m, c)} | {link.rate_bps(m, c):,.1f} | {at * 1000:,.1f} ms | "
                   f"{sc:.1f} dBm | {sr} | {dm:,.0f} km |")
     if a.distance_km > horizon:
@@ -215,7 +227,7 @@ def parse_time(txt: str) -> float:
         v = float(t)
     except ValueError:
         d = datetime.fromisoformat(t.replace("Z", "+00:00"))
-        return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+        return (d if d.tzinfo else d.replace(tzinfo=UTC)).timestamp()
     if not math.isfinite(v) or v < 0:
         raise ValueError(f"bad time {txt!r}")
     return v
@@ -257,8 +269,8 @@ def write_steps(path: Path, steps: Iterable[Step]) -> None:
         w = csv.writer(fh)
         w.writerow(["start_utc", "end_utc", "atten_db", "rate_code", "model"])
         for s in steps:
-            w.writerow([datetime.fromtimestamp(s.start, timezone.utc).isoformat(timespec="milliseconds"),
-                        datetime.fromtimestamp(s.end, timezone.utc).isoformat(timespec="milliseconds"),
+            w.writerow([datetime.fromtimestamp(s.start, UTC).isoformat(timespec="milliseconds"),
+                        datetime.fromtimestamp(s.end, UTC).isoformat(timespec="milliseconds"),
                         f"{s.atten_db:g}", s.rate_code, s.model])
 
 
@@ -335,13 +347,13 @@ def reference_power(results: list[StepResult], ref_dbm: float | None, rssi_cal_d
     """Received power at 0 dB step attenuation and how it was obtained."""
     if ref_dbm is not None:
         return ref_dbm, "operator (--ref-dbm)"
-    clean = [r for r in results if r.usable and r.fer is not None and r.fer <= ERROR_FREE_FER
+    clean = [(r.rssi_mean, r) for r in results if r.usable and r.fer is not None and r.fer <= ERROR_FREE_FER
              and r.rssi_mean is not None]
     if not clean:
         raise ValueError("no error-free step with RSSI to derive the reference: pass --ref-dbm")
-    best = max(clean, key=lambda r: r.rssi_mean)                # strongest = most accurate RSSI
-    ref = best.rssi_mean + rssi_cal_db + best.step.atten_db
-    return ref, (f"RSSI {best.rssi_mean:.1f} dBm {rssi_cal_db:+.1f} dB cal at atten "
+    rssi, best = max(clean, key=lambda c: c[0])                  # strongest = most accurate RSSI
+    ref = rssi + rssi_cal_db + best.step.atten_db
+    return ref, (f"RSSI {rssi:.1f} dBm {rssi_cal_db:+.1f} dB cal at atten "
                  f"{best.step.atten_db:g} dB (strongest error-free step)")
 
 
@@ -402,7 +414,7 @@ def print_report(report: dict, out: Callable[[str], None] = print) -> None:
     out("|---|---|---|---|---|---|---|---|---|---|---|")
     for r in report["results"]:
         s = r.step
-        t = datetime.fromtimestamp(s.start, timezone.utc).strftime("%H:%M:%S")
+        t = datetime.fromtimestamp(s.start, UTC).strftime("%H:%M:%S")
         sem = "" if r.rssi_sem is None else f" +-{r.rssi_sem:.2f}"
         rssi = "-" if r.rssi_mean is None else f"{r.rssi_mean:.1f}{sem}"
         fer = "-" if r.fer is None else f"{r.fer:.1%}"
@@ -490,9 +502,10 @@ def sensitivity(argv: list[str], input_fn: Callable[[str], str] = input, clock: 
         out(f"error: {e}")
         return EXIT_NO_DATA
     print_report(report, out)
-    lines = toml_lines(report, datetime.fromtimestamp(t0, timezone.utc).strftime("%Y-%m-%d"))
+    lines = toml_lines(report, datetime.fromtimestamp(t0, UTC).strftime("%Y-%m-%d"))
     if lines:
-        out("\n# add to ground/config/station.toml:\n[radio.sensitivity_measured]")
+        out("\n# add to station.toml (the station's copy: <App>/data/station.toml under App Lab):\n"
+                "[radio.sensitivity_measured]")
         for line in lines:
             out(line)
     refused = [f"{v['model']}:{v['rate_code']}" for v in report["verdicts"] if v["sensitivity_dbm"] is None]

@@ -1,37 +1,39 @@
 // =============================================================================
 //  Host (PC) verification harness for the VGQ-1 flight protocol code.
 //
-//  Compiles the EXACT flight sources from spacecraft/vgq1_flight/sketch/src/ccsds
+//  Compiles the EXACT flight sources from vgq1-spacecraft/sketch/src/ccsds
 //  with a desktop compiler, runs self-checks, and writes test vectors that the
-//  independent ground decoder (Python, ground/dssq) must decode bit-exactly:
+//  independent ground decoder (Python, dssq-groundstation/python/dssq) must
+//  decode bit-exactly (tests/ at the repository root):
 //
 //    <outdir>/cadus.bin       stream of 236-octet CADUs produced by the flight mux
 //    <outdir>/packets.txt     "<vc> <hex packet>" for every real packet queued
 //    <outdir>/rs_vector.txt   one 232-octet dual-basis codeblock (hex)
 //    <outdir>/cltu.txt        CLTU produced by the flight BCH encoder (hex)
+//    <outdir>/sdls_frame.txt  an SDLS AUTH TC frame built with the flight HMAC code
+//  and then runs every check registered by tools/host_test/test_*.cpp (telemetry
+//  and command vectors: test_integration.cpp; CFDP, crypto, USLP, Rice, spectral,
+//  radio and autonomy vectors: their own files).
 //
 //  Build & run:   make -C tools/host_test   (or see Makefile)
 // =============================================================================
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/ccsds_types.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/crc16.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/randomizer.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/reed_solomon.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/sdls.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/sha256.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tc.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/ccsds/tm.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/attitude.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/commands.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/ssr.h"
-#include "../../spacecraft/vgq1_flight/sketch/src/fsw/tlm_packets.h"
-#include <cmath>
-
+#include "ccsds/ccsds_types.h"
+#include "ccsds/crc16.h"
+#include "ccsds/randomizer.h"
+#include "ccsds/reed_solomon.h"
+#include "ccsds/sdls.h"
+#include "ccsds/sha256.h"
+#include "ccsds/tc.h"
+#include "ccsds/tm.h"
+#include "fsw/attitude.h"
+#include "fsw/ssr.h"
 #include "host_test.h"
 
 using namespace ccsds;
@@ -186,6 +188,101 @@ int main(int argc, char** argv) {
     CHECK(farm.on_frame(f) == Farm1::CONTROL_SET_VR && farm.vr() == 42, "FARM: Set V(R)=42");
   }
 
+  // ---- FARM-1 state table edges (CCSDS 232.1-B §6; W = 10 -> PW = NW = 5) --------------
+  {
+    uint8_t d[3] = {0};
+    auto ad = [&](Farm1& fm, uint8_t ns) {
+      TcFrame f;
+      f.data = d; f.data_len = 1; f.bypass = false; f.control = false; f.seq = ns;
+      return fm.on_frame(f);
+    };
+    auto unlock = [&](Farm1& fm) {
+      TcFrame f;
+      d[0] = 0x00;
+      f.data = d; f.data_len = 1; f.bypass = true; f.control = true; f.seq = 0;
+      return fm.on_frame(f);
+    };
+    auto set_vr = [&](Farm1& fm, uint8_t vr) {
+      TcFrame f;
+      d[0] = 0x82; d[1] = 0x00; d[2] = vr;
+      f.data = d; f.data_len = 3; f.bypass = true; f.control = true; f.seq = 0;
+      return fm.on_frame(f);
+    };
+    auto bd = [&](Farm1& fm) {
+      TcFrame f;
+      f.data = d; f.data_len = 1; f.bypass = true; f.control = false; f.seq = 0;
+      return fm.on_frame(f);
+    };
+    Clcw c;
+    Farm1 a(10);
+    CHECK(ad(a, 0) == Farm1::ACCEPT && a.vr() == 1, "FARM table: N(S)=V(R)=0 accepted");
+    CHECK(ad(a, 5) == Farm1::DISCARD_RETRANSMIT, "FARM table: N(S)=V(R)+PW-1 -> retransmit (positive window)");
+    a.fill_clcw(c);
+    CHECK(c.retransmit && !c.lockout, "FARM table: CLCW Retransmit set by the gap");
+    CHECK(ad(a, 6) == Farm1::DISCARD_LOCKOUT && a.state() == Farm1::S3_LOCKOUT,
+          "FARM table: N(S)=V(R)+PW -> lockout (outside the positive window)");
+    CHECK(set_vr(a, 7) == Farm1::CONTROL_SET_VR && a.vr() == 1 && a.state() == Farm1::S3_LOCKOUT,
+          "FARM table: Set V(R) has no effect in Lockout");
+    CHECK(unlock(a) == Farm1::CONTROL_UNLOCK && a.state() == Farm1::S1_OPEN, "FARM table: Unlock leaves Lockout");
+    a.fill_clcw(c);
+    CHECK(!c.retransmit && !c.lockout && !c.wait, "FARM table: Unlock clears Lockout, Wait and Retransmit");
+
+    Farm1 b(10);
+    CHECK(set_vr(b, 10) == Farm1::CONTROL_SET_VR && b.vr() == 10, "FARM table: Set V(R)=10 in Open");
+    CHECK(ad(b, 5) == Farm1::DISCARD_NEG_WINDOW && b.state() == Farm1::S1_OPEN,
+          "FARM table: N(S)=V(R)-NW -> discarded (negative window)");
+    CHECK(ad(b, 4) == Farm1::DISCARD_LOCKOUT && b.state() == Farm1::S3_LOCKOUT,
+          "FARM table: N(S)=V(R)-NW-1 -> lockout");
+
+    Farm1 g(10);
+    (void)set_vr(g, 10);
+    CHECK(ad(g, 12) == Farm1::DISCARD_RETRANSMIT, "FARM table: gap at V(R)=10");
+    CHECK(set_vr(g, 0) == Farm1::CONTROL_SET_VR && g.vr() == 0, "FARM table: Set V(R)=0 in Open");
+    g.fill_clcw(c);
+    CHECK(!c.retransmit, "FARM table: Set V(R) clears Retransmit");
+    // Modulo-256 wrap: V(R)=255 accepts N(S)=255 and moves to 0.
+    (void)set_vr(g, 255);
+    CHECK(ad(g, 255) == Farm1::ACCEPT && g.vr() == 0 && ad(g, 254) == Farm1::DISCARD_NEG_WINDOW,
+          "FARM table: N(S)=255 accepted, V(R) wraps to 0, 254 is a duplicate");
+
+    // FARM-B counter: every Type-B frame (BD and BC), modulo 4, reported in the CLCW.
+    Farm1 h(10);
+    h.fill_clcw(c);
+    bool fb = c.farm_b_counter == 0;
+    for (unsigned k = 1; k <= 5; ++k) {
+      CHECK(bd(h) == Farm1::ACCEPT_BYPASS, "FARM table: Type-BD accepted (bypass)");
+      h.fill_clcw(c);
+      fb = fb && c.farm_b_counter == (k & 3u);
+    }
+    (void)unlock(h);                                   // a BC frame counts too
+    h.fill_clcw(c);
+    CHECK(fb && c.farm_b_counter == (6u & 3u) && h.vr() == 0, "FARM table: FARM-B counter = Type-B frames mod 4");
+  }
+
+  // ---- TC frame flags (C07): Bypass 0 / Control 1 is not a defined frame type -----------
+  {
+    auto frame = [](bool bypass, bool control, uint8_t* fr) {
+      const uint8_t payload[] = {0x18, 0xC0, 0xC0, 0x00, 0x00, 0x00, 0x01};
+      const uint16_t len = (uint16_t)(kTcPriHdrLen + sizeof(payload) + 2);
+      put_u16(fr, (uint16_t)((bypass ? 0x2000u : 0u) | (control ? 0x1000u : 0u) | (kSpacecraftId & 0x3FF)));
+      put_u16(fr + 2, (uint16_t)(len - 1));
+      fr[4] = 0;
+      std::memcpy(fr + 5, payload, sizeof(payload));
+      put_u16(fr + len - 2, crc16_ccitt(fr, len - 2));
+      return (size_t)len;
+    };
+    uint8_t fr[16];
+    TcFrame tf;
+    size_t n = frame(false, true, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_BAD_HEADER, "TC frame Bypass=0 Control=1 (no such type) -> BAD_HEADER");
+    n = frame(false, false, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_OK && !tf.bypass && !tf.control, "TC frame Type-AD (00) accepted");
+    n = frame(true, false, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_OK && tf.bypass && !tf.control, "TC frame Type-BD (10) accepted");
+    n = frame(true, true, fr);
+    CHECK(tc_parse(fr, n, tf) == TC_OK && tf.bypass && tf.control, "TC frame Type-BC (11) accepted");
+  }
+
   // ---- Multiplexer -> frames -> CADUs ---------------------------------------------------
   {
     TmFramer framer;
@@ -241,118 +338,6 @@ int main(int argc, char** argv) {
     CHECK(frames >= 120, "multiplexer produced CADU stream (cadus.bin / packets.txt)");
   }
 
-  // ---- Telemetry packet vectors (flight packers -> ground dictionary) -----------------
-  {
-    FILE* f = std::fopen((out + "/tlm_vectors.txt").c_str(), "w");
-    if (!f) return 2;
-    CucTime t{4242, 32768};
-    uint8_t pl[vgq::kMaxPayload], pkt[256];
-    auto emit = [&](const char* name, uint16_t apid, size_t n, const char* expect) {
-      const size_t m = build_tm_packet(pkt, sizeof(pkt), apid, 7, t, pl, n);
-      std::fprintf(f, "%s %s %s\n", name, hex(pkt, m).c_str(), expect);
-    };
-    vgq::HkPacket hk{};
-    hk.fsw_mode = vgq::MODE_ENCOUNTER; hk.sclk_partition = 12; hk.uptime_s = 86400;
-    hk.reset_cause = 0; hk.fdir_flags = vgq::FDIR_PA_OVERTEMP | vgq::FDIR_CMD_LOSS;
-    hk.sensor_health = 0x3FFF; hk.cmd_accepted = 100; hk.cmd_rejected = 3; hk.cmd_last_opcode = 9;
-    hk.cmd_last_status = 0; hk.tc_frames_ok = 101; hk.tc_frames_bad = 4; hk.farm_state = 1;
-    hk.farm_vr = 55; hk.cmd_loss_timer_s = 3600; hk.bus_temp_cC = 3125; hk.radio_fault = 3;
-    hk.radio_fault_reports = 17; hk.loop_max_ms = 42; hk.loop_overruns = 1;
-    hk.i2c_errors = 2; hk.ssr_fill_permille = 512; hk.ssr_dropped = 0; hk.ssr_kib = 256;
-    hk.vc0_backlog = 10; hk.vc1_backlog = 200; hk.vc2_backlog = 0;
-    hk.sdls_enabled = 1; hk.sdls_auth_fail = 3; hk.sdls_last_sn = 123456789;
-    size_t n = vgq::pack_hk(hk, pl);
-    CHECK(n == 58, "HK packet is 58 octets");
-    emit("HK", vgq::APID_HK, n, "fsw_mode=3,sclk_partition=12,uptime_s=86400,fdir_flags=20,"
-         "farm_vr=55,bus_temp=31.25,radio_fault=3,radio_fault_reports=17,ssr_kib=256,"
-         "ssr_fill=51.2,vc1_backlog=200,cmd_loss_timer_s=3600,sdls_enabled=1,sdls_auth_fail=3,"
-         "sdls_last_sn=123456789");
-
-    vgq::RfPacket rf{};
-    rf.air_rate_code = 2; rf.tx_power_code = 0; rf.channel = 23; rf.e22_cfg_ok = 1;
-    rf.frames_sent = 123456; rf.tx_duty_permille = 433; rf.frame_period_ms = 2000;
-    rf.uplink_rssi_dbm = -97; rf.noise_floor_dbm = -118; rf.mcfc = 200; rf.last_airtime_ds = 9;
-    n = vgq::pack_rf(rf, pl);
-    CHECK(n == 38, "RF packet is 38 octets");
-    emit("RF", vgq::APID_RF, n, "channel=23,frames_sent=123456,tx_duty=43.3,uplink_rssi=-97.0,"
-         "sc_noise_floor=-118.0,mcfc=200,last_airtime=0.9");
-
-    vgq::MagPacket mg{};
-    mg.nsamples = 4; mg.flags = 0x0B;
-    mg.outboard = {12345, -23456, 45678, 50};
-    mg.inboard = {vgq::kNaI32, vgq::kNaI32, vgq::kNaI32, vgq::kNaU16};
-    mg.body = {-1, 2, -3, 4}; mg.rm3100_cycle_count = 200;
-    n = vgq::pack_mag(mg, pl);
-    CHECK(n == 46, "MAG packet is 46 octets");
-    emit("MAG", vgq::APID_MAG, n, "ob_b_x=12.345,ob_b_y=-23.456,ob_b_z=45.678,ob_rms=0.05,"
-         "ib_b_x=None,ib_rms=None,body_b_z=-0.003,rm3100_cc=200");
-
-    vgq::AttPacket at{};
-    at.flags = 0x1F; at.acc_mg[2] = 1000; at.gyro_ddps[0] = -15; at.mag_dT[1] = 255;
-    at.q_fus[0] = 16384; at.q_fus_acc_mrad = 52; at.q_triad[1] = -8192;
-    n = vgq::pack_att(at, pl);
-    CHECK(n == 37, "ATT packet is 37 octets");
-    emit("ATT", vgq::APID_ATT, n, "acc_z=1.0,gyro_x=-1.5,mag_y=25.5,q_fus_w=1.0,q_fus_acc=0.052,"
-         "q_triad_x=-0.5");
-
-    vgq::SpecPacket sp{};
-    sp.flags = 0x03; sp.gain_code = 2; sp.int_cycles = 50;
-    for (int i = 0; i < 18; ++i) { sp.cal_uW_cm2[i] = 1.5f * i; sp.raw[i] = (uint16_t)(1000 + i); }
-    sp.temp_c[0] = -3; sp.temp_c[1] = 25; sp.temp_c[2] = -128;
-    n = vgq::pack_spec(sp, pl);
-    CHECK(n == 114, "SPEC packet is 114 octets");
-    emit("SPEC", vgq::APID_SPEC, n, "flags=3,gain_code=2,cal_410nm=0.0,cal_940nm=25.5,raw_410nm=1000,"
-         "raw_940nm=1017,temp_0=-3.0,temp_1=25.0,temp_2=None");
-
-    vgq::EnvPacket ev{};
-    ev.flags = 0x7F; ev.nenv_t_cC = 2234; ev.nenv_rh_cpct = 4567; ev.nenv_iaq = 1.5f;
-    ev.nenv_outdoor_aqi = 42; ev.nenv_no2_ppb = 12.25f; ev.nme_p_cPa = 100125; ev.nme_t_cC = -150;
-    ev.nme_iaq_s = 77; ev.nme_co2eq_ppm = 600; ev.nme_bvoc_cppm = 125; ev.nme_gas_ohm = 150000;
-    ev.nme_accuracy = 3;
-    n = vgq::pack_env(ev, pl);
-    CHECK(n == 51, "ENV packet is 51 octets");
-    emit("ENV", vgq::APID_ENV, n, "nenv_t=22.34,nenv_rh=45.67,nenv_iaq=1.5,nenv_aqi=42,nenv_no2=12.25,"
-         "nme_p=1001.25,nme_t=-1.5,nme_iaq_s=77,nme_co2eq=600,nme_bvoc=1.25,nme_gas=150000,"
-         "nme_accuracy=3");
-
-    vgq::CmdVerPacket cv{5, vgq::OP_PING, vgq::STAGE_EXECUTED, 0, 0xDEADBEEF};
-    n = vgq::pack_cmdver(cv, pl);
-    emit("CMDVER", vgq::APID_CMDVER, n, "tc_seq=5,opcode=9,stage=2,ground_tag=3735928559");
-
-    const int8_t noise[5] = {-118, -121, -97, -128, -120};
-    n = vgq::pack_rfscan(20, 5, 812, noise, pl);
-    CHECK(n == 9, "RFSCAN packet is 4 + N octets");
-    emit("RFSCAN", vgq::APID_RFSCAN, n, "first_ch=20,count=5,duration_ms=812,noise=-118;-121;-97;None;-120");
-
-    vgq::TimeCorrPacket tc{17, 4000, 1234, 2, 950};
-    n = vgq::pack_timecorr(tc, pl);
-    emit("TIMECORR", vgq::APID_TIMECORR, n, "ref_mcfc=17,sclk_coarse=4000,sclk_fine=1234,ref_airtime_ms=950");
-    std::fclose(f);
-  }
-
-  // ---- Command parsing --------------------------------------------------------------------
-  {
-    // TC packet: version 0, type 1, no sec hdr, APID 0x0C0, seq flags 11
-    auto mk = [](const std::vector<uint8_t>& user) {
-      std::vector<uint8_t> p = {0x10, 0xC0, 0xC0, 0x00, 0x00, (uint8_t)(user.size() - 1)};
-      p.insert(p.end(), user.begin(), user.end());
-      return p;
-    };
-    vgq::Command c;
-    auto p1 = mk({vgq::OP_PING, 0x01, 0x02, 0x03, 0x04});
-    CHECK(vgq::parse_tc_packet(p1.data(), p1.size(), c) == vgq::CE_OK && c.a32 == 0x01020304,
-          "CMD: PING tag decoded");
-    auto p2 = mk({vgq::OP_MODE, 9});
-    CHECK(vgq::parse_tc_packet(p2.data(), p2.size(), c) == vgq::CE_BAD_ARGUMENT, "CMD: bad mode rejected");
-    auto p3 = mk({vgq::OP_REBOOT, 0x12, 0x34});
-    CHECK(vgq::parse_tc_packet(p3.data(), p3.size(), c) == vgq::CE_BAD_MAGIC, "CMD: reboot needs magic");
-    auto p4 = mk({0x7E});
-    CHECK(vgq::parse_tc_packet(p4.data(), p4.size(), c) == vgq::CE_UNKNOWN_OPCODE, "CMD: unknown opcode");
-    auto p5 = mk({vgq::OP_AIRRATE, 0, 0x01, 0x2C});
-    CHECK(vgq::parse_tc_packet(p5.data(), p5.size(), c) == vgq::CE_OK && c.a8 == 0 && c.a16 == 300,
-          "CMD: AIRRATE code + revert timer");
-  }
-
   // ---- Solid-state recorder ------------------------------------------------------------------
   {
     static vgq::Ssr ssr;
@@ -360,7 +345,7 @@ int main(int argc, char** argv) {
     uint8_t p[100], o[128];
     for (int i = 0; i < 400; ++i) { std::memset(p, i & 0xFF, sizeof(p)); p[0] = (uint8_t)i; ssr.record(p, 100); }
     CHECK(ssr.dropped() > 0 && ssr.fill_permille() > 950, "SSR overwrites oldest when full");
-    ssr.start_playback();
+    CHECK(ssr.start_playback() && ssr.playing(), "SSR playback starts (no export running)");
     int cnt = 0, last = -1;
     bool ordered = true;
     while (uint16_t n = ssr.next_playback(o, sizeof(o))) {

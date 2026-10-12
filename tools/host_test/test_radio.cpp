@@ -2,7 +2,8 @@
 //  Radio abstraction (src/drivers/radio.*): E22 tables and register images, the
 //  E22 UART framing and AUX tracking moved out of the v2 flight executive, the
 //  SX126x LoRa profile table, Semtech time on air, FERR_L limits, TX timeouts
-//  and the model-generic vgq::Radio figures.
+//  and the model-generic vgq::Radio figures; at the end of the file, the E22
+//  model strap of contract 33 (one binary for the T33D and the T37S).
 //
 //  Reference values are derived by hand in the comments (contract v3 sections 2
 //  and 14; Semtech DS SX1261/2 Table 3-8). Writes <out>/radio_tables.csv, one row
@@ -13,7 +14,9 @@
 #include <cstring>
 #include <string>
 
+#include "config.h"          // model strap pin plan (contract 33); pure C++, no Arduino types
 #include "drivers/radio.h"
+#include "fsw/datalink.h"     // frame_period_ms(): the duty floor fed by the measured busy time
 #include "host_test.h"
 
 using namespace vgq;
@@ -228,6 +231,25 @@ HOST_TEST(radio_e22_tx_tracker) {
         "AUX low up to the 30 s limit");
   CHECK(t.poll(30001, false, v) == RadioEvent::TX_TIMEOUT && v == 30001 && !t.active(), "AUX timeout -> TX_TIMEOUT");
   CHECK(t.poll(40000, true, v) == RadioEvent::NONE, "idle tracker reports nothing");
+
+  // C24 (manual 5.6.2): AUX may rise once the UART data reached the RF chip while the
+  // frame is still on air. With the model's busy time as the floor, an early AUX rise
+  // (here at the 246 ms UART time of a 236-octet CADU) is not the end of the frame.
+  const uint32_t model = radio_airtime_ms(VGQ_RADIO_E22_T33D, 2, 236);
+  CHECK(model > 700, "E22 model busy time of one CADU exceeds the UART time");
+  t.start(0, model);
+  CHECK(t.poll(10, false, v) == RadioEvent::NONE && t.poll(246, true, v) == RadioEvent::NONE &&
+            t.poll(model - 1, true, v) == RadioEvent::NONE,
+        "early AUX rise: no TX_DONE before the modelled air time");
+  CHECK(t.poll(model, true, v) == RadioEvent::TX_DONE && v == (int32_t)model && !t.active(),
+        "TX_DONE at the modelled air time, busy = model");
+  t.start(0, model);
+  CHECK(t.poll(10, false, v) == RadioEvent::NONE && t.poll(model + 300, true, v) == RadioEvent::TX_DONE &&
+            v == (int32_t)(model + 300),
+        "AUX later than the model: measured time kept");
+  // The 50 % duty floor (kMaxTxDutyPermille) then sees at least the air time.
+  CHECK(frame_period_ms(model, MODE_SAFE, false, 0) >= 2 * model,
+        "frame period with the floored busy time keeps the PA under 50 % duty");
 }
 
 // ---- SX126x LoRa profiles and maths ---------------------------------------------------------
@@ -318,6 +340,37 @@ HOST_TEST(radio_sx126x_airtime) {
         "TX timeout, profile 1 CADU: 1665718 steps (26.03 s)");
   CHECK(sx_tx_timeout_raw(UINT32_MAX, 0) == 0xFFFFFEu && sx_tx_timeout_raw(0, 0) == 1u,
         "TX timeout clamped to 1..0xFFFFFE");
+}
+
+// ---- SX126x RxDutyCycle periods for hibernation (C58: was untested inside sx126x.cpp) -------
+HOST_TEST(radio_sx126x_duty_cycle) {
+  bool all = true, catch_ok = true;
+  for (uint8_t code = 0; code < 8; ++code) {
+    const LoraProfile* p = sx_profile(code);
+    uint32_t rx = 0, sl = 0;
+    const bool ok = p && sx_duty_cycle_us(p->sf, p->bw_hz, kSxWakePreambleSym, rx, sl);
+    if (!ok) { all = false; continue; }
+    const uint64_t ts = lora_symbol_us(p->sf, p->bw_hz);
+    // sleep = (n_pre - 16) Tsym; rx >= 9 Tsym; the restarted timer 2 rx + programmed sleep
+    // covers preamble + header, (n_pre + 12.25) Tsym (DS 13.1.7, 6.1.4).
+    const uint64_t need = ((4u * (uint64_t)kSxWakePreambleSym + 49u) * ts + 3u) / 4u;
+    catch_ok = catch_ok && sl == (kSxWakePreambleSym - 16u) * ts && rx >= 9u * ts &&
+               2u * (uint64_t)rx + sl - kSxDutyTransitionUs >= need;
+  }
+  CHECK(all && catch_ok, "SX126x duty cycle: every profile, 32-symbol WAKE preamble: sleep (n-16) Tsym, rx >= 9 Tsym, "
+                         "2 rx + sleep covers preamble + header");
+  uint32_t rx = 0, sl = 0;
+  CHECK(!sx_duty_cycle_us(7, 125000, 16, rx, sl) && !sx_duty_cycle_us(12, 31250, 16, rx, sl),
+        "SX126x duty cycle: n_pre <= 16 refused (no detection margin)");
+  // SF7 / 125 kHz: Tsym 1024 us; n_pre 17 -> sleep 1024 us <= 6 ms transition: refused.
+  CHECK(!sx_duty_cycle_us(7, 125000, 17, rx, sl), "SX126x duty cycle: sleep shorter than the wake-up transition refused");
+  // 24-bit period field (15.625 us steps, max 262.14 s): SF12 / 31.25 kHz (Tsym 131.072 ms)
+  // with 2000 symbols of sleep (262.144 s) exceeds it by 16 us; 1999 symbols do not.
+  CHECK(!sx_duty_cycle_us(12, 31250, 2016, rx, sl) && sx_duty_cycle_us(12, 31250, 2015, rx, sl) &&
+            sl == 1999u * 131072u,
+        "SX126x duty cycle: periods beyond the 24-bit field refused, just below accepted");
+  CHECK(!sx_duty_cycle_us(4, 125000, 32, rx, sl) && !sx_duty_cycle_us(12, 0, 32, rx, sl),
+        "SX126x duty cycle: invalid SF / bandwidth refused");
 }
 
 HOST_TEST(radio_sx126x_limits) {
@@ -416,4 +469,85 @@ HOST_TEST(radio_interface_figures) {
     }
   }
   std::fclose(f);
+}
+
+// =============================================================================
+//  E22 model selection without a source edit (contract 33, Phase B WS6b): the
+//  boot strap -> model mapping (e22_strap_model), the model-dependent behaviour
+//  that follows the model chosen at run time (REG1 image, power-code meaning,
+//  abnormal-status decoding, sensitivity) and the strap pin's place in the UNO Q
+//  pin plan of config.h.
+// =============================================================================
+HOST_TEST(radio_model_strap_mapping) {
+  const uint8_t n = kStrapSamples;
+  CHECK(n == 5 && n % 2 == 1, "strap: an odd number of reads (5), so a majority always exists");
+  // Default build (E22-400T33D): open = T33D, jumper to GND = T37S.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 0, n) == VGQ_RADIO_E22_T33D, "strap open -> E22-400T33D");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, n, n) == VGQ_RADIO_E22_T37S, "strap to GND -> E22-400T37S");
+  // Majority rule on a split reading.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 3, n) == VGQ_RADIO_E22_T37S, "3 of 5 reads low -> E22-400T37S");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 2, n) == VGQ_RADIO_E22_T33D, "2 of 5 reads low -> build default");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 1, 2) == VGQ_RADIO_E22_T33D, "a tie is not a majority");
+  // No strap / inconsistent input: the build default stays.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 0, 0) == VGQ_RADIO_E22_T33D, "no samples (no strap) -> build default");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T33D, 6, n) == VGQ_RADIO_E22_T33D, "more low reads than reads -> build default");
+  // A T37S build stays a T37S build whatever the strap says.
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T37S, 0, n) == VGQ_RADIO_E22_T37S, "VGQ_RADIO=2 build, strap open -> T37S");
+  CHECK(e22_strap_model(VGQ_RADIO_E22_T37S, n, n) == VGQ_RADIO_E22_T37S, "VGQ_RADIO=2 build, strap to GND -> T37S");
+  // The SX126x option is a build switch (other wiring): the strap never changes it.
+  CHECK(e22_strap_model(VGQ_RADIO_SX126X, n, n) == VGQ_RADIO_SX126X, "SX126x build: strap ignored");
+  CHECK(e22_strap_model(VGQ_RADIO_SX126X, 0, n) == VGQ_RADIO_SX126X, "SX126x build: strap ignored (open)");
+  CHECK(e22_strap_model(0, n, n) == 0 && e22_strap_model(9, n, n) == 9, "invalid build model passed through");
+}
+
+HOST_TEST(radio_model_follows_the_strap) {
+  // Every model-dependent table takes the model chosen at boot (Radio::model()).
+  const uint8_t jumper = e22_strap_model(VGQ_RADIO_E22_T33D, kStrapSamples, kStrapSamples);
+  const uint8_t open = e22_strap_model(VGQ_RADIO_E22_T33D, 0, kStrapSamples);
+  RadioSettings s;   // CH23, code 2, power 0
+  uint8_t r[9];
+  e22_build_regs(jumper, s, r);
+  CHECK(r[4] == 0x24, "T37S (strap): REG1 = 0x24 (noise RSSI | abnormal-status log)");
+  bool all24 = true;
+  for (uint8_t c = 0; c <= kRadioMaxPowerCode; ++c) {
+    s.power_code = c;
+    e22_build_regs(jumper, s, r);
+    all24 = all24 && r[4] == 0x24;
+  }
+  CHECK(all24, "T37S: REG1 = 0x24 for every power code (no power levels, contract 33)");
+  s.power_code = 2;
+  e22_build_regs(open, s, r);
+  CHECK(r[4] == 0x22, "T33D (strap open): REG1 = 0x22 at power code 2, bit 2 reserved");
+  CHECK(radio_tx_power_dbm(jumper, 3, 0) == 37 && radio_tx_power_dbm(open, 3, 0) == 24,
+        "power code 3: 37 dBm on the T37S, 24 dBm on the T33D");
+  SensSource src = SensSource::COMPUTED;
+  CHECK(radio_sensitivity_ddbm(jumper, 2, true, &src) == -1260 && radio_sensitivity_ddbm(open, 2, true, &src) == -1280,
+        "2.4k sensitivity follows the model: T37S -126.0, T33D -128.0 dBm");
+  CHECK(std::strcmp(radio_model_name(jumper), "E22-400T37S") == 0, "RF radio_model / EVR name: E22-400T37S");
+
+  // Abnormal-status decoding follows the model set at begin().
+  E22StreamParser p(VGQ_RADIO_E22_T33D);
+  RxPacket rx;
+  int32_t v = 0;
+  const uint8_t report[4] = {0xFF, 0xFF, 0xFF, 0x03};
+  for (uint8_t b : report) p.on_byte(b, 100);
+  CHECK(p.poll(200, rx, v) == RadioEvent::PACKET, "T33D: FF FF FF 03 is not a fault report (no such log)");
+  p.set_model(jumper);
+  for (uint8_t b : report) p.on_byte(b, 300);
+  CHECK(p.poll(400, rx, v) == RadioEvent::FAULT && v == kRadioFaultOverTemp,
+        "after set_model(T37S): FF FF FF 03 -> FAULT over-temperature");
+}
+
+HOST_TEST(radio_model_strap_pin_is_free) {
+  // UNO Q digital-pin-gpios indices used by config.h (contract 1.1): the strap must
+  // not share a pin with the E22 control lines, the SX126x option (incl. SPI2
+  // D10..D13), the sensor bus A4/A5 (18/19) or the D0/D1 console UART.
+  const int used[] = {0,  1,  PIN_E22_M0, PIN_E22_M1, PIN_E22_AUX, PIN_SX_NSS, PIN_SX_BUSY, PIN_SX_DIO1,
+                      PIN_SX_NRST, PIN_SX_RXEN, PIN_SX_TXEN, 11, 12, 13, kPinSensorSda, kPinSensorScl};
+  bool free_pin = true;
+  for (int u : used) free_pin = free_pin && u != PIN_RADIO_MODEL_STRAP;
+  CHECK(free_pin, "model strap pin (A0 = 14) is used by nothing else in config.h");
+  CHECK(PIN_RADIO_MODEL_STRAP == 14, "model strap on header A0 / D14 (PA4)");
+  CHECK(kStrapSettleUs >= 100 && kStrapSettleUs * kStrapSamples <= 20000,
+        "strap read bounded: >= 0.1 ms settle per read, <= 20 ms in total at boot");
 }

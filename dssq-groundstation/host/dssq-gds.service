@@ -1,0 +1,52 @@
+# systemd unit for the DSS-Q ground data system on the VENTUNO Q Linux side (host mode,
+# the documented fallback / always-on alternative to the App Lab App, contract 18).
+# host/install_station.sh --service installs it for the App folder it lives in, the
+# virtual environment it creates and the invoking user. The paths below are its defaults:
+# the App imported by App Lab (/home/arduino/ArduinoApps/dssq-groundstation) and the
+# environment /home/arduino/.venvs/dssq-gds. By hand, adjust User and the paths, then
+#   sudo cp host/dssq-gds.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dssq-gds
+#   journalctl -u dssq-gds -f
+# WorkingDirectory is the App's python/ folder (`python -m dssq.gds` imports the dssq package
+# from there). --app-data <App>/data makes host mode use the App's own data folder exactly as
+# the App Lab App does (dssq.config.load_app_config): <App>/data/station.toml (copied once
+# from python/config/station.toml), the archive <App>/data/archive with the SDLS TC
+# sequence-number file sdls_sn.txt, the key <App>/data/sdls_key.hex and the web token
+# <App>/data/http_token. Switching between the App and host mode therefore keeps ONE TC
+# sequence counter per key (a second archive would restart it: GCM nonce reuse under AE).
+# As in the App, the dashboard listens on all interfaces (commanding needs the token); add
+# Environment=DSSQ_HTTP_HOST=127.0.0.1 under [Service] to keep it on the board.
+# The GDS itself needs only the Python standard library (>= 3.11; Ubuntu 24.04 ships 3.12),
+# but in host mode the front panel (CardKB, annunciators), the Radio Control Unit and the
+# SX126x radio need arduino.router_bridge (PyPI arduino-router-bridge 0.5.1 + msgpack),
+# which App Lab's container has and the board's host Python does not. ExecStart therefore
+# uses the virtual environment that install_station.sh creates (Ubuntu 24.04 refuses pip
+# into the system Python). Without the package the GDS still runs, logs WARN
+# "router bridge unavailable" and those three functions stay disabled (an SX126x station
+# then has no radio at all).
+#
+# Do NOT run this service and the "DSS-Q Ground Station" App Lab App at the same time: the
+# Router Bridge lets ONE Linux client provide a given method name (front panel, RCU, SX126x
+# radio), and both would also compete for the radio serial port and web port 8080.
+#
+[Unit]
+Description=DSS-Q ground data system (VGQ-1 telemetry and telecommand)
+After=network-online.target arduino-router.service
+Wants=network-online.target
+
+[Service]
+User=arduino
+WorkingDirectory=/home/arduino/ArduinoApps/dssq-groundstation/python
+ExecStart=/home/arduino/.venvs/dssq-gds/bin/python -m dssq.gds --app-data /home/arduino/ArduinoApps/dssq-groundstation/data
+Restart=on-failure
+RestartSec=5
+# Runner.close() finishes within 4 s after SIGTERM (TDM, archive and SDLS state flushed).
+TimeoutStopSec=10
+# Serial port access (E22 USB-UART).
+SupplementaryGroups=dialout
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

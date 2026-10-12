@@ -1,7 +1,6 @@
 // =============================================================================
 //  USLP framing mode (CCSDS 732.1-B-2): flight framer and TC parser checks, and
-//  the vectors ground/tests/test_uslp.py decodes with the independent Python
-//  stack:
+//  the vectors tests/test_uslp.py decodes with the independent Python stack:
 //
 //    <out>/uslp_cadus.bin       USLP CADUs: VC0/VC1/VC3 data + VCID 63 OID frames
 //    <out>/uslp_packets.txt     "<vc> <hex packet>" for every packet queued
@@ -399,4 +398,22 @@ HOST_TEST(uslp_tc_frames) {
           t.tfdf_open && t.seq == 9 && t.data_len == sizeof noop, "TC v1 frame: format TC, header 5, open");
   }
   std::fclose(f);
+}
+
+// ---- C63: USLP TC header length guard with an exact-size heap buffer (ASan) ---------------
+HOST_TEST(uslp_tc_truncated_vcf) {
+  uint8_t fr[64];
+  const uint8_t noop[] = {0x18, 0xC0, 0xC0, 0x00, 0x00, 0x00, 0x01};
+  (void)uslp_tc(fr, noop, sizeof noop, 5, false, false);
+  bool all = true;
+  // 7 octets = the fixed TFPH only; a VCF count of 1..7 octets lies beyond the buffer.
+  for (uint8_t vl = 1; vl <= 7; ++vl) {
+    uint8_t* q = new uint8_t[kUslpFixedHdrLen];
+    std::memcpy(q, fr, kUslpFixedHdrLen);
+    q[6] = (uint8_t)((q[6] & ~7u) | vl);
+    TcFrame t;
+    all = all && tc_parse(q, kUslpFixedHdrLen, t) == TC_TOO_SHORT;
+    delete[] q;
+  }
+  CHECK(all, "USLP TC: 7-octet frame with VCF length 1..7 -> TOO_SHORT, no over-read");
 }

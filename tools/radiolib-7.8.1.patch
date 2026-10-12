@@ -1,0 +1,150 @@
+# =============================================================================
+#  VGQ patch for RadioLib 7.8.1 (contract v3 sections 25.2 and 30)
+#
+#  Applies to: https://github.com/jgromes/RadioLib.git, tag 7.8.1,
+#              commit 2325a38a89dd0f0e402c19f67fe910111da1e246.
+#  Paths are relative to the library root (git format, strip one level: -p1).
+#  Applied by tools/radiolib.py (exact-match hunks, no fuzz, no offset), which
+#  also writes PROVENANCE.txt into the copy; `git apply` and `patch -p1` accept
+#  this file too (they skip this header). The patched copy is bundled with each
+#  App Lab sketch as sketch/libraries/RadioLib and referenced by its sketch.yaml
+#  ("- dir: libraries/RadioLib"). The repository holds only this patch.
+#
+#  Policy: patch only what cannot be handled from our own code. Each hunk below
+#  fixes a defect confirmed by the RadioLib platform audit; the evidence was
+#  reproduced with the real arduino:zephyr toolchain (arduino-cli 1.5.2, Zephyr
+#  SDK arm-zephyr-eabi-g++, ArduinoCore-zephyr b08a650 with ArduinoCore-API 1.5.2).
+#
+#  Hunk 1  src/BuildOpt.h - VENTUNO Q platform branch                (audit RL-01)
+#    Defect:   arduino:zephyr builds the VENTUNO Q with -DARDUINO_VENTUNO_Q
+#              -DARDUINO_ARCH_ZEPHYR (boards.txt:714 ventunoq.build.board=VENTUNO_Q,
+#              platform.txt:139 -DARDUINO_{build.board}). BuildOpt.h only knows
+#              "ARDUINO_ARCH_ZEPHYR && ARDUINO_UNO_Q", so the VENTUNO Q takes the
+#              "Unknown Arduino" branch with empty cast macros. ArduinoHal.cpp then
+#              calls ::pinMode / ::digitalWrite / ::attachInterrupt with uint32_t
+#              arguments, but ArduinoCore-API 1.5.2 declares only the typed global
+#              functions (Common.h:115-116, :132: PinMode / PinStatus); its int
+#              overloads live in namespace arduino (Compat.h:23-33), which a
+#              ::-qualified call never searches.
+#    Evidence: pristine library, VENTUNO Q: hal/Arduino/ArduinoHal.cpp:28:52,
+#              :35:59 and :49:89 "invalid conversion from 'uint32_t' to 'PinMode' /
+#              'PinStatus'", arduino-cli compile exit 1, plus RadioLib.h:74
+#              "#warning ... might not be compatible". 79 of 80 library TUs compile;
+#              on the UNO Q all 80 do.
+#    Fix:      a VENTUNO Q branch identical to the UNO Q one (same core, same API).
+#              Result: 80/80 TUs on both boards, no warning.
+#
+#  Hunk 2  src/BuildOptUser.h - build options for every TU     (audit RL-02, RL-03)
+#    Defect:   RADIOLIB_STATIC_ONLY defaults to 0, so Module::SPItransferStream()
+#              allocates two new uint8_t[] buffers for EVERY SPI command
+#              (Module.cpp:340, :383; freed at :468-469): continuous heap traffic
+#              after initialisation (NASA/JPL Power of Ten rule 3, contract 17.3).
+#              The core's operator new returns malloc()'s result unchecked
+#              (ArduinoCore-zephyr cores/arduino/new.cpp, NEW_TERMINATES_ON_FAILURE
+#              commented out) and RadioLib never tests it: on heap exhaustion the
+#              first store through the buffer (Module.cpp:346) writes to address 0.
+#    Evidence: objdump of the pristine Module.o shows operator new[] / delete[]
+#              references in SPItransfer / SPItransferStream, none when patched; an
+#              AddressSanitizer harness with the core's operator new semantics
+#              reports "SEGV on unknown address 0x000000000000 ...
+#              Module::SPItransferStream Module.cpp:346" on the pristine library.
+#    Why here: App Lab compiles the sketch's default profile and profiles carry no
+#              build flags; a -D seen by the sketch never reaches Module.cpp.
+#              TypeDef.h includes BuildOptUser.h before BuildOpt.h, so this file is
+#              the one place every library and sketch TU reads identically (no ODR
+#              difference in class layouts such as RADIOLIB_EXCLUDE_DIRECT_RECEIVE).
+#    Fix:      RADIOLIB_STATIC_ONLY (1) - two stack arrays of
+#              RADIOLIB_STATIC_SPI_ARRAY_SIZE = 268 octets per transfer; the largest
+#              transfer we issue is ReadBuffer / WriteBuffer of 255 octets + 2
+#              command octets + 1 status octet = 258. Stack cost measured with GCC
+#              -fstack-usage: SPItransferStream 584 B; the deepest SX126x call chain
+#              of the flight driver is 1.3 KiB, against the 32 KiB Zephyr main-thread
+#              stack that runs setup(), loop() and the Bridge provide_safe handlers.
+#              RadioLib must never be called from a Bridge provide (non-safe)
+#              handler: those run on the router bridge's 500 B thread.
+#              RADIOLIB_EXCLUDE_* for every module and protocol the sketches do not
+#              use (contract 25.2: smaller, faster on-board builds) - all 7.8.1
+#              exclusions except SX126X and LORAWAN. RADIOLIB_EXCLUDE_LORAWAN stays
+#              undefined (audit RL-03): LoRaWANPacMan.cpp and LoRaWANPackageTS009.cpp
+#              test it on line 1, before any include reaches this file, then compile
+#              against excluded headers and fail ("'LoRaWANPackageTS003' was not
+#              declared", "'LoRaWANPackageTS009' does not name a type"); unused
+#              LoRaWAN code is dropped by the linker (-Wl,--gc-sections, platform.txt:22).
+#
+#  Not patched (contract 25.2: handled from our side, see the drivers): image
+#  calibration skipped for moves < 20 MHz and cached across NRST, setOutputPower()
+#  restoring the 60 mA OCP, writeRegister() never reporting failure, getRSSI(true)
+#  returning SignalRssiPkt, getSNR() / getFrequencyError() returning error codes as
+#  measurements, startReceiveDutyCycleAuto() periods violating DS 13.1.7, duty-cycled
+#  RX leaving the RF switch idle, startChannelScan() without a wake-up from sleep,
+#  stageMode(TX) without SetStandby, the 0 us delayMicroseconds(1) of the Zephyr core,
+#  the unbounded BUSY waits in begin() / launchMode() / scanChannel().
+# =============================================================================
+diff --git a/src/BuildOpt.h b/src/BuildOpt.h
+index ab95548..99ecb2a 100644
+--- a/src/BuildOpt.h
++++ b/src/BuildOpt.h
+@@ -421,6 +421,15 @@
+   #define RADIOLIB_ARDUINOHAL_PIN_STATUS_CAST         (PinStatus)
+   #define RADIOLIB_ARDUINOHAL_INTERRUPT_MODE_CAST     (PinStatus)
+ 
++#elif defined(ARDUINO_ARCH_ZEPHYR) && defined(ARDUINO_VENTUNO_Q)
++  // Arduino VENTUNO Q (Zephyr OS) - VGQ patch: same ArduinoCore-zephyr core and
++  // ArduinoCore-API typed pinMode(pin_size_t, PinMode), digitalWrite(pin_size_t,
++  // PinStatus) and attachInterrupt(pin_size_t, voidFuncPtr, PinStatus) as the UNO Q
++  #define RADIOLIB_PLATFORM                           "Arduino VENTUNO Q (Zephyr OS)"
++  #define RADIOLIB_ARDUINOHAL_PIN_MODE_CAST           (PinMode)
++  #define RADIOLIB_ARDUINOHAL_PIN_STATUS_CAST         (PinStatus)
++  #define RADIOLIB_ARDUINOHAL_INTERRUPT_MODE_CAST     (PinStatus)
++
+ #else
+   // other Arduino platforms not covered by the above list - this may or may not work
+   #define RADIOLIB_PLATFORM                           "Unknown Arduino"
+diff --git a/src/BuildOptUser.h b/src/BuildOptUser.h
+index 54f16d8..441aa99 100644
+--- a/src/BuildOptUser.h
++++ b/src/BuildOptUser.h
+@@ -10,4 +10,43 @@
+ //#define RADIOLIB_DEBUG_SPI          (1)   // verbose transcription of all SPI communication - produces large debug logs!
+ //#define RADIOLIB_VERBOSE_ASSERT     (1)   // verbose assertions - will print out file and line number on failure
+ 
++// ---- VGQ patch: build options of the VGQ-1 / DSS-Q1 sketches ----------------------
++// TypeDef.h includes this file before BuildOpt.h, and BuildOpt.h includes TypeDef.h
++// first, so every library and sketch translation unit sees exactly these values
++// (App Lab sketch profiles cannot pass -D flags). Never define RADIOLIB_* elsewhere.
++
++// No heap after initialisation: Module SPI transfers use two stack arrays of
++// RADIOLIB_STATIC_SPI_ARRAY_SIZE (268) octets instead of new[] / delete[] per command.
++#define RADIOLIB_STATIC_ONLY              (1)
++
++// Only the SX126x driver (with PhysicalLayer and utils) is used. Each exclusion is
++// written exactly "(1)": BuildOpt.h re-defines RADIOLIB_EXCLUDE_STM32WLX as (1).
++// RADIOLIB_EXCLUDE_SX126X must never be set. RADIOLIB_EXCLUDE_LORAWAN is deliberately
++// NOT set: LoRaWANPacMan.cpp and LoRaWANPackageTS009.cpp test it on their first line,
++// before any include has reached this file, so they would compile against excluded
++// headers and fail; unused LoRaWAN code is removed by the linker (--gc-sections).
++#define RADIOLIB_EXCLUDE_CC1101           (1)
++#define RADIOLIB_EXCLUDE_NRF24            (1)
++#define RADIOLIB_EXCLUDE_RF69             (1)
++#define RADIOLIB_EXCLUDE_SX1231           (1)
++#define RADIOLIB_EXCLUDE_SI443X           (1)
++#define RADIOLIB_EXCLUDE_RFM2X            (1)
++#define RADIOLIB_EXCLUDE_SX127X           (1)
++#define RADIOLIB_EXCLUDE_STM32WLX         (1)
++#define RADIOLIB_EXCLUDE_SX128X           (1)
++#define RADIOLIB_EXCLUDE_LR11X0           (1)
++#define RADIOLIB_EXCLUDE_LR2021           (1)
++#define RADIOLIB_EXCLUDE_AFSK             (1)
++#define RADIOLIB_EXCLUDE_AX25             (1)
++#define RADIOLIB_EXCLUDE_HELLSCHREIBER    (1)
++#define RADIOLIB_EXCLUDE_MORSE            (1)
++#define RADIOLIB_EXCLUDE_RTTY             (1)
++#define RADIOLIB_EXCLUDE_SSTV             (1)
++#define RADIOLIB_EXCLUDE_DIRECT_RECEIVE   (1)
++#define RADIOLIB_EXCLUDE_BELL             (1)
++#define RADIOLIB_EXCLUDE_APRS             (1)
++#define RADIOLIB_EXCLUDE_FSK4             (1)
++#define RADIOLIB_EXCLUDE_PAGER            (1)
++#define RADIOLIB_EXCLUDE_ADSB             (1)
++
+ #endif

@@ -2,13 +2,14 @@
 //  Host checks for the SDLS cryptography and frame security:
 //    AES-256 forward cipher      FIPS-197 Appendix C.3
 //    AES-256-GCM                 McGrew-Viega GCM specification, test cases 13-16
-//                                (all four were also re-derived with the Python
-//                                `cryptography` package before being embedded)
+//                                (cross-checked by the independent ground code
+//                                dssq/ccsds/aes_gcm.py, + `cryptography` when
+//                                installed: tests/test_sdls.py)
 //    key derivation, TC AE (TC v1 and USLP TFPH as AAD), AUTH v2 compatibility,
 //    tamper and replay rejection, TM AE / null-SA protection (TM and USLP
 //    geometry) and the epoch rules that keep GCM nonces unique.
 //
-//  Writes <out>/sdls_ae_vectors.txt for ground/tests/test_sdls.py, one case per
+//  Writes <out>/sdls_ae_vectors.txt for tests/test_sdls.py, one case per
 //  line: "<name> key=value ..." - octet strings in hex, the integer fields
 //  (hdr_len, prot_end, epoch, sn) in decimal.
 // =============================================================================
@@ -46,9 +47,10 @@ void vec(const std::string& out, const std::string& line) {
 std::string kv(const char* k, const uint8_t* p, size_t n) { return std::string(" ") + k + "=" + hex(p, n); }
 std::string kv(const char* k, unsigned long v) { return std::string(" ") + k + "=" + std::to_string(v); }
 
-// Shared known answers (identical constants in ground/tests/test_sdls.py).
-// Master key 00 01 .. 1f; the derived keys and frames were computed with
-// Python hmac/hashlib + `cryptography` (an implementation independent of this one).
+// Shared known answers (identical constants in tests/test_sdls.py).
+// Master key 00 01 .. 1f; the derived keys and frames are reproduced by the ground's
+// independent implementation (Python hmac/hashlib + dssq/ccsds/aes_gcm.py, and
+// `cryptography` when installed): tests/test_sdls.py.
 const char* const kKatTcKey = "6a0fc847b89c96f2a51182cb604701ce276d706174bda2907b13e4d1e7bdacf1";
 const char* const kKatTmKey = "e2344f0a091558afade4702042d0a9c9a9209464743e95fca02c3bd2ac3d6a59";
 // TC v1 AD frame, SCID 0x0A7, VC 0, N(S) 0, SPI 2, sn 7, NOOP packet 18c0c000000001.
@@ -264,6 +266,11 @@ HOST_TEST(sdls_tc_ae) {
       {5 + 13, 0x0F, Sdls::SDLS_BAD_MAC, "IV sn raised to 8"},
       {len - 3, 0x80, Sdls::SDLS_BAD_MAC, "tag bit"},
       {5 + 2, 0x01, Sdls::SDLS_BAD_IV, "IV direction octet"},
+      // IV octets 2..7 (epoch 0 and the fixed field) must be zero for TC (C64)
+      {5 + 2 + 2, 0x01, Sdls::SDLS_BAD_IV, "IV octet 2 (epoch)"},
+      {5 + 2 + 3, 0x01, Sdls::SDLS_BAD_IV, "IV octet 3 (epoch)"},
+      {5 + 2 + 4, 0x01, Sdls::SDLS_BAD_IV, "IV octet 4 (fixed field)"},
+      {5 + 2 + 7, 0x01, Sdls::SDLS_BAD_IV, "IV octet 7 (fixed field)"},
       {5 + 1, 0x03, Sdls::SDLS_BAD_SPI, "SPI 2 -> 1"},
   };
   for (const Tamper& t : kT) {
@@ -320,6 +327,50 @@ HOST_TEST(sdls_tc_ae) {
   CHECK(rx.process(fr, 8, ulen - 10, d, dl) == Sdls::SDLS_OK && rx.last_sn() == 9 && d == fr + 22 &&
         dl == sizeof tfdf && std::memcmp(d, tfdf, dl) == 0,
         "SDLS TC AE (USLP TFPH 8 as AAD) accepted, TFDF recovered");
+
+  // Anti-replay restore hold (C17): after a reset last_sn is 0 until the EGSE restores
+  // it. A held receiver verifies, then refuses an authentic frame without consuming its
+  // SN, decrypting, or counting a failure; set_last_sn() (or release_hold()) ends it.
+  Sdls held;
+  held.configure(SDLS_SVC_AE, m, 32, 1);
+  held.hold_for_restore();
+  std::memcpy(fr, orig, len);
+  TcFrame fh;
+  tc_parse(fr, len, fh);
+  CHECK(held.held() && held.process(fr, fh) == Sdls::SDLS_NOT_RESTORED && held.last_sn() == 0 &&
+            held.auth_failures() == 0 && std::memcmp(fr, orig, len) == 0,
+        "SDLS TC hold: authentic sn 7 refused before the restore, buffer and counter untouched");
+  std::memcpy(fr, orig, len);
+  fr[5 + 14 + 3] ^= 0x01;
+  tc_parse(fr, len, fh);
+  CHECK(held.process(fr, fh) == Sdls::SDLS_BAD_MAC && held.auth_failures() == 1,
+        "SDLS TC hold: a forged frame is still a MAC failure");
+  held.set_last_sn(1000);
+  std::memcpy(fr, orig, len);
+  tc_parse(fr, len, fh);
+  CHECK(!held.held() && held.process(fr, fh) == Sdls::SDLS_REPLAY && held.last_sn() == 1000,
+        "SDLS TC hold: restore to 1000 ends the hold, recorded sn 7 is a replay");
+  Sdls rel;
+  rel.configure(SDLS_SVC_AE, m, 32, 1);
+  rel.hold_for_restore();
+  rel.release_hold();
+  std::memcpy(fr, orig, len);
+  tc_parse(fr, len, fh);
+  CHECK(rel.process(fr, fh) == Sdls::SDLS_OK && rel.last_sn() == 7,
+        "SDLS TC hold: release_hold() (no EGSE) accepts again from the RAM counter");
+  Sdls aut;
+  aut.configure(SDLS_SVC_AUTH, m, 32);
+  aut.hold_for_restore();
+  const size_t alen2 = unhex(kKatTcAuth, auth, sizeof auth);
+  TcFrame fa;
+  tc_parse(auth, alen2, fa);
+  CHECK(aut.process(auth, fa) == Sdls::SDLS_NOT_RESTORED && aut.last_sn() == 0 &&
+            std::strcmp(Sdls::result_name(Sdls::SDLS_NOT_RESTORED), "SN not restored") == 0,
+        "SDLS TC hold applies to AUTH too");
+  Sdls off;
+  off.configure(SDLS_SVC_NONE, m, 32);
+  off.hold_for_restore();
+  CHECK(!off.held(), "SDLS TC hold is inert when SDLS is off");
 }
 
 // ---- TM: AE and the null SA -----------------------------------------------------------
@@ -418,4 +469,22 @@ HOST_TEST(sdls_tm_protect) {
         "SDLS TM AE frames (TM 6|14|158|16 and USLP 8|14|156|16) decrypt with an independent GCM");
   CHECK(same && !lower && higher && tm.epoch() == 6,
         "SDLS TM epoch rules: same = no-op (sn continues), lower refused, higher restarts sn at 1");
+
+  // sn exhaustion (C64): the last sn of an epoch is 0xFFFFFFFF; after it the protector
+  // stops (never wraps to a used nonce) until a new epoch.
+  tm.test_set_sn(0xFFFFFFFEu);
+  emit(kHdr, kData, 6, 0xFFFFFFFFu);
+  const uint32_t before_refused = tm.frames_refused();
+  uint8_t px[kTmFrameLen], kx[kTmFrameLen];
+  fill(px, sizeof px);
+  tm_header(px, 0, 0, 0, 0);
+  std::memcpy(kx, px, sizeof px);
+  const bool refused = !tm.protect(px, kHdr, kData);
+  CHECK(all_ok && tm.state() != SdlsTm::TM_PROTECTED && !tm.ready() && refused &&
+            tm.frames_refused() == before_refused + 1 && std::memcmp(px, kx, sizeof px) == 0 &&
+            tm.last_sn() == 0xFFFFFFFFu,
+        "SDLS TM sn 0xFFFFFFFF is the last of the epoch: the next frame is refused, never sn 0");
+  CHECK(tm.set_epoch(7) && tm.state() == SdlsTm::TM_PROTECTED, "SDLS TM a new epoch after exhaustion");
+  emit(kHdr, kData, 7, 1);
+  CHECK(all_ok, "SDLS TM epoch 7 restarts at sn 1");
 }

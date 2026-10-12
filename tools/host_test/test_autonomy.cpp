@@ -8,7 +8,7 @@
 //    * MAGCAL parsing / validation (incl. exact positive-definiteness) and
 //      B_cal = M (B - b) against hand-computed values
 //    * RM3100 BIST register values, decoding and the HK mag_bist bits
-//  Writes, for ground/tests/test_sequence.py:
+//  Writes, for tests/test_sequence.py:
 //    <out>/seq_vectors.txt   one record per line, '#' = comment:
 //      seqload <19-octet block hex> <slot> <relative 0|1> <t_s> <cmd hex>
 //                            a block the flight ACCEPTED and the entry it stored
@@ -21,8 +21,10 @@
 #include <string>
 #include <vector>
 
+#include "config.h"         // kIwdgTimeoutMs, kIwdgLsiHz
 #include "fsw/autonomy.h"
 #include "fsw/commands.h"
+#include "drivers/radio.h"     // radio_boot_power_code (contract 15)
 #include "host_test.h"
 
 using namespace vgq;
@@ -825,4 +827,76 @@ HOST_TEST(rm3100_bist_decode) {
     fits = fits && mag_bist_evr_text(1, x, t, sizeof t) <= 80;
   }
   CHECK(fits, "every BIST EVR text fits 80 characters");
+}
+
+// ---- Reset cause (C16 / C56): a cold power-up is POWER-ON, not BROWNOUT -------------------
+HOST_TEST(reset_cause_classification) {
+  // STM32U5 cold power-up: BORRSTF | PINRSTF (BOR = POR/PDR, no PORRSTF), no warm marker.
+  CHECK(classify_reset_cause(RST_F_BOR | RST_F_PIN, false) == 0, "power-up (BOR + PIN, no marker) -> 0 POWER-ON");
+  CHECK(classify_reset_cause(RST_F_BOR, false) == 0, "BOR flag alone, no marker -> 0 POWER-ON");
+  CHECK(classify_reset_cause(RST_F_BOR | RST_F_PIN, true) == kResetCauseBrownout,
+        "BOR with the marker of a running MCU -> 4 BROWNOUT");
+  CHECK(classify_reset_cause(RST_F_PIN, true) == 1 && classify_reset_cause(RST_F_PIN, false) == 1,
+        "NRST (Linux side) -> 1 PIN");
+  CHECK(classify_reset_cause(RST_F_SOFT | RST_F_PIN, true) == 2, "NVIC_SystemReset -> 2 SOFTWARE");
+  CHECK(classify_reset_cause(RST_F_IWDG | RST_F_PIN, true) == 3 && classify_reset_cause(RST_F_WWDG, false) == 3,
+        "IWDG / WWDG -> 3 WATCHDOG");
+  CHECK(classify_reset_cause(0, true) == 255, "no flag -> 255 UNKNOWN");
+  BeaconMonitor b;
+  b.begin(classify_reset_cause(RST_F_BOR | RST_F_PIN, false));
+  CHECK(b.level() != BEACON_URGENT && radio_boot_power_code(false, 3, 2) == 3,
+        "a power-up neither latches the beacon URGENT nor derates the TX power");
+}
+
+// ---- Phase D: hardware watchdog settings and the RSTCNT acknowledgement of FDIR flags ----
+HOST_TEST(iwdg_settings_and_reset_cause) {
+  IwdgSettings w;
+  const bool ok = iwdg_settings(kIwdgTimeoutMs, kIwdgLsiHz, w);
+  const uint32_t ms = iwdg_timeout_ms(w, kIwdgLsiHz);
+  std::printf("      IWDG: %lu ms requested at %lu Hz -> PR %u (/%u), RLR %u, timeout %lu ms\n",
+              (unsigned long)kIwdgTimeoutMs, (unsigned long)kIwdgLsiHz, (unsigned)w.pr, 4u << w.pr,
+              (unsigned)w.rlr, (unsigned long)ms);
+  CHECK(ok && w.pr == 7 && w.rlr == 2499 && ms == 40000,
+        "IWDG: 40 s at 32 kHz -> prescaler /512 (PR 7), reload 2499 (RM0456 IWDG_PR / IWDG_RLR)");
+  // The timeout is never shorter than asked, and the finest prescaler is used.
+  bool never_short = true, finest = true;
+  for (uint32_t t = 1; t <= 131000u; t = t * 3u + 7u) {          // bounded: ~12 values
+    IwdgSettings s;
+    if (!iwdg_settings(t, 32000u, s)) { never_short = false; continue; }
+    never_short = never_short && iwdg_timeout_ms(s, 32000u) >= t - 1u && s.pr <= kIwdgPrMax &&
+                  s.rlr <= kIwdgRlrMax;
+    if (s.pr > 0) {                                               // the next finer prescaler cannot reach t
+      const uint64_t finer = (uint64_t)(4u << (s.pr - 1)) * 4096u * 1000u / 32000u;
+      finest = finest && finer < t;
+    }
+  }
+  CHECK(never_short && finest, "IWDG: reload rounded up (never shorter), smallest prescaler that reaches it");
+  IwdgSettings keep;
+  keep.pr = 3;
+  keep.rlr = 99;
+  CHECK(!iwdg_settings(0, 32000u, keep) && !iwdg_settings(1000u, 0, keep) && !iwdg_settings(131073u, 32000u, keep) &&
+            keep.pr == 3 && keep.rlr == 99 && iwdg_settings(131072u, 32000u, keep) && keep.pr == 8 &&
+            keep.rlr == 4095,
+        "IWDG: 0 / > 131.072 s refused (output unchanged); 131.072 s = /1024 x 4096");
+  // The worst documented loop pass (E22 configure() on a dead module, about 4 s, plus
+  // Zephyr I2C transfers that time out at 0.5 s each) stays far below the timeout.
+  CHECK(kIwdgTimeoutMs >= 2u * (4000u + 20u * 500u), "IWDG: timeout >= 2 x (4 s + 20 I2C time-outs of 0.5 s)");
+  // A watchdog reset is reported as such: IWDGRSTF wins over the pin flag it also sets.
+  CHECK(classify_reset_cause(RST_F_IWDG | RST_F_PIN | RST_F_BOR, true) == 3,
+        "IWDG reset (with PINRSTF / BORRSTF) -> reset_cause 3 WATCHDOG");
+}
+
+HOST_TEST(rstcnt_clears_event_latched_fdir_flags) {
+  CHECK(kFdirClearedByRstcnt == (FDIR_CMD_LOSS | FDIR_LOOP_OVERRUN | FDIR_RATE_REVERT | FDIR_SDLS_AUTH),
+        "RSTCNT acknowledges exactly CMD_LOSS, LOOP_OVERRUN, RATE_REVERT, SDLS_AUTH");
+  CHECK(fdir_after_rstcnt(0xFFFF) == (uint16_t)~kFdirClearedByRstcnt && fdir_after_rstcnt(kFdirClearedByRstcnt) == 0 &&
+            fdir_after_rstcnt(0) == 0 &&
+            fdir_after_rstcnt((uint16_t)~kFdirClearedByRstcnt) == (uint16_t)~kFdirClearedByRstcnt,
+        "RSTCNT: the four flags cleared, every other flag kept (and none set)");
+  // Flags with a monitor of their own (state-driven) are not touched by RSTCNT.
+  const uint16_t state_driven = FDIR_RADIO_CFG | FDIR_AUX_TIMEOUT | FDIR_PA_OVERTEMP | FDIR_AVI_OVERTEMP |
+                                FDIR_I2C_BUS | FDIR_SENSOR_LOST | FDIR_VC_CONGEST | FDIR_LOW_BUS_V |
+                                FDIR_FARM_LOCKOUT | FDIR_TX_INHIBIT | FDIR_HIBERNATE | FDIR_RADIO_FAULT;
+  CHECK((state_driven & kFdirClearedByRstcnt) == 0 && (state_driven | kFdirClearedByRstcnt) == 0xFFFF,
+        "RSTCNT: the 12 state-driven flags and the 4 event flags partition the 16 bits");
 }

@@ -1,11 +1,16 @@
 // Minimal Arduino-API stub for HOST SYNTAX/TYPE CHECKING of the firmware.
-// It is NOT a simulator: functions are inert. Used by tools/host_test/check_firmware.sh.
+// It is NOT a simulator: functions are declared or inert. Used by
+// tools/host_test/check_firmware.sh (g++ -fsyntax-only).
 //
-// The declarations follow ArduinoCore-API (the API layer of the arduino:zephyr core used
-// by the UNO Q and VENTUNO Q) closely enough for the flight/station code AND for the
-// vendor libraries it includes (RadioLib 7.8.1's ArduinoHal and Print, U8g2, ...) to
-// type-check. PinMode / PinStatus are plain ints here; the real core uses enums, so code
-// must still pass the named constants (HIGH, OUTPUT, ...) rather than arbitrary integers.
+// The pin / interrupt / timing API is declared exactly as the arduino:zephyr core
+// exposes it to sketches and libraries: ArduinoCore-API 1.5.2 (api/Common.h, the
+// version pinned by ArduinoCore-zephyr's zephyr/module.yml) declares the TYPED
+// functions at global scope inside extern "C", and its int overloads of pinMode()
+// and digitalWrite() live in namespace arduino (api/Compat.h), made visible to
+// unqualified calls by the core's `using namespace arduino;`. A ::-qualified call
+// therefore sees only the typed functions - the reason RadioLib's ArduinoHal needs
+// its PinMode / PinStatus casts on a platform it does not know (VENTUNO Q), which a
+// looser stub would hide. Classes (String, Print, Stream, serial) are simplified.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -15,45 +20,70 @@
 #include <string>
 #include <ctype.h>
 #include <stdlib.h>
-#define HIGH 1
-#define LOW 0
-#define CHANGE 2
-#define FALLING 3
-#define RISING 4
-#define INPUT 0
-#define OUTPUT 1
-#define INPUT_PULLUP 2
-#define INPUT_PULLDOWN 3
+
+// ---- ArduinoCore-API 1.5.2 api/Common.h ----------------------------------------
+extern "C" {
+void yield(void);
+typedef enum {
+  LOW = 0,
+  HIGH = 1,
+  CHANGE = 2,
+  FALLING = 3,
+  RISING = 4,
+} PinStatus;
+typedef enum {
+  INPUT = 0x0,
+  OUTPUT = 0x1,
+  INPUT_PULLUP = 0x2,
+  INPUT_PULLDOWN = 0x3,
+  OUTPUT_OPENDRAIN = 0x4,
+} PinMode;
+typedef enum {
+  LSBFIRST = 0,
+  MSBFIRST = 1,
+} BitOrder;
+typedef void (*voidFuncPtr)(void);
+typedef void (*voidFuncPtrParam)(void*);
+typedef bool boolean;
+typedef uint8_t byte;
+typedef uint16_t word;
+typedef uint8_t pin_size_t;
+void pinMode(pin_size_t pinNumber, PinMode pinMode);
+void digitalWrite(pin_size_t pinNumber, PinStatus status);
+PinStatus digitalRead(pin_size_t pinNumber);
+int analogRead(pin_size_t pinNumber);
+void analogWrite(pin_size_t pinNumber, int value);
+unsigned long millis(void);
+unsigned long micros(void);
+void delay(unsigned long);
+void delayMicroseconds(unsigned int us);
+void attachInterrupt(pin_size_t interruptNumber, voidFuncPtr callback, PinStatus mode);
+void detachInterrupt(pin_size_t interruptNumber);
+// ArduinoCore-zephyr cores/arduino/Arduino.h
+void interrupts(void);
+void noInterrupts(void);
+}
+template <class T, class L> auto min(const T& a, const L& b) -> decltype((b < a) ? b : a) { return (b < a) ? b : a; }
+template <class T, class L> auto max(const T& a, const L& b) -> decltype((b < a) ? b : a) { return (a < b) ? b : a; }
+template <class T, class L, class H> inline T constrain(T x, L lo, H hi) { return x < (T)lo ? (T)lo : (x > (T)hi ? (T)hi : x); }
+unsigned long pulseIn(uint8_t pin, uint8_t state, unsigned long timeout = 1000000L);
+void tone(uint8_t pin, unsigned int frequency, unsigned long duration = 0);
+void noTone(uint8_t pin);
+
+// ---- ArduinoCore-API 1.5.2 api/Compat.h ----------------------------------------
+namespace arduino {
+inline void pinMode(pin_size_t pinNumber, int mode) { pinMode(pinNumber, (PinMode)mode); }
+inline void digitalWrite(pin_size_t pinNumber, int status) { digitalWrite(pinNumber, (PinStatus)status); }
+}  // namespace arduino
+
+// ---- ArduinoCore-zephyr cores/arduino/Arduino.h (devicetree-generated parts) ----
+enum analogPins { A0 = 14, A1, A2, A3, A4, A5 };
+int digitalPinToInterrupt(pin_size_t pin);
+
 #define DEC 10
 #define HEX 16
 #define OCT 8
 #define BIN 2
-enum { A0 = 14, A1, A2, A3, A4, A5 };
-typedef uint8_t byte;
-typedef bool boolean;
-typedef uint8_t pin_size_t;
-typedef int PinMode;
-typedef int PinStatus;
-typedef void (*voidFuncPtr)(void);
-inline unsigned long millis() { return 0; }
-inline unsigned long micros() { return 0; }
-inline void delay(unsigned long) {}
-inline void delayMicroseconds(unsigned int) {}
-inline void pinMode(int, int) {}
-inline void digitalWrite(int, int) {}
-inline int digitalRead(int) { return 1; }
-inline void noInterrupts() {}
-inline void interrupts() {}
-inline void yield() {}
-inline void attachInterrupt(int, voidFuncPtr, int) {}
-inline void detachInterrupt(int) {}
-inline int digitalPinToInterrupt(int pin) { return pin; }
-inline unsigned long pulseIn(int, int, unsigned long = 1000000UL) { return 0; }
-inline void tone(int, unsigned int, unsigned long = 0) {}
-inline void noTone(int) {}
-template <class T, class L> inline auto min(const T& a, const L& b) -> decltype(a < b ? a : b) { return a < b ? a : b; }
-template <class T, class L, class H> inline T constrain(T x, L lo, H hi) { return x < (T)lo ? (T)lo : (x > (T)hi ? (T)hi : x); }
-template <class T, class L> inline auto max(const T& a, const L& b) -> decltype(a < b ? b : a) { return a < b ? b : a; }
 
 // Program-memory helpers (flash and RAM share one address space on ARM).
 #define PROGMEM
@@ -113,3 +143,6 @@ class HardwareSerial : public Stream {
 extern HardwareSerial Serial, Serial1, Serial2, Serial3;
 #define __ARM_ARCH 8
 inline void NVIC_SystemReset() {}
+
+// Allow namespace-less operations if Arduino.h is included (as the core does).
+using namespace arduino;

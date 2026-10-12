@@ -2,7 +2,7 @@
 //  CFDP class 1 (CCSDS 727.0-B-5): flight PDU header bit layout, builders and
 //  parser, the modular checksum (incremental, unaligned offsets), file-name
 //  rules, CfdpSender and CfdpRelayMonitor, plus the vectors
-//  ground/tests/test_cfdp.py feeds to the independent Python receiver:
+//  tests/test_cfdp.py feeds to the independent Python receiver:
 //
 //    <out>/cfdp_source.bin        the pseudo-random 1000-octet file
 //    <out>/cfdp_pdus.txt          one hex PDU per line: its complete transfer
@@ -13,9 +13,11 @@
 // =============================================================================
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ccsds/cfdp.h"
+#include "ccsds/ccsds_types.h"
 #include "host_test.h"
 
 using namespace ccsds;
@@ -494,4 +496,40 @@ HOST_TEST(cfdp_relay_monitor) {
   CHECK(!CfdpRelayMonitor::acceptable(b, n), "CFDP relay refuses a name with a path separator");
   n = cfdp_build_eof(b, sizeof b, 1, seq, 2, kCfdpCondCancel, 0, 0);
   CHECK(CfdpRelayMonitor::acceptable(b, n), "CFDP relay accepts EOF(cancel)");
+}
+
+// ---- C63: length guards on EGSE relay input, with exact-size heap buffers (ASan) ----------
+HOST_TEST(cfdp_truncated_inputs) {
+  uint8_t b[kCfdpMaxPduLen];
+  const size_t n = cfdp_build_metadata(b, sizeof b, kCfdpEntityVgq1, kCfdpEgseSeqFlag | 7u, kCfdpEntityDssq1, 1000,
+                                       "a.bin");
+  CfdpPdu p;
+  // Every truncation, with the header's data-field length made consistent with it, so the
+  // Metadata body checks (not the length match) must refuse it - including the cut right
+  // after the source name, where only the destination-name length-octet check stands.
+  bool all = n == 28;
+  for (size_t k = kCfdpHdrLen + 1; k < n; ++k) {
+    std::vector<uint8_t> h(b, b + k);
+    uint8_t* q = new uint8_t[k];
+    std::memcpy(q, h.data(), k);
+    put_u16(q + 1, (uint16_t)(k - kCfdpHdrLen));
+    all = all && !cfdp_parse(q, k, p) && !CfdpRelayMonitor::acceptable(q, k);
+    delete[] q;
+  }
+  CHECK(all, "CFDP Metadata cut at every octet (consistent data-field length) refused, no over-read");
+  // Relay cap (cfdp.h kCfdpRelayMaxPduLen = 110): an EOF with trailing options parses at
+  // any length, so only the cap refuses the 111-octet one.
+  auto eof_of = [&](size_t total) {
+    uint8_t* q = new uint8_t[total];
+    std::memset(q, 0, total);
+    (void)cfdp_build_eof(q, total, kCfdpEntityVgq1, kCfdpEgseSeqFlag | 7u, kCfdpEntityDssq1, kCfdpCondNoError, 0, 0);
+    put_u16(q + 1, (uint16_t)(total - kCfdpHdrLen));
+    const bool parse = cfdp_parse(q, total, p);
+    const bool acc = CfdpRelayMonitor::acceptable(q, total);
+    delete[] q;
+    return std::make_pair(parse, acc);
+  };
+  const auto at_cap = eof_of(kCfdpRelayMaxPduLen), over = eof_of(kCfdpRelayMaxPduLen + 1);
+  CHECK(at_cap.first && at_cap.second && over.first && !over.second,
+        "CFDP relay: a parseable 110-octet PDU accepted, 111 octets refused by the length cap");
 }

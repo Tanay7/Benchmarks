@@ -12,7 +12,14 @@
 //      spec31 <hex>                       a packed SPEC v3.1 user-data field (129 octets)
 //      field <name> <raw integer> <engineering value %.9g | nan>
 //                                         every field of that packet, ground names/units
-//      specburst <hex>                    a packed SPECBURST user-data field (3 samples)
+//      specburst <encoding> <hex> <samples>
+//                                         a packed SPECBURST user-data field (contract 28
+//                                         layout, 3 samples): encoding 1 = CCSDS 121.0 Rice
+//                                         (smooth samples), 0 = raw (incompressible
+//                                         samples); <samples> = what it must decode to,
+//                                         per sample "<dt_ms>:<raw0>;...;<raw17>" joined
+//                                         by '/', raw in decimal as packed (65535 = not
+//                                         converted, 65534 = saturated)
 //
 //  The synthetic spectra are MODELS (Planck blackbodies, Gaussian LED / phosphor /
 //  mercury-europium lines seen through 20 nm FWHM Gaussian channels), not measurements.
@@ -21,6 +28,7 @@
 #include <cstring>
 #include <string>
 
+#include "ccsds/rice.h"
 #include "fsw/spectral.h"
 #include "host_test.h"
 
@@ -710,19 +718,71 @@ HOST_TEST(spectral_config_and_packets) {
   CHECK(v2.bore_zen_cdeg == 0x7FFF && v2.bore_az_cdeg == 0x7FFF && !(v2.flags & SPEC_F_ATTITUDE) &&
             v2.change_cdeg == 0xFFFF, "no attitude / no change -> n/a sentinels");
 
+  // ---- SPECBURST, contract 28 layout (PB-1.12): Rice when shorter, raw otherwise ----
   SpecBurstSample s[4];
   for (int k = 0; k < 4; ++k) {
     s[k].dt_ms = (uint16_t)(k * 77);
-    for (int i = 0; i < kSpecChannels; ++i) s[k].raw[i] = (uint16_t)(k * 100 + i);
+    for (int i = 0; i < kSpecChannels; ++i) s[k].raw[i] = (uint16_t)(1000 + 40 * i + 3 * k);
   }
   s[1].raw[0] = 0xFFFF;                              // not converted in a 4-channel BANK mode
-  uint8_t bp[kSpecBurstMaxLen];
-  const size_t bn = pack_specburst(0x01020304, 123, 3, 1, s, 3, bp, sizeof bp);
-  CHECK(bn == 123 && bp[0] == 1 && bp[3] == 4 && bp[4] == 0 && bp[5] == 123 && bp[6] == 3 && bp[7] == 1 &&
-            bp[8] == 3 && bp[9 + 38] == 0 && bp[10 + 38] == 77 && bp[11 + 38] == 0xFF,
-        "SPECBURST: 9 + 3 x 38 = 123 octets, header and samples big-endian");
-  CHECK(pack_specburst(0, 0, 0, 1, s, 0, bp, sizeof bp) == 0 && pack_specburst(0, 0, 0, 1, s, 4, bp, 200) == 0 &&
-            pack_specburst(0, 0, 0, 1, s, 3, bp, 122) == 0, "SPECBURST: n outside 1..3 or short buffer -> 0");
+  s[2].raw[17] = spec_burst_raw(65535);              // a full-scale count is sent as 0xFFFE
+  uint8_t bp[kSpecBurstMaxLen + 8];
+  uint8_t rs = 0xFF;
+  const size_t bn = pack_specburst(0x01020304, 123, 3, 1, s, 3, bp, sizeof bp, rs);
+  CHECK(rs == ccsds::RICE_OK && bp[9] == SPEC_BURST_RICE && bn > 16 && bn < 16 + 108 && bp[0] == 1 && bp[3] == 4 &&
+            bp[4] == 0 && bp[5] == 123 && bp[6] == 3 && bp[7] == 1 && bp[8] == 3 && bp[10] == 0 && bp[11] == 0 &&
+            bp[12] == 0 && bp[13] == 77 && bp[14] == 0 && bp[15] == 154,
+        "SPECBURST: header t0 | rate | gain | cycles | n | encoding 1 | dt[3], Rice strictly shorter than raw");
+  uint16_t cm[kSpecChannels * 3];
+  for (int ch = 0; ch < kSpecChannels; ++ch)
+    for (int t = 0; t < 3; ++t) cm[ch * 3 + t] = s[t].raw[ch];
+  uint8_t z[256];
+  size_t zl = 0;
+  CHECK(ccsds::rice_encode(ccsds::kRiceMission, cm, 54, z, sizeof z, &zl) == ccsds::RICE_OK && zl == bn - 16 &&
+            std::memcmp(z, bp + 16, zl) == 0,
+        "SPECBURST: encoding 1 payload = CCSDS 121.0 (n 16, J 16, r 128) of the CHANNEL-MAJOR samples");
+  SpecBurstSample rb[3];
+  uint32_t seed = 0x2545F491u;
+  for (int t = 0; t < 3; ++t) {
+    rb[t].dt_ms = (uint16_t)(10 * t);
+    for (int ch = 0; ch < kSpecChannels; ++ch) {
+      seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+      rb[t].raw[ch] = (uint16_t)seed;
+    }
+  }
+  uint8_t rp[kSpecBurstMaxLen];
+  uint8_t rs2 = 0xFF;
+  const size_t rn = pack_specburst(7, 1, 0, 1, rb, 3, rp, sizeof rp, rs2);
+  bool tm = rn == kSpecBurstMaxLen && rn == 124 && rs2 == ccsds::RICE_ERR_OVERFLOW && rp[9] == SPEC_BURST_RAW;
+  for (int t = 0; t < 3 && tm; ++t)
+    for (int ch = 0; ch < kSpecChannels && tm; ++ch)
+      tm = rp[16 + 2 * (t * 18 + ch)] == (uint8_t)(rb[t].raw[ch] >> 8) &&
+           rp[17 + 2 * (t * 18 + ch)] == (uint8_t)rb[t].raw[ch];
+  CHECK(tm, "SPECBURST: incompressible samples -> encoding 0, 10 + 38 x 3 = 124 octets, TIME-MAJOR raw");
+  bool lens = true;
+  for (uint8_t nn = 1; nn <= 3; ++nn) {
+    uint8_t sti = 0xFF;
+    lens &= pack_specburst(7, 1, 0, 1, rb, nn, rp, sizeof rp, sti) == 10u + 38u * nn && sti == ccsds::RICE_ERR_OVERFLOW;
+    lens &= pack_specburst(7, 1, 0, 1, rb, nn, rp, 10u + 38u * nn, sti) == 10u + 38u * nn;     // exact-fit buffer
+  }
+  CHECK(lens, "SPECBURST: n = 1..3 raw lengths 48 / 86 / 124, an exact-fit buffer suffices");
+  uint8_t st = 0;
+  CHECK(pack_specburst(0, 0, 0, 1, s, 0, bp, sizeof bp, st) == 0 && st == ccsds::RICE_ERR_ARG &&
+            pack_specburst(0, 0, 0, 1, s, 4, bp, 200, st) == 0 && pack_specburst(0, 0, 0, 1, s, 3, bp, 123, st) == 0 &&
+            pack_specburst(0, 0, 0, 1, nullptr, 1, bp, 200, st) == 0 &&
+            pack_specburst(0, 0, 0, 1, s, 1, nullptr, 200, st) == 0 && st == ccsds::RICE_ERR_ARG,
+        "SPECBURST: n outside 1..3, a buffer below 10 + 38 n, or null pointers -> 0, no attempt");
+  CHECK(spec_burst_raw(65535) == 0xFFFE && spec_burst_raw(65534) == 0xFFFE && spec_burst_raw(17) == 17,
+        "SPECBURST: 0xFFFF stays reserved for 'not converted'");
+  auto samples_text = [](const SpecBurstSample* smp, int cnt) {
+    std::string txt;
+    for (int j = 0; j < cnt; ++j) {
+      if (j) txt += "/";
+      txt += std::to_string(smp[j].dt_ms) + ":";
+      for (int ci = 0; ci < kSpecChannels; ++ci) txt += (ci ? ";" : "") + std::to_string(smp[j].raw[ci]);
+    }
+    return txt;
+  };
 
   // ---- vectors for the Python cross-check ----
   FILE* f = std::fopen((out + "/spectral_vectors.txt").c_str(), "w");
@@ -756,7 +816,8 @@ HOST_TEST(spectral_config_and_packets) {
                v.bore_az_cdeg < 0 ? v.bore_az_cdeg / 100.0 + 360.0 : v.bore_az_cdeg / 100.0);
   std::fprintf(f, "field spec_class %u %u\nfield spec_conf %u %u\nfield spec_change %u %.9g\n", v.class_id,
                v.class_id, v.class_conf, v.class_conf, v.change_cdeg, v.change_cdeg / 100.0);
-  std::fprintf(f, "specburst %s\n", host_test::hex(bp, bn).c_str());
+  std::fprintf(f, "specburst 1 %s %s\n", host_test::hex(bp, bn).c_str(), samples_text(s, 3).c_str());
+  std::fprintf(f, "specburst 0 %s %s\n", host_test::hex(rp, 124).c_str(), samples_text(rb, 3).c_str());
   std::fclose(f);
   CHECK(true, "wrote spectral_vectors.txt");
 }
