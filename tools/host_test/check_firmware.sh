@@ -262,7 +262,9 @@ fi
 
 # ---- Negative control: the stock tag must not build for the VENTUNO Q --------------------
 if [[ -n "$STOCK" ]]; then
-  if "$CXX" "${LIBFLAGS[@]}" "${VENTUNOQ[@]}" -I"$STUB" -I"$STOCK" -x c++ "$STOCK/hal/Arduino/ArduinoHal.cpp" \
+  # LC_ALL=C: GCC quotes types with ASCII ' only in the C locale (UTF-8 locales, as on the CI
+  # runner, give U+2018 / U+2019), and the diagnostics are matched below.
+  if LC_ALL=C "$CXX" "${LIBFLAGS[@]}" "${VENTUNOQ[@]}" -I"$STUB" -I"$STOCK" -x c++ "$STOCK/hal/Arduino/ArduinoHal.cpp" \
        >"$LOG" 2>&1; then
     echo "FAIL negative control: stock RadioLib 7.8.1 ArduinoHal.cpp compiled for the VENTUNO Q -"
     echo "     the stub no longer models the core's typed pinMode / digitalWrite / attachInterrupt"
