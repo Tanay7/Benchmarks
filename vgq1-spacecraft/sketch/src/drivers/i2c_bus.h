@@ -26,9 +26,13 @@
 //  Open drain is EMULATED, because ArduinoCore-zephyr pinMode() implements only
 //  INPUT, INPUT_PULLUP, INPUT_PULLDOWN and OUTPUT (= GPIO_OUTPUT_LOW) and silently
 //  ignores OUTPUT_OPENDRAIN (wiring_digital.cpp): a line is RELEASED with
-//  pinMode(pin, INPUT) - the bus pull-ups raise it - and DRIVEN LOW with
+//  pinMode(pin, INPUT_PULLUP) - the bus pull-ups raise it - and DRIVEN LOW with
 //  pinMode(pin, OUTPUT), which configures and drives low at once. digitalWrite(HIGH)
 //  is never used on SDA/SCL, so the MCU never drives a bus line high against a target.
+//  The MCU's own weak pull-up (RPU, about 40 kOhm, STM32U585 datasheet) is on while a
+//  line is released: an empty bus (nothing on A4/A5, the AS7265X on Qwiic) has no other
+//  pull-up, read LOW with plain INPUT and raised EVR 0x060A at every re-probe (D-67); a
+//  target holding a line low still reads LOW against it.
 //  Bound: <= 9 x 2 half periods of ~6 us + START/STOP, about 0.12 ms plus begin()/setClock().
 // =============================================================================
 #pragma once

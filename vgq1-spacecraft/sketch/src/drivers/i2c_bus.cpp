@@ -75,10 +75,14 @@ bool I2cBus::read_raw(uint8_t addr, uint8_t* buf, size_t n) {
 // >= 4.7 us, high >= 4.0 us), so the pulses are legal 100 kHz clocks or slower.
 static inline void half_period() { delayMicroseconds((unsigned int)kI2cClearHalfPeriodUs + 1u); }
 
+// A line is released with the MCU's own weak pull-up on (see the header): an empty bus
+// then reads high, a target holding the line still reads low.
+static inline void release(int pin) { pinMode((pin_size_t)pin, INPUT_PULLUP); }
+
 bool I2cBus::bus_clear() {
-  // Both lines released: the board pull-ups define the idle level.
-  pinMode((pin_size_t)sda_, INPUT);
-  pinMode((pin_size_t)scl_, INPUT);
+  // Both lines released: the bus pull-ups (or only the MCU's own) define the idle level.
+  release(sda_);
+  release(scl_);
   half_period();
   bool ok = true;
   if (digitalRead((pin_size_t)sda_) == LOW) {
@@ -87,7 +91,7 @@ bool I2cBus::bus_clear() {
     for (uint8_t i = 0; i < kI2cClearMaxPulses; ++i) {
       pinMode((pin_size_t)scl_, OUTPUT);                       // SCL driven low
       half_period();
-      pinMode((pin_size_t)scl_, INPUT);                        // SCL released
+      release(scl_);                                           // SCL released
       half_period();
       if (digitalRead((pin_size_t)scl_) == LOW) {             // something holds SCL
         ok = false;                                            // "SCL stuck low"
@@ -102,13 +106,13 @@ bool I2cBus::bus_clear() {
     // to idle (START + STOP, the usual recovery sequence).
     pinMode((pin_size_t)sda_, OUTPUT);                         // SDA driven low (START)
     half_period();
-    pinMode((pin_size_t)sda_, INPUT);                          // SDA released (STOP)
+    release(sda_);                                             // SDA released (STOP)
     half_period();
     ok = digitalRead((pin_size_t)sda_) == HIGH && digitalRead((pin_size_t)scl_) == HIGH;
   }
-  // Both pins are left as inputs (released) whatever happened; Wire begin() re-muxes them.
-  pinMode((pin_size_t)sda_, INPUT);
-  pinMode((pin_size_t)scl_, INPUT);
+  // Both pins are left released whatever happened; Wire begin() re-muxes them.
+  release(sda_);
+  release(scl_);
   return ok;
 }
 

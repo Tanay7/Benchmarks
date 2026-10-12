@@ -312,7 +312,7 @@ Execution refusals with code 5 (HARDWARE) or 7 (BUSY) are reported in CMDVER onl
 | 0x0607 | INFO | `Nicla Sense ME responding again` | Reads succeed again; `SENSOR_LOST` cleared | None |
 | 0x0608 | WARN | `brownout reset: TX power derated (code %u) - check radio supply` | Boot after a BROWNOUT reset | Fix the supply, then `TXPWR 0` (2.5) |
 | 0x0609 | INFO | `I2C bus healthy again: FDIR I2C_BUS cleared` | 10 s without a new bus error | None |
-| 0x060A | ERROR | `I2C bus clear: SDA or SCL still low after %u clocks` | Boot or recovery: a line stays low after 9 clocks | A device or a short holds the line: disconnect devices one by one |
+| 0x060A | ERROR | `I2C bus clear: SDA or SCL still low after %u clocks` | Boot or recovery: a line stays low after 9 clocks | A device or a short holds the line: disconnect devices one by one. An empty A4/A5 bus no longer raises it (D-67) |
 | 0x060B | INFO | `instrument acquired: %s` (`Nicla Sense ME`, `RM3100 outboard`, `RM3100 inboard`) | A unit missing at boot answered a re-probe (a self-test follows for an RM3100) | None |
 | 0x060C | ERROR | `IWDG settings not confirmed in %lu ms: watchdog runs, timeout may be short` | Boot: the hardware watchdog's prescaler / reload did not reach the IWDG within 200 ms (`config.h` `kIwdgUpdateWaitMs`); it runs, possibly with the reset value of 512 ms | Expect repeated WATCHDOG resets: report; a build with `VGQ_IWDG = 0` runs without the watchdog |
 

@@ -57,8 +57,9 @@ named test.
 
 ## Status
 
-> **Not yet tested on real hardware.** All automated verification passes; the boards and radios
-> have not been run together yet. The 60 hardware and standards items (56 still open: power
+> **First bench run of the spacecraft only.** All automated verification passes. The flight App
+> has run on a UNO Q with its radio and the AS7265X (2026-10-12, [21_Test_Records.md](21_Test_Records.md)
+> record 2026-10-12-A); the boards and radios have not been run together yet. The 60 hardware and standards items (56 still open: power
 > ladders, the frequency-error sign, sensor timings, platform behaviour, the watchdog, on-air
 > identification, power draw, three standards checks) are listed with their tests in
 > [20_Known_Limitations.md](20_Known_Limitations.md) and

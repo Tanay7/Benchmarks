@@ -297,7 +297,8 @@ with the date added. To replace an App, follow part 16 first: deleting an App al
 The flight software also reports **events** (EVR lines such as
 `EGSE INFO EVR 0x0001 INFO BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio=E22-400T33D TM TC NONE TM NONE`).
 Its start-up events reach this console only if the EGSE was already listening when the MCU
-started, and at most 8 per second are forwarded (config.h `kEvrNotifyMaxPerS`). All of them
+started, and at most 8 per second are forwarded (config.h `kEvrNotifyMaxPerS`). On the owner's
+board the MCU started about 4 s before the EGSE, so they were missed (`8 EVRs not forwarded`). All of them
 also go into the telemetry, so the ground station shows them once the radio link works (part 11).
 
 If not: a build error -> make sure you imported the zip from `dist/` (a folder copied from the
@@ -540,7 +541,8 @@ Check (power on, wait for the App and its status box):
   the module's configuration and read it back, which proves both UART directions and the
   M0/M1/AUX wires. If the start-up events reached the console you also see
   `EVR 0x0306 INFO radio E22-400T33D OK: ch 23 code 2 pwr 33 dBm sens -128.0 dBm datasheet`.
-* `busy` is about 1270 ms and `duty` about 25 % (SAFE mode); LED matrix row 0 lights during
+* `busy` is about 1530 ms and `duty` about 25 % (SAFE mode; measured on the owner's bench,
+  record 2026-10-12-A in docs/21); LED matrix row 0 lights during
   every transmission; the right-hand end of row 7 no longer blinks.
 
 If not: `FDIR 0x0001` (or `EVR 0x0306 ... FAILED`) -> TXD/RXD swapped (E22 TXD goes to "SDA"),
@@ -697,8 +699,8 @@ software on both ends without a radio link.
 Check, spacecraft (App Lab console or LED matrix):
 
 * Status box: `MODE SAFE`; `RADIO E22-400T33D(1) ch 23 = 433.125 MHz rate code 2 pwr code 0`;
-  `frames` rising, `period` about 5070 ms, `busy` about 1270 ms, `duty` about 25 % (SAFE mode
-  sends one frame per about 5 s at 2.4 kbit/s: 4 x the radio busy time of one 236-octet frame,
+  `frames` rising, `period` about 6110 ms, `busy` about 1530 ms, `duty` about 25 % (SAFE mode
+  sends one frame per about 6 s at 2.4 kbit/s: 4 x the radio busy time of one 236-octet frame,
   `frame_period_ms()` in fsw/datalink.cpp); `FDIR 0x0000`; `sensors 0x03FF`; with a key the SDLS
   line (`TC AE(2) TM AE(2) PROTECTED(1) epoch N` or `TC AUTH(1) TM NONE(0)`).
 * `BEACON URGENT(3)` is normal after a start: the spacecraft came up in SAFE mode by itself and

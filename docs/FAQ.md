@@ -32,9 +32,11 @@ Yagi and no fade margin (free-space budget from `dssq/link.py`).
 [02_Link_Budget_and_RF_Analysis.md](02_Link_Budget_and_RF_Analysis.md).
 
 ### Has it been tested on real hardware?
-**Not yet.** Every automated check passes (975 host checks; 750 ground tests, of which 747
+**Partly.** Every automated check passes (975 host checks; 750 ground tests, of which 747
 pass and 3 skip for optional reference files; the firmware type-check; the real Arduino builds;
-CI on every push), but the boards and radios have not been run together. Every value that only
+CI on every push). The flight App has had one bench run on a UNO Q with its radio and the
+AS7265X (2026-10-12, [21_Test_Records.md](21_Test_Records.md) record 2026-10-12-A), but the
+boards and radios have not been run together. Every value that only
 hardware can confirm is tagged VERIFY and has a test.
 [08_Verification_and_Test.md](08_Verification_and_Test.md), [20_Known_Limitations.md](20_Known_Limitations.md).
 

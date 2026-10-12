@@ -19,8 +19,10 @@ and two 433 MHz LoRa radios, using the CCSDS standards space agencies use:
   a jumper on the spacecraft and one setting on the ground, no code edit; an **SX126x** (SPI, via a bundled patched RadioLib) for LoRa profiles down
   to SF12 / 31.25 kHz with SNR, frequency error, Doppler and automatic frequency correction.
 
-> **Status: not yet tested on real hardware.** Every automated check passes (section
-> "Verification" below); the boards and radios have not been run together yet. What only hardware
+> **Status: first bench run of the spacecraft only.** Every automated check passes (section
+> "Verification" below). The flight App has run on a UNO Q with its radio and the AS7265X
+> (2026-10-12, [docs/21_Test_Records.md](docs/21_Test_Records.md) record 2026-10-12-A); the
+> ground station and the radio link have not been run on hardware yet. What only hardware
 > can confirm is listed in [docs/20_Known_Limitations.md](docs/20_Known_Limitations.md) with the
 > test that confirms it in [docs/08_Verification_and_Test.md](docs/08_Verification_and_Test.md).
 

@@ -7,7 +7,9 @@ software identifies itself as flight software 3.0 (boot event 0x0001) and ground
 commit that introduced each change. Verification numbers are those reported in the commit
 messages; the current numbers are in [docs/08_Verification_and_Test.md](docs/08_Verification_and_Test.md).
 
-Nothing in this log has been run on the real boards yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
+The flight App has had one bench run on the UNO Q, the spacecraft alone (2026-10-12,
+[docs/21_Test_Records.md](docs/21_Test_Records.md) record 2026-10-12-A); nothing else in this log has been run
+on the real boards yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
 
 ---
 
@@ -47,9 +49,20 @@ app-bricks-py release history) and are fixed; CI now builds the flight sketch on
   only into an empty ring (at most ~45 ms at 115200 bit/s). With 1024-octet rings nothing
   changes. New host test `test_byte_fifo.cpp` (11 checks, incl. two threads, also under
   ThreadSanitizer); `check_firmware.sh` checks the small-ring path (70 ok); pump thread
-  stack 428 of 1024 octets.
+  stack 428 of 1024 octets. Confirmed on the owner's UNO Q (record 2026-10-12-A).
+- False I2C bus fault with nothing on A4/A5 (the AS7265X on Qwiic): with no pull-up the empty
+  bus read low and every re-probe of the absent instruments logged EVR 0x060A `I2C bus clear:
+  SDA or SCL still low after 9 clocks` (owner's board, record 2026-10-12-A). D-67: the bus
+  clear releases the lines with the MCU's weak pull-ups (`INPUT_PULLUP`, about 40 kOhm), so an
+  empty bus reads high while a target holding a line low is still found
+  (`drivers/i2c_bus.cpp`). Not yet confirmed on the board.
 
 ### Added
+- [docs/21](docs/21_Test_Records.md) record 2026-10-12-A, the first bench run of the flight App
+  (spacecraft alone): build and start on 0.90.0, radio configuration, beacon, AS7265X on Qwiic,
+  CADU copies over the router, no reset with the radio on the board's 5 V. Its numbers are
+  added to docs/20 V-19 (busy 1528 ms against the model's 1267 ms), V-22, V-27 and V-30, and
+  the setup guide's expected `busy` / `period` now use the measured values.
 - The AS7265X may be plugged into the UNO Q Qwiic socket (`Wire1`, `config.h` `QWIIC_WIRE`) instead
   of A4/A5, on the owner's request (D-13 revision). The driver probes A4/A5 first, then Qwiic, at
   boot and at every re-probe and stays on the bus that answers; EVR 0x0706 names it (`on A4/A5` /

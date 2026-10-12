@@ -45,6 +45,8 @@ Conventions:
 | [IDENT](#ident---station-identification-on-air) | plain-text identification of both transmitters | T-TC-07 (station identification on air) | `VGQ_CALLSIGN`, `[station] callsign`, [09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.3 |
 | [WDG](#wdg---hardware-watchdog) | the flight MCU's hardware watchdog resets a hung loop | T-FD-09 (hardware watchdog) | closes docs/20 V-28 (L-38); not yet provoked on hardware: VERIFY |
 
+Completed records: [2026-10-12-A](#2026-10-12-a---first-bench-run-of-the-flight-app) (first bench run of the flight App, spacecraft only).
+
 ---
 
 ## SES - Session header
@@ -556,3 +558,56 @@ Pass criteria:
 |---|---|
 | V-28 (L-38) closed? (yes / no, why) | |
 | Signed (operator, date) | |
+
+---
+
+## Completed records
+
+### 2026-10-12-A - First bench run of the flight App
+
+The spacecraft alone (no ground station), from the owner's App Lab console log and photos of the
+wiring. Not a complete run of any test in [08_Verification_and_Test.md](08_Verification_and_Test.md);
+it closes no item on its own, and adds the observations below to the items it names.
+
+| Field (SES) | Value |
+|---|---|
+| Session ID | 2026-10-12-A |
+| Date and UTC start / end | 2026-10-12; EGSE start 23:12:38Z, last status box 23:14:29Z (111 s of log) |
+| Operator(s) | project owner |
+| Site(s) and weather | indoor bench; not recorded |
+| Repository commit or release | `6cbe1a8`, `dist/vgq1-spacecraft-unoq.zip`; App Lab built it with arduino:zephyr 0.90.0 (64-octet Serial rings, D-66): 224756 octets flash (28 %), 123925 RAM (47 %) |
+| Flight software version | n/a: EVR 0x0001 was raised before the EGSE was listening (observation 7) |
+| Ground software version / station I/O firmware | n/a: no ground station |
+| Spacecraft radio model and strap state | E22-400T33D (status box `RADIO E22-400T33D(1)`); A0 open (photos) |
+| Ground radio model | n/a |
+| Callsigns | not recorded |
+| Channel / rate code / power code | spacecraft: ch 23 = 433.125 MHz, rate code 2, power code 0 (33 dBm); ground n/a |
+| Framing and SDLS services | TM; SDLS TC NONE, TM NONE |
+| Spacecraft power configuration | UNO Q from its USB-C socket (supply not recorded); E22 VCC from JANALOG pin 5 (5V), i.e. board-powered (docs/20 V-27); **no** 470-1000 uF / 100 nF at the E22, **no** 10 kOhm M0/M1 pull-ups |
+| Antennas and feeder loss | not recorded (an antenna or a 50 Ohm dummy load is required, docs/00 part 8.1) |
+| `rssi_cal_offset_db` in force | n/a |
+| Instruments used | none: every value below is the flight software's own telemetry in the EGSE console |
+| Deviations from the procedure | AS7265X on the Qwiic connector (D-13 revision), nothing on A4/A5; Nicla Sense ME and RM3100 not connected; E22 capacitors and M0/M1 pull-ups not fitted |
+
+Wiring (photos): E22 GND -> GND, VCC -> 5V, AUX -> D7, TXD -> header pin "SDA", RXD -> header pin
+"SCL", M1 -> D3, M0 -> D2, as in docs/00 part 8.3.
+
+| # | Observation | Evidence (EGSE console) | Result | Feeds |
+|---|---|---|---|---|
+| 1 | Build, link and load on arduino:zephyr 0.90.0 | build sizes above; App started, no loader error | pass | the 0.90.0 fixes of the CHANGELOG (`__errno`, `_ZTH13z_tls_current`, `AppError`) |
+| 2 | Flight status reaches the EGSE with 64-octet rings | status box every 10 s from 23:12:48Z, `status age core 0-1 s` | pass | D-66, docs/20 V-30 |
+| 3 | Radio start-up check (configuration written and read back) | `FDIR 0x0000` (bit 0 RADIO_CFG clear in every box), `radio fault 0`, no AUX timeout | pass: both UART directions and the M0/M1/AUX wires work | docs/00 part 8.3 |
+| 4 | Beacon and duty cycle | `MODE SAFE`, `BEACON URGENT(3)`; `frames` 2 -> 19 in 101 s; `period` 6108-6116 ms, `busy` 1527-1529 ms, `duty` 24.9-25.0 %; no LOOP_OVERRUN | as designed; `busy` is 20.6 % above the busy-time model (1267 ms) | docs/20 V-19 |
+| 5 | CADU copies over the router (472 hex characters each) | `archived 19 CADUs {TM VC0: 8, TM VC7: 11}` = `frames` 19; `NOT FORWARDED ... CADUs 0` | pass on 0.90.0 | docs/20 V-22 |
+| 6 | Board-powered radio, no bulk capacitor, code 0 at 25 % duty | SCLK 1/14 -> 1/115 s without a restart, no new boot | no reset in 111 s; supply voltage not measured | docs/20 V-27 |
+| 7 | Start-up EVRs | `8 EVRs not forwarded by the MCU since its boot (+8)` once at 23:12:39Z, constant afterwards; SCLK 14 s at 23:12:48Z puts the MCU boot about 4 s before the EGSE start | the start-up EVRs did not reach the console: raised before the EGSE was listening, and 8 of them refused by the MCU's own notification limits; they are in the downlink | docs/00 section 5.3 |
+| 8 | AS7265X on the Qwiic connector | `sensors 0x0080` (bit 7) | detected; its lamps not exercised (SAFE mode schedules no SPEC, docs/07 5.3.3), so only the board's red power LED was lit | D-13 revision |
+| 9 | Empty A4/A5 bus | `EVR 0x060A ERROR I2C bus clear: SDA or SCL still low after 9 clocks` at 23:13:05Z and 23:14:06Z (re-probes of the absent Nicla Sense ME / RM3100) | a false bus fault: no pull-up on an empty bus; fixed by D-67, to be confirmed on the next run | D-67 |
+| 10 | Spacecraft radio noise reading | `noise` -70 to -75 dBm | recorded only: absolute values are uncalibrated (T-RF-02) and the cause was not investigated | docs/13 |
+| 11 | Transient flags after boot | `FDIR 0x0100` (bit 8 VC_CONGEST, VC0 579 octets) in the first box only | cleared by the second box: the start-up packets queued faster than one frame per 6 s drains them | - |
+
+| Result summary | |
+|---|---|
+| Open issues | D-67 not yet confirmed on the board; V-19 model error 20.6 % at code 2; RF output not seen by a receiver |
+| Signed (operator, date) | |
+

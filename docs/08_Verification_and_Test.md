@@ -4,8 +4,11 @@ This document says how the VGQ-1 spacecraft and the DSS-Q1 ground station are ve
 first the automated checks that run on any PC and on GitHub, then the hardware tests you
 run on your own boards.
 
-> **Status (Phase D tree, 2026-10-12).** Every automated layer below passes. **No hardware
-> test in sections 6-12 has been run yet: the system has not been tested on real hardware.**
+> **Status (Phase D tree, 2026-10-12).** Every automated layer below passes. **The flight App
+> has had one bench run on the UNO Q, the spacecraft alone ([21_Test_Records.md](21_Test_Records.md)
+> record 2026-10-12-A: build, start-up, radio configuration, beacon, AS7265X detection). No test
+> in sections 6-12 has been run in full yet, and the ground station and the radio link have not
+> been tested on hardware.**
 > Each hardware test turns a "VERIFY" item of the code into a measured fact. Record every
 > result in [21_Test_Records.md](21_Test_Records.md) and close the matching entry in
 > [20_Known_Limitations.md](20_Known_Limitations.md).
