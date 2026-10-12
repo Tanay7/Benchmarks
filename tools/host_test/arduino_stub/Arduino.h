@@ -137,6 +137,7 @@ class HardwareSerial : public Stream {
   void begin(unsigned long) {}
   void end() {}
   void flush() {}
+  int availableForWrite() { return 64; }   // free octets of the TX ring (ZephyrSerial)
   using Print::write;
   operator bool() const { return true; }
 };

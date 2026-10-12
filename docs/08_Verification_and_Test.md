@@ -22,9 +22,9 @@ telecommand (T-TM, T-TC) - 10 Instruments (T-SC) - 11 Fault protection (T-FD) - 
 
 | Layer | What it is | Size and result on the Phase D tree | Where it runs |
 |---|---|---|---|
-| 1 Host tests | The flight C++ (protocols, algorithms, radio tables) compiled for a PC and checked | **964 checks** in 89 groups, 0 failures (963 when the official CCSDS 121.0 test data is absent). Built twice: warnings as errors, and under AddressSanitizer + UBSan | PC, CI |
+| 1 Host tests | The flight C++ (protocols, algorithms, radio tables) compiled for a PC and checked | **975 checks** in 90 groups, 0 failures (974 when the official CCSDS 121.0 test data is absent). Built twice: warnings as errors, and under AddressSanitizer + UBSan | PC, CI |
 | 2 Ground tests | The ground data system and the spacecraft EGSE under pytest | **750 tests: 747 passed, 3 skipped** (optional reference files not on the bench), on Python 3.13 and 3.11 | PC, CI |
-| 3 Firmware type-check | `check_firmware.sh`: every Arduino file compiled against strict stand-ins of the board API, in every build option | **65 ok, 0 fail, 0 warn**, incl. 80 of 80 RadioLib units for each board and a negative control | PC, CI |
+| 3 Firmware type-check | `check_firmware.sh`: every Arduino file compiled against strict stand-ins of the board API, in every build option | **70 ok, 0 fail, 0 warn**, incl. 80 of 80 RadioLib units for each board and a negative control | PC, CI |
 | 4 Station sketch harness | The real VENTUNO Q station sketch built for a PC and run on real threads | **26 checks**, 0 failures (12 E22 + 7 SX1268 + 7 SX1262) | PC, CI (ASan + UBSan, TSan) |
 | 5 RouterBridge harness and stack bound | The bundled patched Arduino_RouterBridge against its real dependencies; the bridge thread's worst-case stack from the real build | **12 checks** pass (the stock library must fail 4: negative control); worst case **1084 of 1536 octets** (452 margin) for both sketches | PC, CI |
 | 6 Real Arduino builds | The exact compiler, board package and settings App Lab uses | 9 sketch builds (flight E22 and SX1268 on core main, 1.0.0 and 0.90.0; station E22 on main and 1.0.0, SX1268 on main), **0 warnings in our code** (sizes in 2.6); the loader symbol check passes for every flight build | PC, CI |
@@ -59,6 +59,7 @@ prints one `ok:` line; any `FAIL` stops CI. The run also writes the **cross-chec
 |---|---|---|---|
 | [host_test.cpp](../tools/host_test/host_test.cpp) | core | 52 | CRC-16 check value 0x29B1; randomizer prefix FF 48 0E C0 9A (131.0-B); Reed-Solomon dual-basis tables (Annex F) and all-zero codeword; BCH(63,56) corrects every single-bit error; TC frame through CLTU; FARM-1 accept / duplicate / gap / lockout / Unlock / Set V(R) and the CLCW (232.1-B); VC multiplexer CADU stream; SSR allocation, overwrite, playback; TRIAD attitude; SHA-256 (FIPS 180-4) and HMAC-SHA-256 (RFC 4231 cases 1-2); SDLS accept, replay and forgery rejection (355.0-B); FP32 Welford statistics within 1 nT of an FP64 reference |
 | [test_autonomy.cpp](../tools/host_test/test_autonomy.cpp) | 15 | 225 | Stored sequences (load validation, ordering, late skip, START/STOP epochs, FDIR stop, u32 clock wrap, 200 random sequences against a 64-bit model); beacon levels and latch; MAGCAL parsing and maths; RM3100 self-test decode; reset-cause classification; hardware-watchdog (IWDG) prescaler / reload; the FDIR flags `RSTCNT` clears |
+| [test_byte_fifo.cpp](../tools/host_test/test_byte_fifo.cpp) | 1 | 11 | The UART pump's single-producer / single-consumer FIFO (D-66): empty / full, all-or-nothing `push_all`, `pop_some`, wrap-around, two threads streaming 4 MiB through 64 octets (every octet once, in order; also under ThreadSanitizer) |
 | [test_cfdp.cpp](../tools/host_test/test_cfdp.cpp) | 8 | 107 | CFDP class-1 PDU header, modular checksum, file names, Metadata / File Data / EOF, whole transfers, cancel (condition 15), relay monitor, truncated inputs (727.0-B-5) |
 | [test_crypto.cpp](../tools/host_test/test_crypto.cpp) | 7 | 60 | AES-256 (FIPS-197 C.3), GCM test vectors (SP 800-38D, McGrew-Viega cases 13-16) and random vectors, SDLS key derivation, AUTH compatibility, TC AE, TM protection incl. the null-SA fallback |
 | [test_integration.cpp](../tools/host_test/test_integration.cpp) | 16 | 177 | APID map; v3 packet layouts and lengths; telemetry vectors; TC header and command table; SSR export; downlink scheduler and load plan; the TC accept chain; ground-built TC round trip; CFDP relay and EVR gates; EGSE status texts (worst case 307 / 444 characters, under the 480 limit); integration streams for the ground; the RPC mailbox on real threads; packet length guards |
@@ -68,7 +69,7 @@ prints one `ok:` line; any `FAIL` stops CI. The run also writes the **cross-chec
 | [test_station_id.cpp](../tools/host_test/test_station_id.cpp) | 2 | 12 | The ground's plain-text station identification through the flight receive chain (E22 stream parser, `tc_accept()`): no CLTU, BCH / SDLS / FARM-1 state untouched, CLTUs before or after it in one burst still accepted |
 | [test_tx_duty.cpp](../tools/host_test/test_tx_duty.cpp) | 4 | 17 | RF `tx_duty` over whole transmission cycles (`TxDutyMeter`): never above the 50 % PA limit for any model, rate code and mode, also across a radio reconfiguration (with a no-hold negative control); SX126x SF12 without the window artefact of the replaced 60 s window (kept as a negative control); open cycle, silence, window, wrap |
 | [test_uslp.cpp](../tools/host_test/test_uslp.cpp) | 6 | 46 | USLP header fields, TM frames, security roll-back, CADU streams, USLP TC frames incl. truncated VCF count (732.1-B-2) |
-| **Total** | **89** | **964** | |
+| **Total** | **90** | **975** | |
 
 The same binary is built **twice**: once with `-Wall -Wextra -Wshadow -Werror` (no warning
 allowed), once with `-fsanitize=address,undefined -fno-sanitize-recover=undefined` (any memory
@@ -167,18 +168,19 @@ from source (core main `b08a650` and release 1.0.0 with Zephyr SDK 1.0.1, `arm-z
 14.3; release 0.90.0 with the SDK 0.16.8 it depends on, GCC 12.2), FQBN
 `arduino:zephyr:<board>:wait_linux_boot=app`, `--warnings all`. 0.90.0 is the last release
 before 1.0.0 and what an App Lab that was not updated still builds with; it has no VENTUNO Q.
-Flight results after the fix for those older cores (`src/libc_compat.cpp`,
-`RpcMailbox::current_thread()`); the station sketch did not change. Percentages are computed here from the sizes and the maxima arduino-cli
+Flight results after the changes for those older cores (`src/libc_compat.cpp`,
+`RpcMailbox::current_thread()`, the UART pump for their 64-octet Serial rings, D-66) and the
+AS7265X Qwiic option; the station sketch did not change. Percentages are computed here from the sizes and the maxima arduino-cli
 prints (786 432 B flash on the UNO Q, 1 048 576 B on the VENTUNO Q, 262 144 B RAM on both):
 
 | Build | Flash (program storage) | Static RAM (global variables) | Warnings in our code |
 |---|---|---|---|
-| UNO Q flight, default E22 (T33D / T37S by strap), core main | 233 316 B (29.7 %) | 128 484 B (49.0 %) | 0 |
-| UNO Q flight, default E22, core 1.0.0 | 232 860 B | 128 396 B | 0 |
-| UNO Q flight, default E22, core 0.90.0 | 222 148 B (28.2 %) | 120 913 B (46.1 %) | 0 |
-| UNO Q flight, SX1268 (`VGQ_RADIO=3`), core main | 326 388 B (41.5 %) | 169 576 B (64.7 %) | 0 |
-| UNO Q flight, SX1268, core 1.0.0 | 325 944 B | 169 488 B | 0 |
-| UNO Q flight, SX1268, core 0.90.0 | 316 448 B (40.2 %) | 163 030 B (62.2 %) | 0 |
+| UNO Q flight, default E22 (T33D / T37S by strap), core main | 234 392 B (29.8 %) | 128 924 B (49.2 %) | 0 |
+| UNO Q flight, default E22, core 1.0.0 | 233 936 B | 128 836 B | 0 |
+| UNO Q flight, default E22, core 0.90.0 (UART pump, D-66) | 224 756 B (28.6 %) | 123 925 B (47.3 %) | 0 |
+| UNO Q flight, SX1268 (`VGQ_RADIO=3`), core main | 326 976 B (41.6 %) | 169 952 B (64.8 %) | 0 |
+| UNO Q flight, SX1268, core 1.0.0 | 326 532 B | 169 864 B | 0 |
+| UNO Q flight, SX1268, core 0.90.0 | 317 488 B (40.4 %) | 163 478 B (62.4 %) | 0 |
 | VENTUNO Q station, default E22, core main | 100 828 B (9.6 %) | 40 716 B (15.5 %) | 0 |
 | VENTUNO Q station, default E22, core 1.0.0 | 100 324 B | 40 632 B | 0 |
 | VENTUNO Q station, SX1268 (`DSSQ_RADIO_SX126X=1`), core main | 207 692 B (19.8 %) | 89 216 B (34.0 %) | 0 |

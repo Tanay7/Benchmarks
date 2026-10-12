@@ -45,6 +45,7 @@
 #include <Arduino.h>
 
 #include "radio.h"
+#include "uart_pump.h"   // small Serial rings only (config.h VGQ_SMALL_SERIAL_RINGS)
 
 namespace vgq {
 
@@ -85,8 +86,17 @@ class E22Radio : public Radio {
   bool set_mode(Mode m);
   void drain_uart();
   bool command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len, uint32_t timeout_ms);
+  // UART access: the core's Serial, or with small rings the UART pump (uart_pump.h).
+  void uart_begin();
+  int uart_available();
+  int uart_read();
+  size_t uart_write(const uint8_t* p, size_t n);
+  void uart_flush();
 
   HardwareSerial& serial_;
+#if VGQ_SMALL_SERIAL_RINGS
+  UartPump pump_;
+#endif
   const int m0_, m1_, aux_, strap_;
   const uint8_t build_model_;
   uint8_t strap_low_ = 0;

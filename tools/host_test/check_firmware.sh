@@ -188,6 +188,12 @@ while IFS= read -r f; do check "$f" "" "${UNOQ[@]}"; done < <(find "$SK/src" -na
 # Radio drivers for every selectable radio (default build above: E22-400T33D).
 DRV="$SK/src/drivers"
 check "$DRV/e22.cpp" " [VGQ_RADIO=2]" "${UNOQ[@]}" -DVGQ_RADIO=2
+# 64-octet Serial rings (arduino:zephyr before 1.0.0): the UART pump path (config.h
+# VGQ_SMALL_SERIAL_RINGS) - CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE comes from the core's
+# autoconf.h in the real builds.
+for f in "$DRV/e22.cpp" "$DRV/uart_pump.cpp"; do
+  check "$f" " [64-octet Serial rings]" "${UNOQ[@]}" -DCONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE=64
+done
 check "$DRV/radio.cpp" " [host, no Arduino]" -DVGQ_HOST_BUILD -I"$SK/src"
 if [[ -n "$RADIOLIB" ]]; then
   for chip in 1268 1262; do
@@ -232,6 +238,7 @@ matrix "VGQ_SDLS_TC=0 VGQ_SDLS_TM=0" -DVGQ_SDLS_TC=0 -DVGQ_SDLS_TM=0
 matrix "keyed (sdls_key.h via -iquote)" -iquote "$KEYDIR/x"
 matrix "keyed + USLP + AUTH" -iquote "$KEYDIR/x" -DVGQ_DOWNLINK_FRAMING=1 -DVGQ_SDLS_TC=1
 matrix "VGQ_DEBUG_MONITOR=1" -DVGQ_DEBUG_MONITOR=1
+matrix "64-octet Serial rings" -DCONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE=64
 # (captured first: grep -q closing the pipe early would fail the pipeline under pipefail)
 macros() { "$CXX" -std=gnu++17 "${UNOQ[@]}" "${INC[@]}" "$@" -dM -E -x c++ "$SK/src/fsw/flight.cpp" 2>/dev/null || true; }
 keyed_macros="$(macros -iquote "$KEYDIR/x")"

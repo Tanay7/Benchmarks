@@ -52,9 +52,36 @@ bool E22Radio::begin() {
   digitalWrite(m0_, HIGH);
   digitalWrite(m1_, HIGH);
   mode_ = SLEEP;
-  serial_.begin(kE22UartBaud);        // mode 2 requires 9600 8N1; the link also runs at 9600
+  uart_begin();                       // mode 2 requires 9600 8N1; the link also runs at 9600
   return wait_aux(kSelfTestMs);
 }
+
+// ---- UART access --------------------------------------------------------------------
+// With 1024-octet rings (arduino:zephyr 1.0.0 on): the Serial object, as always. With the
+// 64-octet rings of older cores: the UART pump (uart_pump.h), which keeps receiving while
+// the loop is busy and takes a whole frame without blocking; the Serial directly only if
+// its thread could not be started.
+#if VGQ_SMALL_SERIAL_RINGS
+void E22Radio::uart_begin() { (void)pump_.begin(serial_, kE22UartBaud); }   // opens the port either way
+int E22Radio::uart_available() { return pump_.running() ? pump_.available() : serial_.available(); }
+int E22Radio::uart_read() { return pump_.running() ? pump_.read() : serial_.read(); }
+size_t E22Radio::uart_write(const uint8_t* p, size_t n) {
+  return pump_.running() ? pump_.write(p, n) : serial_.write(p, n);
+}
+void E22Radio::uart_flush() {
+  if (pump_.running()) {
+    (void)pump_.flush(kCmdReplyMs);
+  } else {
+    serial_.flush();
+  }
+}
+#else
+void E22Radio::uart_begin() { serial_.begin(kE22UartBaud); }
+int E22Radio::uart_available() { return serial_.available(); }
+int E22Radio::uart_read() { return serial_.read(); }
+size_t E22Radio::uart_write(const uint8_t* p, size_t n) { return serial_.write(p, n); }
+void E22Radio::uart_flush() { serial_.flush(); }
+#endif
 
 bool E22Radio::aux_ready() const { return digitalRead(aux_) == HIGH; }
 
@@ -68,7 +95,7 @@ bool E22Radio::wait_aux(uint32_t timeout_ms) {
 }
 
 void E22Radio::drain_uart() {
-  for (int i = 0; i < kMaxDrain && serial_.available() > 0; ++i) (void)serial_.read();
+  for (int i = 0; i < kMaxDrain && uart_available() > 0; ++i) (void)uart_read();
 }
 
 bool E22Radio::set_mode(Mode m) {
@@ -86,14 +113,14 @@ bool E22Radio::set_mode(Mode m) {
 bool E22Radio::command(const uint8_t* cmd, size_t n, uint8_t* reply, size_t reply_len,
                        uint32_t timeout_ms) {
   drain_uart();
-  if (serial_.write(cmd, n) != n) return false;
-  serial_.flush();
+  if (uart_write(cmd, n) != n) return false;
+  uart_flush();
   size_t got = 0;
   const uint32_t t0 = millis();
   const uint32_t max_polls = timeout_ms * (1000u / kCmdPollUs);
   for (uint32_t i = 0; got < reply_len && i < max_polls && millis() - t0 < timeout_ms; ++i) {
-    if (serial_.available() > 0) {
-      const int c = serial_.read();
+    if (uart_available() > 0) {
+      const int c = uart_read();
       if (c >= 0) reply[got++] = (uint8_t)c;
     } else {
       delayMicroseconds(kCmdPollUs);
@@ -135,8 +162,9 @@ bool E22Radio::transmit(const uint8_t* data, size_t n, uint32_t now) {
   if (data == nullptr || n == 0 || n > kE22MaxPacket || tx_.active()) return false;
   // Beacons while hibernating are sent from normal mode, as in v2.
   if (mode_ != NORMAL && !set_mode(NORMAL)) return false;
-  // Non-blocking: the core's UART TX ring (1 KiB) takes a whole <= 240-octet frame.
-  if (serial_.write(data, n) == 0) return false;
+  // Non-blocking: the core's UART TX ring (1 KiB) takes a whole <= 240-octet frame; with
+  // the 64-octet rings of older cores the UART pump's FIFO does (uart_pump.h).
+  if (uart_write(data, n) == 0) return false;
   tx_.start(now, airtime_ms(n));                    // AUX may rise while the frame is on air (5.6.2)
   tx_launch_ms_ = now;
   return true;
@@ -147,8 +175,8 @@ bool E22Radio::busy(uint32_t now) const {
 }
 
 RadioEvent E22Radio::poll(uint32_t now, RxPacket& rx, int32_t& value) {
-  for (int i = 0; i < kMaxDrain && serial_.available() > 0; ++i) {
-    const int c = serial_.read();
+  for (int i = 0; i < kMaxDrain && uart_available() > 0; ++i) {
+    const int c = uart_read();
     if (c < 0) break;
     parser_.on_byte((uint8_t)c, now);
   }
@@ -166,7 +194,7 @@ RadioEvent E22Radio::poll(uint32_t now, RxPacket& rx, int32_t& value) {
 bool E22Radio::request_noise(uint32_t now) {
   // The query is defined for mode 0 (and the WOR transmitter role, never used here).
   if (parser_.noise_pending() || tx_.active() || mode_ != NORMAL) return false;
-  if (serial_.write(kNoiseQuery, sizeof kNoiseQuery) != sizeof kNoiseQuery) return false;
+  if (uart_write(kNoiseQuery, sizeof kNoiseQuery) != sizeof kNoiseQuery) return false;
   parser_.noise_requested(now);
   return true;
 }

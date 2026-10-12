@@ -2397,7 +2397,17 @@ int Flight::egse_cfdp_pdu(const char* hex, size_t len) {
 // =============================================================================
 bool Flight::notify_room(size_t payload_octets) const {
   const int room = VGQ_ROUTER_SERIAL.availableForWrite();
-  return room > 0 && (size_t)room >= payload_octets + kNotifyMargin + kRpcResponseReserve;
+  const size_t need = payload_octets + kNotifyMargin + kRpcResponseReserve;
+#if VGQ_SMALL_SERIAL_RINGS
+  // 64-octet rings (config.h): a notification longer than the ring could never find room,
+  // so it goes into an EMPTY ring and Bridge.notify() waits in ZephyrSerial::write() until
+  // all but the last ring-full is out: at 115200 bit/s (11.5 octets/ms) at most ~45 ms for
+  // the longest (sc_status, tm_cadu; one per pass, large_sent_). Meanwhile the bridge
+  // thread (priority 5) keeps reading the router link and the UART pump (6) the radio
+  // port; the loop runs at 14 (CONFIG_MAIN_THREAD_PRIORITY).
+  if (need > (size_t)CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE) return room >= CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE;
+#endif
+  return room > 0 && (size_t)room >= need;
 }
 
 bool Flight::send_cadu(const uint8_t* cadu) {

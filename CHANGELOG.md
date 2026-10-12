@@ -35,6 +35,20 @@ app-bricks-py release history) and are fixed; CI now builds the flight sketch on
   error, as the ground's `BridgeLink.from_app_utils` already did. The App Lab test of
   `test_cfdp.py` runs with and without `AppError` (fails on the previous `main.py`).
 
+- Notifications and the E22 radio on the 64-octet Serial rings of arduino:zephyr before 1.0.0
+  (core commit `40abc1f7` raised them to 1024; the stable App Lab builds the UNO Q with 0.90.0).
+  On the owner's board the EGSE's calls worked but no notification ever arrived:
+  `notify_room()` needed the payload + 48 octets free in a 64-octet ring. And
+  `ZephyrSerial::write()` would have blocked ~180 ms per 240-octet E22 frame, with the 64-octet
+  RX ring holding only 67 ms of radio data. D-66: with small rings (`config.h
+  VGQ_SMALL_SERIAL_RINGS`, from the core's `CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE`) the E22
+  port goes through a UART pump thread (`drivers/uart_pump.h`, priority 6, every 1 ms, 1024 /
+  512-octet FIFOs, `drivers/byte_fifo.h`), and a notification longer than the ring goes out
+  only into an empty ring (at most ~45 ms at 115200 bit/s). With 1024-octet rings nothing
+  changes. New host test `test_byte_fifo.cpp` (11 checks, incl. two threads, also under
+  ThreadSanitizer); `check_firmware.sh` checks the small-ring path (70 ok); pump thread
+  stack 428 of 1024 octets.
+
 ### Added
 - The AS7265X may be plugged into the UNO Q Qwiic socket (`Wire1`, `config.h` `QWIIC_WIRE`) instead
   of A4/A5, on the owner's request (D-13 revision). The driver probes A4/A5 first, then Qwiic, at

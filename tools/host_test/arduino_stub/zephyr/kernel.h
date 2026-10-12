@@ -5,6 +5,7 @@
 // source of truth for the API.
 #pragma once
 #include <errno.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "sys/atomic.h"
 
@@ -28,6 +29,20 @@ static inline k_tid_t k_current_get(void) {
 static inline k_tid_t k_sched_current_thread_query(void) { return k_current_get(); }
 static inline void k_yield(void) {}
 static inline int32_t k_msleep(int32_t ms) { return (void)ms, 0; }
+// Threads (the UART pump with small Serial rings): signatures as in Zephyr; inert.
+typedef struct { char data[8]; } k_thread_stack_t;
+typedef void (*k_thread_entry_t)(void* p1, void* p2, void* p3);
+static inline k_thread_stack_t* k_thread_stack_alloc(size_t size, int flags) {
+  return (void)size, (void)flags, (k_thread_stack_t*)0;
+}
+static inline k_tid_t k_thread_create(struct k_thread* t, k_thread_stack_t* stack, size_t stack_size,
+                                      k_thread_entry_t entry, void* p1, void* p2, void* p3, int prio,
+                                      uint32_t options, k_timeout_t delay) {
+  (void)stack, (void)stack_size, (void)entry, (void)p1, (void)p2, (void)p3, (void)prio, (void)options,
+      (void)delay;
+  return t;
+}
+static inline int k_thread_name_set(k_tid_t t, const char* name) { return (void)t, (void)name, 0; }
 
 struct k_sem {
   unsigned int count;

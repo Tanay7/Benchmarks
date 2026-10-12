@@ -775,20 +775,21 @@ percentages below are of the `boards.txt` limits, not of the chip.
 
 | Build | Core | Flash (octets) | % of limit | Static RAM (octets) | % of limit |
 |---|---|---|---|---|---|
-| Flight, E22 (default) | main | 233316 | 29.7 % of 786432 | 128484 | 49.0 % of 262144 |
-| Flight, E22 (default) | rel100 | 232860 | 29.6 % | 128396 | 49.0 % |
-| Flight, E22 (default) | rel090 | 222148 | 28.2 % | 120913 | 46.1 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 326388 | 41.5 % | 169576 | 64.7 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 325944 | 41.4 % | 169488 | 64.7 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | rel090 | 316448 | 40.2 % | 163030 | 62.2 % |
+| Flight, E22 (default) | main | 234392 | 29.8 % of 786432 | 128924 | 49.2 % of 262144 |
+| Flight, E22 (default) | rel100 | 233936 | 29.7 % | 128836 | 49.1 % |
+| Flight, E22 (default) | rel090 | 224756 | 28.6 % | 123925 | 47.3 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 326976 | 41.6 % | 169952 | 64.8 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 326532 | 41.5 % | 169864 | 64.8 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel090 | 317488 | 40.4 % | 163478 | 62.4 % |
 | Station, E22 (default) | main | 100828 | 9.6 % of 1048576 | 40716 | 15.5 % of 262144 |
 | Station, E22 (default) | rel100 | 100324 | 9.6 % | 40632 | 15.5 % |
 | Station, SX1268 (`DSSQ_RADIO_SX126X = 1`) | main | 207692 | 19.8 % | 89216 | 34.0 % |
 
-Sources: the flight figures are the real builds after the fix for cores before 1.0.0
-(`src/libc_compat.cpp`, `RpcMailbox::current_thread()`; 0 warnings in project code, 6 in the
-platform's own `Wire.cpp`). The fix added 44 octets of flash and saved 16 of RAM on rel100
-(Phase D fix round: 232816 / 128412). The
+Sources: the flight figures are the real builds after the changes for cores before 1.0.0
+(`src/libc_compat.cpp`, `RpcMailbox::current_thread()`, the UART pump of D-66, built on rel090
+only) and the AS7265X Qwiic option (0 warnings in project code). On rel100 these changes add
+1120 octets of flash and 424 of RAM to the Phase D fix round (232816 / 128412); on rel090 the
+pump's FIFOs (1536 octets) and thread object are part of the static RAM figure. The
 station sketch was not changed in that round: its figures are from the builds made for this
 document and the Phase D build log of [08_Verification_and_Test.md](08_Verification_and_Test.md)
 section 2.6 (station flash equal to commit 5b06a04). All builds used the bundled patched Arduino_RouterBridge 0.4.3 and,
@@ -808,6 +809,7 @@ in project code.
 | Main thread (`setup()`, `loop()`, `__loopHook`), both MCUs | 32768 octets | 1976 octets static call chain (deepest: `__loopHook`, `update_safe()`, the `hl_cltu` handler, `process_tc`, `cmd_magcal`, the EVR formatter `vsnprintf`); + 108 octets FP exception frame + 56 octets TLS = about 2140 octets (6.5 %) | `CONFIG_MAIN_STACK_SIZE=32768` in ArduinoCore-zephyr `loader/prj.conf` (b08a650; with `CONFIG_USERSPACE=n` the sketch runs on the main thread); chain measured for this document, see below |
 | `loop()` alone / `setup()` alone | (same thread) | 1480 / 1400 octets | same analysis |
 | SX126x driver, deepest call through `Radio::poll()` | (same thread) | 1220 octets from `Sx126xRadio::poll()` (+ 120 octets of `loop()` / `service_radio()`) | same analysis, SX1268 build; [drivers/sx126x.h](../vgq1-spacecraft/sketch/src/drivers/sx126x.h) states 1.3 KiB |
+| UART pump thread (E22 port, only with the 64-octet Serial rings of cores before 1.0.0, D-66) | 1024 octets (dynamic-thread pool) | 428 octets (256 call chain through `k_msleep` + 8 thread entry + 108 FP frame + 56 TLS), 58 % margin | `stackcalc.py` with root `UartPump::entry` on the rel090 build |
 | Router Bridge "bridge" thread | 1536 octets (patched; stock 500) | 1084 octets (920 call chain + 108 FP frame + 56 TLS), 42 % margin | commit 5b06a04, [22_Bundled_Libraries.md](22_Bundled_Libraries.md) |
 | Rice encoder (part of a loop chain) | - | 384 octets at -O2, 320 at -Os on x86-64 | [ccsds/rice.h](../vgq1-spacecraft/sketch/src/ccsds/rice.h); **VERIFY** with the ARM `-fstack-usage` |
 

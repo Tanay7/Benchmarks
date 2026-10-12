@@ -63,6 +63,7 @@ vgq1-spacecraft/                 UNO Q App (flight software + Linux EGSE)
   sketch/src/drivers/            hardware access
     radio.*                      radio abstraction + pure tables / LoRa maths (host-tested)
     e22.*  sx126x.*              E22 UART driver; SX126x via the bundled RadioLib
+    uart_pump.*  byte_fifo.h     E22 port pump thread for 64-octet Serial rings (D-66)
     i2c_bus.*                    I2C with error accounting and bus clear
     sensors.*  payload.*  as7265x.*   RM3100, Nicla ARU link, AS7265X
   sketch/src/fsw/                executive and algorithms
@@ -96,7 +97,7 @@ nicla_sense_me_aru/              Nicla Sense ME firmware (Arduino IDE, Mbed Nicl
 tools/
   host_test/                     flight code on a PC: Makefile, host_test.cpp (runner) and one
                                  test_<topic>.cpp per area - autonomy (sequences, beacon, IWDG
-                                 settings, RSTCNT), cfdp, crypto, integration (packets, commands,
+                                 settings, RSTCNT), byte_fifo (UART pump FIFO), cfdp, crypto, integration (packets, commands,
                                  vectors, mailbox), radio, rice, spectral, station_id (the ground
                                  identification is never a CLTU), tx_duty (TxDutyMeter), uslp
     check_firmware.sh            every Arduino file against strict stand-ins (arduino_stub/)

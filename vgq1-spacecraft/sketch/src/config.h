@@ -63,6 +63,22 @@
 #define RADIO_SERIAL Serial3          // "SCL"(PB10) = TX -> E22 RXD, "SDA"(PB11) = RX <- E22 TXD
 #endif
 
+// ---- Serial ring size of the core --------------------------------------------------------
+// arduino:zephyr gives every Serial a TX and an RX ring of CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE
+// octets (core -imacros autoconf.h): 1024 from 1.0.0, 64 before (core commit 40abc1f7). The
+// App Lab release that pins the board's core below 1.0.0 builds with 0.90.0. With small
+// rings the E22 port goes through a UART pump thread (drivers/uart_pump.h) and notifications
+// longer than the ring wait for an empty ring (Flight::notify_room()); with 1024 nothing
+// changes. Not defined (host checks): treated as 1024.
+#if defined(CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE) && CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE < 1024
+#define VGQ_SMALL_SERIAL_RINGS 1
+#else
+#define VGQ_SMALL_SERIAL_RINGS 0
+#endif
+static const int      kUartPumpPriority   = 6;     // above the loop (14), below the bridge thread (5)
+static const int32_t  kUartPumpPeriodMs   = 1;     // 9600 bit/s: ~1 octet per pass each way
+static const size_t   kUartPumpStackBytes = 1024;  // one dynamic-thread pool slot
+
 // ---- E22 control pins (both E22 models) ------------------------------------------------
 // E22-400T33D: the module's DIP pins M0, M1 and AUX. E22-400T37S on the E22-400TBH-02
 // board: remove the board's M0/M1 jumper caps (they short M1-GND and GND-M0) and its

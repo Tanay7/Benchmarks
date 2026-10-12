@@ -326,7 +326,7 @@ jobs:
           build vgq1-spacecraft/sketch flight-legacy
           build vgq1-spacecraft/sketch flight-legacy-sx126x \
             --build-property "compiler.cpp.extra_flags=-DVGQ_RADIO=3 -DVGQ_SX126X_CHIP=1268"
-          grep -h "arm-zephyr-eabi-g++" "$RUNNER_TEMP/build-flight-legacy.log" | head -1 | grep -o "arm-zephyr-eabi/[^/]*/" || true
+          grep -h "arm-zephyr-eabi-g++" "$RUNNER_TEMP/build-flight-legacy.log" 2>/dev/null | head -1 | grep -o "arm-zephyr-eabi/[^/]*/" || true
           baseline unoq unoq-legacy
           llext flight-legacy unoq-legacy
           llext flight-legacy-sx126x unoq-legacy
