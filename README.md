@@ -219,7 +219,7 @@ Results on the current tree (details and commands: [docs/08](docs/08_Verificatio
 | Layer | Result |
 |---|---|
 | Host tests (flight C++ on a PC; `-Werror` and ASan + UBSan) | 977 checks, 0 failures |
-| Ground tests (pytest, Python 3.11 and 3.13) | 751 tests: 748 passed, 3 skipped (optional reference files) |
+| Ground tests (pytest, Python 3.11 and 3.13) | 752 tests: 749 passed, 3 skipped (optional reference files) |
 | Firmware type-check, every build option (`check_firmware.sh`) | 70 ok, 0 fail, 0 warn |
 | Station sketch harness (plain, ASan + UBSan, TSan) / RouterBridge harness | 26 / 12 checks pass; negative controls fail as intended |
 | Real Arduino builds (arduino-cli + `arduino:zephyr`): both sketches, default and SX126x radio, core 1.0.0 and main; the flight sketch also on 0.90.0, the core of App Lab installations that were not updated | 0 warnings in project code; every symbol resolvable by the board's loader (`tools/llext_check.py`); flash and RAM per build in [docs/01](docs/01_System_Design.md) section 9.1 |

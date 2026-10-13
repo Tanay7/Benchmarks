@@ -67,6 +67,15 @@ ROW_COUNTERS = {"n_rx": "receptions", "rs_symbols": "sym_corrected", "cb_uncorre
                 "frames_ok": "frames_ok", "frames_lost": "frames_lost"}
 
 
+def at_resolution(v: float | None, step: float) -> str | None:
+    """A received-power reading (or a difference of two) as text at the radio's resolution, no
+    finer (D-70): whole dB for the E22, 0.5 / 0.1 dB steps for the SX126x. None stays None."""
+    if v is None or not math.isfinite(v) or not step > 0.0:
+        return None
+    q = math.floor(v / step + 0.5) * step + 0.0        # half up, as the dashboard's Math.round; never "-0"
+    return f"{q:.0f}" if step >= 1.0 else f"{q:.1f}"
+
+
 def fspl_db(distance_m: float, freq_hz: float) -> float | None:
     """Free-space path loss 20 log10(4 pi d f / c); None for d <= 0."""
     if not distance_m > 0 or not freq_hz > 0:

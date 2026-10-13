@@ -21,6 +21,12 @@ SAFE beacon decoded. The ground radio is an E22-400T33D on EBYTE's E15-USB-T2 US
 which the owner keeps; the defaults follow it.
 
 ### Changed
+- Received power is shown at the resolution of the readings (D-70), on the owner's request:
+  whole dB with the E22 (`-39 dBm` instead of `-39.2000 ± 0.3266 dBm`), 0.5 dB steps for the
+  SX126x RSSI and 0.1 dB for its noise floor; window means without `± SEM`; the header and the
+  OVERVIEW tiles show the newest frame's RSSI and SNR est. instead of 1-minute means. Dashboard
+  (`fres()`), console `STATUS` line (`rxstats.at_resolution()`, new test), docs/13. The
+  snapshot, the CSV exports and the data logger keep full precision.
 - `[gds] rcu` defaults to `false` (`dssq/config.py`, `config/station.toml`; D-68): the E22 sits on
   the E15-USB-T2, whose jumper caps hold M0/M1 (both fitted = normal mode). With `true` and no
   Radio Control Unit wired, every start reported `ERROR RADIO ground E22-400T33D did not answer

@@ -743,7 +743,7 @@ def test_dashboard_reads_every_snapshot_key(sim_station):
     assert [k for k in sci if not re.search(rf"\bSCI\.{k}\b", script)] == []
     assert [k for k in sci["spectral"] if not re.search(rf"\.{k}\b|\"{k}\"", script)] == []
     for w in ("1m", "10m", "pass"):                                             # 3 windows x 8 metrics
-        assert set(snap["rx"]["windows"][w]) <= set(re.findall(r'\["(\w+)", "[^"]+", "[^"]*", \d\]', script))
+        assert set(snap["rx"]["windows"][w]) <= set(re.findall(r'\["(\w+)", "[^"]+", "[^"]*", (?:\d|"[RD]")\]', script))
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")

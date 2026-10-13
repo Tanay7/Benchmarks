@@ -26,7 +26,7 @@ telecommand (T-TM, T-TC) - 10 Instruments (T-SC) - 11 Fault protection (T-FD) - 
 | Layer | What it is | Size and result on the Phase D tree | Where it runs |
 |---|---|---|---|
 | 1 Host tests | The flight C++ (protocols, algorithms, radio tables) compiled for a PC and checked | **977 checks** in 90 groups, 0 failures (976 when the official CCSDS 121.0 test data is absent). Built twice: warnings as errors, and under AddressSanitizer + UBSan | PC, CI |
-| 2 Ground tests | The ground data system and the spacecraft EGSE under pytest | **751 tests: 748 passed, 3 skipped** (optional reference files not on the bench), on Python 3.13 and 3.11 | PC, CI |
+| 2 Ground tests | The ground data system and the spacecraft EGSE under pytest | **752 tests: 749 passed, 3 skipped** (optional reference files not on the bench), on Python 3.13 and 3.11 | PC, CI |
 | 3 Firmware type-check | `check_firmware.sh`: every Arduino file compiled against strict stand-ins of the board API, in every build option | **70 ok, 0 fail, 0 warn**, incl. 80 of 80 RadioLib units for each board and a negative control | PC, CI |
 | 4 Station sketch harness | The real VENTUNO Q station sketch built for a PC and run on real threads | **26 checks**, 0 failures (12 E22 + 7 SX1268 + 7 SX1262) | PC, CI (ASan + UBSan, TSan) |
 | 5 RouterBridge harness and stack bound | The bundled patched Arduino_RouterBridge against its real dependencies; the bridge thread's worst-case stack from the real build | **12 checks** pass (the stock library must fail 4: negative control); worst case **1084 of 1536 octets** (452 margin) for both sketches | PC, CI |
@@ -91,7 +91,7 @@ skips cleanly.
 | test_ccsds.py | 14 | CRC, randomizer, RS against the independent `reedsolo` codec, frame and packet extraction, CLTU + FARM, SCLK fit |
 | test_cfdp.py | 121 | CFDP receiver (complete, incomplete, checksum failure, cancelled, abandoned, reordering, duplicates) and the **spacecraft EGSE** (`vgq1-spacecraft/python/main.py`): epoch rules, counter files, relay, CADU archive, nonce-reuse interleavings, the App Lab entry point with and without `arduino.app_utils.AppError` |
 | test_cross_check.py | 24 | **Flight-made vectors decoded bit-exactly by the ground**: CADUs, RS, CLTUs, packets, SDLS AUTH/AE frames, USLP, CFDP, Rice, spectra; the offline replay with `--app-data` finds the station's `station.toml` and key as the GDS does |
-| test_end_to_end.py | 50 | The whole GDS with the software spacecraft on a virtual clock: telemetry flow, COP-1 command round trip, hazardous confirmation, SDLS uplink, the TC counter hold and its release on the time floor without an SN file (every numbered TC service, also with `--no-archive`; a replayed first-pass HK after an archive loss, a forged HK under TM NONE and the boot HK before the EGSE restore cannot cause reuse; the simulator never touches the real counter; no key means no hold), coordinated rate change, RF survey, dashboard and `/metrics` |
+| test_end_to_end.py | 51 | The whole GDS with the software spacecraft on a virtual clock: telemetry flow, COP-1 command round trip, hazardous confirmation, SDLS uplink, the TC counter hold and its release on the time floor without an SN file (every numbered TC service, also with `--no-archive`; a replayed first-pass HK after an archive loss, a forged HK under TM NONE and the boot HK before the EGSE restore cannot cause reuse; the simulator never touches the real counter; no key means no hold), coordinated rate change, RF survey, dashboard and `/metrics` |
 | test_fop.py | 9 | FOP-1: lockout, suspension, N(R) validation, BD/BC confirmation (232.1-B-2) |
 | test_logger.py | 17 | Receiver data logger: 1 Hz `rx_stats`, CSV export, retention, free-space guard |
 | test_magcal.py | 22 | Ellipsoid fit, coverage and conditioning gates, MAGCAL encoding |
@@ -116,7 +116,7 @@ keys, the key-by-key blocks (e.g. `link.station_id`) and every HK and RF field a
 exists. `tests/test_citations.py` (**4 tests**) checks that every citation tag in the code
 ("contract N", "PB-x.y", "C-nn", "F-nn", "I1"-"I4") has a row in
 [12_Design_Decisions.md](12_Design_Decisions.md#appendix-b---citation-tags-in-code) appendix B
-and every row is still cited. Together: the **751 tests, 748 passed, 3 skipped** of section 1
+and every row is still cited. Together: the **752 tests, 749 passed, 3 skipped** of section 1
 (measured on Python 3.13 and 3.11 on the Phase D tree; the CI log of the final commit is the
 authority).
 
@@ -250,7 +250,7 @@ mkdir -p /tmp/vectors-san && tools/host_test/host_test /tmp/vectors-san
 CCSDS121_TESTDATA=/path/to/libaec/data/121B2TestData tools/host_test/host_test /tmp/vectors
 
 # 2. Ground tests (both App folders are put on the import path by tests/conftest.py)
-.venv/bin/python -m pytest -q                                      # "748 passed, 3 skipped"
+.venv/bin/python -m pytest -q                                      # "749 passed, 3 skipped"
 
 # 3. Firmware type-check (uses the bundled library copies, else fetches them from github.com)
 bash tools/host_test/check_firmware.sh                             # every line "ok", exit 0
@@ -502,8 +502,9 @@ nobody specifies. One offset, added to every RSSI and noise reading, fixes the a
 2. Measure (power meter) or take from datasheets the loss of the whole attenuator chain and
    cables at 433 MHz: `L_path`.
 3. Expected received power: `P_exp = P_tx - L_path` (dBm).
-4. Run the bench link 10 min; read the RECEIVER tab statistics, RSSI, 10 min window: mean
-   (4 decimals) and its standard error.
+4. Run the bench link 10 min; read the RSSI 10-min mean and its standard error at full
+   precision from the snapshot (`curl -s http://<board>:8080/api/state`, `rx.windows.10m.rssi`)
+   or the CSV export (the dashboard rounds them to the readings' resolution, D-70).
 5. `rssi_cal_offset_db = P_exp - mean_RSSI`. Put it in `[radio] rssi_cal_offset_db` of the
    station's `station.toml` (App Lab: `<App>/data/station.toml`), restart the App.
 6. Check: the new 10-min mean RSSI equals `P_exp` within 1 dB. Record `P_tx`, `L_path`, the

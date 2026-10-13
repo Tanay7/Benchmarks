@@ -110,6 +110,7 @@ hardware**; every such item is listed in [20_Known_Limitations.md](20_Known_Limi
 | [D-67](#d-67) | I2C bus clear releases the lines with the MCU's weak pull-ups: an empty A4/A5 bus is not a stuck bus | Software |
 | [D-68](#d-68) | Ground radio by default on the EBYTE E15-USB-T2, `[gds] rcu = false`; the Radio Control Unit becomes the option | Hardware / software |
 | [D-69](#d-69) | Spectrometer saturation judged on the raw counts of every channel read, valid or not | Software |
+| [D-70](#d-70) | Received power shown at the readings' resolution (E22 whole dB), not 4 decimals | Software |
 
 Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C review outcomes](#appendix-a---phase-c-review-outcomes),
 [Appendix B - Citation tags in code](#appendix-b---citation-tags-in-code),
@@ -922,6 +923,17 @@ written. Each belongs to the area named in the [Index](#index).
 | **Alternatives** | (recorded) Accept any calibrated float for a saturated channel (an unusable value would reach the ground as data); lower the AGC target (does not help when the overloaded channel is invisible to it). |
 | **Reason** | Record 2026-10-13-A: with a phone torch on the sensor and AGC on, channels at full scale came with an unusable calibrated value, were dropped as invalid, and the AGC, seeing only the valid channels (brightest 32 % of full scale), held 64x / 711.68 ms: B435, C460, E510, F535 (01:09Z) and R610 (01:24Z, 01:25Z) shown as "-" in every column, `no saturated channel`. At fixed 1x / 166.8 ms under the same torch all 18 channels were valid. |
 | **Evidence** | The SPEC raw code 0xFFFF on the wire for those channels while the other channels of the same device were read (`PH_READ` writes all six raw counts of a device; a failed read never reaches `frame_done`, `on_failure`); host test `spectral_saturation_and_agc` (2 new checks). The chip's calibrated output at saturation is not documented in the reference set: VERIFY with T-SC-08. |
+| **Status** | Current. |
+
+<a id="d-70"></a>
+### D-70 Received power shown at the readings' resolution (E22 whole dB), not 4 decimals
+
+| | |
+|---|---|
+| **Decision** | The dashboard and the GDS console show measured received power and everything derived from it (RSSI, noise floor, SNR est., margin est., signal power est., N0, C/N0, Eb/N0, measured path loss; single readings, window means and percentiles) rounded to the resolution of the readings: whole dB with the E22 (one-byte RSSI and noise register, dBm = -(256 - value)), 0.5 dB steps for the SX126x RSSI (RssiPkt / 2) and 0.1 dB for its noise floor and derived values; no "± SEM" next to these means (`dashboard.html fres()`, `rxstats.at_resolution()`). The header and the OVERVIEW tiles show the newest frame's RSSI and SNR est. instead of 1-minute means; the window statistics stay on the RECEIVER tab. The SX126x measured SNR keeps 2 decimals (0.25 dB steps); computed link-budget figures keep 4. The snapshot, the CSV exports and the data logger keep full precision. |
+| **Alternatives** | (recorded) Keep 4 decimals for means (the earlier design: means of 1-dB readings compared to tenths of a dB); show the mean with one extra decimal. |
+| **Reason** | The owner's request after the first bench link (2026-10-13): "-39.2000 ± 0.3266 dBm" read as a precision the E22 does not have. |
+| **Evidence** | E22 manuals (RSSI byte), SX1261/2 datasheet GetPacketStatus; `rxstats.E22_RSSI_RESOLUTION_DB`, `SX126X_RSSI_RESOLUTION_DB`; test `test_received_power_text_at_the_radio_resolution`. Supersedes the 4-decimal display rule of the RSSI statistics work (docs/13 1.5). |
 | **Status** | Current. |
 
 ---

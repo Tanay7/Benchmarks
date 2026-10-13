@@ -25,7 +25,7 @@ from dssq.ccsds.tm import FHP_ONLY_IDLE_DATA, build_frame, encode_cadu
 from dssq.config import load_config
 from dssq.gds import STAGES, GroundStation, Runner, _SimRcu, json_safe
 from dssq.radioctl import RadioManager
-from dssq.rxstats import PASS_WINDOW_MAX
+from dssq.rxstats import PASS_WINDOW_MAX, at_resolution
 from dssq.sim import MAG_OFFSET_UT, MAG_SOFT_IRON, SimSpacecraft
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -716,6 +716,14 @@ def test_tdm_record_with_a_1970_clock_is_counted_not_fatal(tmp_path):
     s = gs.snapshot()
     assert s["health"]["tdm_rejected"] == 1 and s["rx"]["frames"]["ok"] == 1
     assert any(e["source"] == "TDM" and "NTP" in e["text"] for e in s["events"])
+
+
+def test_received_power_text_at_the_radio_resolution():
+    """D-70: the console shows RSSI, noise and SNR est. at the readings' resolution, no finer
+    (E22 1 dB; SX126x RSSI 0.5 dB, noise 0.1 dB), rounded half up like the dashboard."""
+    assert [at_resolution(v, 1.0) for v in (-39.2, -38.5, 32.5, -0.3)] == ["-39", "-38", "33", "0"]
+    assert at_resolution(-113.26, 0.5) == "-113.5" and at_resolution(-72.96, 0.1) == "-73.0"
+    assert at_resolution(None, 1.0) is None and at_resolution(float("nan"), 1.0) is None
 
 
 def test_tdm_rejection_names_the_field_not_the_clock(tmp_path):

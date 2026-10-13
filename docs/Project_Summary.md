@@ -40,7 +40,7 @@ both ends.
 | Layer | Result on the current tree |
 |---|---|
 | Flight C++ on a PC (host tests), strict warnings and AddressSanitizer + UBSan | 977 checks, 0 failures |
-| Ground and EGSE test suite (Python 3.11 and 3.13) | 751 tests: 748 passed, 3 skipped (optional reference files) |
+| Ground and EGSE test suite (Python 3.11 and 3.13) | 752 tests: 749 passed, 3 skipped (optional reference files) |
 | Flight-to-ground cross-checks | every packet, frame, CLTU, SDLS frame and CFDP file bit-exact |
 | Official CCSDS 121.0 test data | flight 56/56 and ground 74/74 files octet for octet |
 | Firmware type-check in every build option + station and RouterBridge harnesses | 70 ok, 26 and 12 checks, negative controls fail as intended |
