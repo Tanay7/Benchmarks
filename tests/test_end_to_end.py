@@ -718,6 +718,18 @@ def test_tdm_record_with_a_1970_clock_is_counted_not_fatal(tmp_path):
     assert any(e["source"] == "TDM" and "NTP" in e["text"] for e in s["events"])
 
 
+def test_tdm_rejection_names_the_field_not_the_clock(tmp_path):
+    """Record 2026-10-13-A: an E22 RSSI byte of 0x00 (-256 dBm) with a good clock was reported as
+    a clock fault."""
+    gs = GroundStation(_config(tmp_path, key=False), archive=False)
+    cadu = encode_cadu(build_frame(0, 0, 0, FHP_ONLY_IDLE_DATA, bytes(188), 0))
+    gs.ingest(cadu + bytes([0]), 1_791_850_000.0)                                # 2026-10-13
+    s = gs.snapshot()
+    assert s["health"]["tdm_rejected"] == 1 and s["rx"]["frames"]["ok"] == 1
+    tdm = [e["text"] for e in s["events"] if e["source"] == "TDM"]
+    assert len(tdm) == 1 and "rx_power_dbm" in tdm[0] and "NTP" not in tdm[0]
+
+
 def test_close_is_bounded_with_a_stuck_front_panel(tmp_path):
     r = Runner(_config(tmp_path), sim=True, web=False, archive=False)
     stuck = threading.Event()

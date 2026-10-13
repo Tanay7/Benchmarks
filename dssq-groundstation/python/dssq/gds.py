@@ -693,8 +693,11 @@ class GroundStation:
             self.health["tdm_rejected"] += 1
             if not self._tdm_warned:
                 self._tdm_warned = True
-                self.event("WARN", "TDM", f"station clock outside 2000..2100 (NTP not synchronised?): TDM records "
-                           f"skipped ({e})")
+                # Name the real cause: on the first bench link an E22 RSSI byte at the end of its
+                # range (-256 dBm) was reported as a clock fault (record 2026-10-13-A).
+                why = "station clock outside 2000..2100 (NTP not synchronised?)" if str(e).startswith("t_utc") \
+                    else "a measurement outside the TDM limits"
+                self.event("WARN", "TDM", f"{why}: TDM records skipped ({e})")
             return
         self.tdm.add(rec)
 

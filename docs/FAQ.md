@@ -8,7 +8,7 @@ explanation disagreed with the final code, the code's value is used here.
 **Radio and range** - [How far will it reach?](#how-far-will-it-reach) - [What about my 35 dBi antennas?](#what-about-my-35-dbi-antennas) - [Which spreading factor / profile should I use?](#which-spreading-factor--profile-should-i-use) - [How do I switch to the 5 W (37 dBm) module?](#how-do-i-switch-to-the-5-w-37-dbm-module)
 **Data path** - [How does complex telemetry travel over a simple radio?](#how-does-complex-telemetry-travel-over-a-simple-radio) - [How big are the packets and frames?](#how-big-are-the-packets-and-frames) - [What is Rice compression?](#what-is-rice-compression) - [Where does the signal processing happen?](#where-does-the-signal-processing-happen) - [What commands can I send?](#what-commands-can-i-send)
 **Security and rules** - [What is SDLS, in plain words?](#what-is-sdls-in-plain-words) - [Is encryption allowed? Which mode should I use?](#is-encryption-allowed-which-mode-should-i-use)
-**Hardware** - [Why do four sensors on one I2C bus not clash?](#why-do-four-sensors-on-one-i2c-bus-not-clash) - [What happens if it gets hot?](#what-happens-if-it-gets-hot) - [What can the AS7265X really measure?](#what-can-the-as7265x-really-measure) - [How busy are the Linux processors?](#how-busy-are-the-linux-processors) - [Where is my data stored?](#where-is-my-data-stored)
+**Hardware** - [Why does the ground radio need a USB-UART adapter?](#why-does-the-ground-radio-need-a-usb-uart-adapter) - [Why is the spectrometer page empty?](#why-is-the-spectrometer-page-empty) - [Which callsign do I use before I have a licence?](#which-callsign-do-i-use-before-i-have-a-licence) - [Why do four sensors on one I2C bus not clash?](#why-do-four-sensors-on-one-i2c-bus-not-clash) - [What happens if it gets hot?](#what-happens-if-it-gets-hot) - [What can the AS7265X really measure?](#what-can-the-as7265x-really-measure) - [How busy are the Linux processors?](#how-busy-are-the-linux-processors) - [Where is my data stored?](#where-is-my-data-stored)
 **Software** - [What are the tests, in plain words?](#what-are-the-tests-in-plain-words) - [What does CI do?](#what-does-ci-do) - [What coding standard does the code follow?](#what-coding-standard-does-the-code-follow) - [Why are RadioLib and Arduino_RouterBridge bundled and patched?](#why-are-radiolib-and-arduino_routerbridge-bundled-and-patched) - [What is not implemented?](#what-is-not-implemented)
 
 ---
@@ -32,11 +32,12 @@ Yagi and no fade margin (free-space budget from `dssq/link.py`).
 [02_Link_Budget_and_RF_Analysis.md](02_Link_Budget_and_RF_Analysis.md).
 
 ### Has it been tested on real hardware?
-**Partly.** Every automated check passes (975 host checks; 750 ground tests, of which 747
+**Partly.** Every automated check passes (975 host checks; 751 ground tests, of which 748
 pass and 3 skip for optional reference files; the firmware type-check; the real Arduino builds;
 CI on every push). The flight App has had one bench run on a UNO Q with its radio and the
-AS7265X (2026-10-12, [21_Test_Records.md](21_Test_Records.md) record 2026-10-12-A), but the
-boards and radios have not been run together. Every value that only
+AS7265X (2026-10-12), and the ground station received and decoded its downlink on the bench
+(2026-10-13; [21_Test_Records.md](21_Test_Records.md) records 2026-10-12-A and 2026-10-13-A).
+Commanding (the uplink) has not been run on hardware yet. Every value that only
 hardware can confirm is tagged VERIFY and has a test.
 [08_Verification_and_Test.md](08_Verification_and_Test.md), [20_Known_Limitations.md](20_Known_Limitations.md).
 
@@ -227,6 +228,33 @@ station both identify themselves with it in plain text.
 
 ## Hardware
 
+### Why does the ground radio need a USB-UART adapter?
+The ground software (frame sync, Reed-Solomon, SDLS, archive, dashboard) runs on the VENTUNO Q's
+Linux processor and reads the E22 as a serial port (`/dev/ttyUSB0`). The TX/RX header pins belong
+to the STM32 microcontroller, not to Linux, so a radio there never reaches the ground software.
+The default is EBYTE's E15-USB-T2 test board with the E22 plugged straight onto it, its jumper
+caps setting M0/M1 (`[gds] rcu = false`); the option is a plain 3.3 V USB-UART adapter plus the
+Radio Control Unit on D2/D3/D4 (`rcu = true`), which lets the ground switch the radio's mode
+itself. [00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) part 9,
+[03_Hardware_Integration.md](03_Hardware_Integration.md) section 5.3.
+
+### Why is the spectrometer page empty?
+The flight software starts in SAFE mode, and SAFE schedules no SPEC packets (SAFE off, CRUISE
+every 300 s, ENCOUNTER / TEST every 30 s). The AS7265X is still found (`sensors 0x0080`) but idle:
+only its red power LED is lit, the lamps light only during an exposure. `PKTRATE SPEC 30` turns
+the packets on in any mode. Without a licence to transmit, send it by hardline: on the VENTUNO Q
+`python3 -m dssq.cltu "PKTRATE SPEC 30" --app-data ../data` (in
+`~/ArduinoApps/dssq-groundstation/python`) prints one hex line; append it to
+`~/ArduinoApps/vgq1-spacecraft/data/hardline_queue.txt` on the UNO Q.
+[07_Operations_Procedures.md](07_Operations_Procedures.md) sections 2.6, 3 and 5.3.
+
+### Which callsign do I use before I have a licence?
+None: a callsign comes with an amateur-radio licence. Keep the placeholder `N0CALL` (a WARN at
+start, nothing else) and do not transmit on air. The ground refuses anything that does not look
+like a callsign (3-16 letters and digits, at least one of each), and a made-up one may belong to
+someone else. Receiving, and bench tests in which nothing radiates, need no licence.
+[09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.
+
 ### Why do four sensors on one I2C bus not clash?
 All instruments share one bus, `Wire2` = I2C3 on the UNO Q's header pins A4 (SDA) and A5 (SCL),
 3.3 V, 100 kHz. They cannot clash because (1) every device has its own 7-bit address - RM3100
@@ -283,7 +311,7 @@ An external NVMe or USB drive works only if the App container can see it (VERIFY
 1. **Host tests:** the flight C++ compiled for a PC, 975 checks (standards' test vectors, official
    CCSDS data, radio maths, spectral, autonomy, integration streams), built twice: warnings as
    errors, and with memory and undefined-behaviour checkers.
-2. **Ground tests:** 750 pytest tests on Python 3.11 and 3.13: the ground decodes exactly what
+2. **Ground tests:** 751 pytest tests on Python 3.11 and 3.13: the ground decodes exactly what
    the flight encodes (vectors the C++ writes), SDLS, COP-1, CFDP, products, magcal, AFC, web UI,
    data logger, station identification, and two documentation checks (every dashboard key is
    documented; every citation tag in the code is indexed).

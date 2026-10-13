@@ -7,11 +7,48 @@ software identifies itself as flight software 3.0 (boot event 0x0001) and ground
 commit that introduced each change. Verification numbers are those reported in the commit
 messages; the current numbers are in [docs/08_Verification_and_Test.md](docs/08_Verification_and_Test.md).
 
-The flight App has had one bench run on the UNO Q, the spacecraft alone (2026-10-12,
-[docs/21_Test_Records.md](docs/21_Test_Records.md) record 2026-10-12-A); nothing else in this log has been run
-on the real boards yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
+Bench runs so far: the flight App on the UNO Q (2026-10-12) and the first downlink received by the
+ground station (2026-10-13), [docs/21_Test_Records.md](docs/21_Test_Records.md) records 2026-10-12-A and
+2026-10-13-A. Commanding has not been run on hardware yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
 
 ---
+
+## [Unreleased] - First downlink to the ground station; E15-USB-T2 ground radio (2026-10-13)
+
+The ground station on the owner's VENTUNO Q received and decoded the spacecraft's downlink on the
+bench (record 2026-10-13-A): AOS within seconds, `lost=0`, no Reed-Solomon corrections, the
+SAFE beacon decoded. The ground radio is an E22-400T33D on EBYTE's E15-USB-T2 USB test board,
+which the owner keeps; the defaults follow it.
+
+### Changed
+- `[gds] rcu` defaults to `false` (`dssq/config.py`, `config/station.toml`; D-68): the E22 sits on
+  the E15-USB-T2, whose jumper caps hold M0/M1 (both fitted = normal mode). With `true` and no
+  Radio Control Unit wired, every start reported `ERROR RADIO ground E22-400T33D did not answer
+  the configuration read`. The RCU (`rcu = true`, D2/D3/D4) remains the option for `RADIO`,
+  `GSCAN`, `WAKE`, `LINKRATE`, `LINKCHAN`. Existing `data/station.toml` files keep their value.
+- Setup guide part 9 rewritten for the E15-USB-T2: supply jumper on 5V; a fitted cap = 0, a
+  removed cap = 1 (EBYTE E51-TTL-500 datasheet, which describes the board); the E22's
+  configuration mode is the M0 cap only, both removed is its deep sleep; the RCU as option 9.3.
+  Part 7: the callsign rule (keep `N0CALL` until licensed). Part 11: a step attenuator in line,
+  and the sign of an overdriven receiver.
+
+### Fixed
+- The TDM warning named the station clock for every rejected record. On the bench an overdriven
+  E22 gave RSSI -256 dBm with a correct clock and the console said `station clock outside
+  2000..2100 (NTP not synchronised?)`. It now names the clock only when the time is out of range,
+  otherwise `a measurement outside the TDM limits` with the field (`dssq/gds.py _tdm_add`; new test
+  `test_tdm_rejection_names_the_field_not_the_clock`).
+- docs/20: the 64-octet ring item added on 2026-10-12 reused the number V-30; it is V-68 now.
+
+### Added
+- docs/21 record 2026-10-13-A (first downlink: the E15-USB-T2 jumpers, the one-time
+  configuration, RSSI -1 / -256 dBm with both antennas on one bench, -39 / -40 dBm with 54 dB in
+  line). docs/20: V-31 closed (the App container opens `/dev/ttyUSB0`); new V-69 (ground radio
+  powered from USB, transmit current) and V-70 (the E22 RSSI byte at the end of its range).
+  docs/14: rows for the configuration-read error, `no reply` from the one-time configuration,
+  the callsign refusal, the overdriven receiver, the empty spectrometer page in SAFE and the
+  start-up EVRs not forwarded. docs/03 section 5.3.0; FAQ: the USB-UART adapter, the empty
+  spectrometer page, the callsign before a licence.
 
 ## [Unreleased] - UNO Q flight App on arduino:zephyr before 1.0.0 (2026-10-12)
 
@@ -61,7 +98,7 @@ app-bricks-py release history) and are fixed; CI now builds the flight sketch on
 - [docs/21](docs/21_Test_Records.md) record 2026-10-12-A, the first bench run of the flight App
   (spacecraft alone): build and start on 0.90.0, radio configuration, beacon, AS7265X on Qwiic,
   CADU copies over the router, no reset with the radio on the board's 5 V. Its numbers are
-  added to docs/20 V-19 (busy 1528 ms against the model's 1267 ms), V-22, V-27 and V-30, and
+  added to docs/20 V-19 (busy 1528 ms against the model's 1267 ms), V-22, V-27 and V-68 (first numbered V-30, a number already taken), and
   the setup guide's expected `busy` / `period` now use the measured values.
 - The AS7265X may be plugged into the UNO Q Qwiic socket (`Wire1`, `config.h` `QWIIC_WIRE`) instead
   of A4/A5, on the owner's request (D-13 revision). The driver probes A4/A5 first, then Qwiic, at

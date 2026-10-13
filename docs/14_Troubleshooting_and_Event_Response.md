@@ -67,6 +67,8 @@ at least INTERESTING, until the next accepted command (07 §2.4).
 | `LOS (hibernating)` at INFO level | The spacecraft hibernates and sends one beacon every `beacon_s` | Normal; RED only after 7200 s without a beacon |
 | RF `cltu_bad` rises by one shortly after commands, without any 0x01xx EVR; events `IDENT station identification (periodic / end): DE <callsign> <name>` | The station's plain-text identification (section 4.21) reaches the spacecraft receiver; it holds no CLTU, so the flight counts it in `cltu_bad` and drops it | Normal. A `cltu_bad` rise without an identification next to it is a damaged uplink: 2.4 |
 | WARN `IDENT [station] callsign is the placeholder N0CALL ...` at every GDS start | `[station] callsign` was not set | Set your licensed callsign ([15](15_Configuration_Reference.md) §4.1) and restart |
+| SPECTROMETER tab empty (`Spectrum available / valid no`, counters `spec 0`) although `sensors 0x0080` shows the AS7265X | SAFE schedules no SPEC packets (mode table: SAFE off, CRUISE 300 s, ENCOUNTER / TEST 30 s; [07](07_Operations_Procedures.md) §3); the instrument is idle, only its red power LED is lit (no lamps without an exposure) | `PKTRATE SPEC <s>` (works in every mode) or a mode change: over RF, or without RF by hardline from the EGSE ([07](07_Operations_Procedures.md) §2.6) |
+| EGSE console right after the App starts: `<n> EVRs not forwarded by the MCU since its boot (+<n>)`, then constant | The start-up EVRs are raised before the EGSE listens (the MCU starts a few seconds earlier) and, on the 64-octet rings of cores before 1.0.0, exceed the notification limits; they are in the downlink | None; record 2026-10-12-A |
 | `HK.cmd_loss_timer_s` growing | Seconds since the last valid command; it resets with every accepted command | Command at least once per `CMDLOSS` period (default 24 h) or the spacecraft goes SAFE and returns to the default radio |
 
 ### 2.2 Station and dashboard
@@ -81,6 +83,9 @@ at least INTERESTING, until the next accepted command (07 §2.4).
 | RED `ground radio link down for N s` | The E22 serial link failed after it was open, or the SX126x station MCU stopped reporting | EVENTS ERROR `RADIO ground ... link lost: <detail>` | Re-plug / power the station radio; SX126x: check the station sketch is running |
 | WARN `GDS router bridge unavailable: front panel / RCU / SX126x radio disabled` | Host mode without `arduino-router-bridge`, or the router not running | `systemctl status arduino-router`; host mode: run `install_station.sh` | An SX126x station has no radio without the bridge; an E22 station still receives (no `WAKE`, `GSCAN`, `LINKRATE`) |
 | `LINKRATE` etc. REJECTED: `... needs the Radio Control Unit ...` | `[gds] rcu = false`, no bridge, or RCU wires missing | RADIO events at start | Wire M0/M1/AUX to the station MCU (D2/D3/D4) and set `rcu = true` |
+| ERROR `RADIO ground E22-400T33D did not answer the configuration read` at every start, LOS | `[gds] rcu = true` but M0/M1 are not on D2/D3 (for example the E22 on an E15-USB-T2, whose jumpers hold M0/M1), or the module asleep (both E15 caps removed = M0 = M1 = 1) | `grep -n rcu <App>/data/station.toml`; the E15 caps | `rcu = false` with both caps fitted ([00](00_Beginner_Setup_Guide.md) 9.2), or wire the RCU (9.3). With `rcu = true` and the module in normal mode the read command goes out on air as a 3-octet packet; record 2026-10-13-A |
+| `no reply: is the module in CONFIG mode (M0 = 0, M1 = 1) and powered?` from `python3 -m dssq.radio.e22 --write` | Not in configuration mode. On the E15-USB-T2 a fitted cap = 0, a removed cap = 1: configuration = the M0 cap only; both removed (the E51's configuration mode) is the E22's deep sleep | The adapter's LEDs while the command runs; `ls -l /dev/serial/by-id/` (CP2102 -> ttyUSB0); supply jumper on 5V | Move the cap to the other pair and run it again ([00](00_Beginner_Setup_Guide.md) 9.2) |
+| The App stops at once: `[station] callsign = '...' must be an amateur callsign: 3..16 letters and digits (at least one of each)` | Not a callsign (for example `TAN`: no digit) | App Lab log | Your licensed callsign, or keep `N0CALL` until you have one ([00](00_Beginner_Setup_Guide.md) part 7) |
 | WARN `RADIO ground E22-400T33D: ch ... MISMATCH [...]` at start | The station module's saved registers differ from `station.toml` (also after a coordinated change and a GDS restart) | The list names the keys | Write the module (`python -m dssq.radio.e22 --write`, [15](15_Configuration_Reference.md) §1) or correct `station.toml` to the link in use |
 | Station panel: AOS dark, ALARM flashing fast (5 Hz) | "GDS link down": the station MCU received no status line for 5 s | Is the GDS running? | Restart the ground App / service ([06_Displays.md](06_Displays.md)) |
 | CardKB keys do nothing or wrong characters | Wiring, supply level, or key codes of another CardKB firmware | Type `KEYTEST` + Enter: raw key codes are echoed to the dashboard | 3.3 V first, then 5 V through a BSS138 shifter; adjust `KEY_*` in the station sketch |
@@ -98,6 +103,7 @@ The station shows LOS and the frame counters do not move.
 | 4 | Signal too weak | RECEIVER tab: RSSI, noise floor; frames failing RS (WARN `DECODER RS uncorrectable codeblock(s)`) | Antennas, polarisation, line of sight, distance; a slower rate code (more sensitive) when the link is still up |
 | 5 | Frames arrive but SDLS rejects them (counts as received, no packets) | WARN `SDLS TM frame VCn rejected by SDLS: ...`; YELLOW `SDLS service mismatch suspected` | See 2.8 |
 | 6 | Station receiver deaf: wrong port, E22 in the wrong mode, antenna disconnected | RECEIVER: serial octet counter moving, noise-floor readings arriving; an antenna disconnected or connected shows as a change of the noise floor | Check the station radio chain; `RADIO` directive reads the module back |
+| 7 | Not a missing AOS but an overdriven receiver: AOS and frames, yet `RSSI` alternates -1.0 / -256.0 dBm and `SNRest` about 71 / -184 dB | The E22 RSSI byte at the end of its range (docs/20 V-70) | More distance (>= 10 m) or attenuation at once (54 dB in line gave -39 / -40 dBm on the bench, record 2026-10-13-A) |
 
 ### 2.4 Commands do not get through
 
@@ -570,6 +576,7 @@ or `EGSE` (sequence number bit 31).
 | INFO | `TDM written by <source>: <file> (<n> records)` | `TDM WRITE` / FILES button | None |
 | WARN | `pass TDM not written: <e>` / `TDM not written: <e>` | Disk error or invalid records | Disk space |
 | WARN | `station clock outside 2000..2100 (NTP not synchronised?): TDM records skipped (<e>)` | Station clock invalid (once per pass) | Synchronise the clock |
+| WARN | `a measurement outside the TDM limits: TDM records skipped (<e>)` | A frame's value outside the TDM ranges, for example `rx_power_dbm = -256.0` from an overdriven E22 (section 2.3 row 7); before 2026-10-13 this was reported with the clock text above | Fix the cause named in `<e>` |
 
 ### 4.16 MAGCAL
 

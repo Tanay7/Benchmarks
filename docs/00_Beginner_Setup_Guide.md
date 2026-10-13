@@ -445,6 +445,10 @@ restart the ground App.
 both settings default to the placeholder `N0CALL`, which is not a licensed callsign. Set
 `VGQ_CALLSIGN` (7.1) **and** `[station] callsign` (7.2) before anything transmits on air. The
 rules behind it: [09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.3.
+The callsign is the one on your amateur-radio licence; without a licence you have none. Keep
+`N0CALL` until then: the ground refuses anything that does not look like a callsign (3-16
+letters and digits, at least one of each: `TAN`, for example, stops the App), and a made-up one
+may be someone else's.
 
 ### 7.1 Spacecraft (`sketch/src/config.h`)
 
@@ -604,43 +608,71 @@ Full tables: docs/03 section 5; diagram: docs/03 section 5.5.
 ### 9.1 Power and radio supply
 
 1. The VENTUNO Q runs from its 12 V / 5 A supply (barrel jack).
-2. Screw a **50 Ohm dummy load** onto the ground E22-400T33D.
-3. Supply the module: 5 V to pin 6 VCC from VENTUNO Q **JANALOG pin 5** (+5V_LIMITED) or from its
-   own 5 V supply (>= 2 A); GND to pin 7; 470-1000 uF + 100 nF at the pins.
+2. Screw a **50 Ohm dummy load** (or, for part 11, the antenna or the attenuator set) onto the
+   ground E22-400T33D.
+3. Supply the module:
+   * **On the EBYTE E15-USB-T2 (default, 9.2):** the module takes 5 V from the VENTUNO Q USB-A
+     port through the adapter; put the adapter's supply jumper on **5V**. That is enough to
+     receive. Transmitting (commands, part 12) draws up to 1.2 A (T33D manual 2.2), more than a
+     USB port is meant to supply (docs/20 V-69): before the ground transmits, give the module
+     its own 5 V supply as in 9.3.
+   * **On a plain USB-UART adapter (9.3):** 5 V to pin 6 VCC from VENTUNO Q **JANALOG pin 5**
+     (+5V_LIMITED) or from its own 5 V supply (>= 2 A); GND to pin 7; 470-1000 uF + 100 nF at
+     the pins. Check: 4.75-5.25 V at the module's VCC pin.
 
-Check: 4.75-5.25 V at the module's VCC pin.
+### 9.2 Ground radio on the EBYTE E15-USB-T2, one-time configuration
 
-### 9.2 One-time configuration of the ground radio
+The default ground radio interface is EBYTE's USB test board **E15-USB-T2** (CP2102 USB-UART):
+the E22 plugs straight onto its 7-pin socket and the board into a VENTUNO Q USB-A port
+(`/dev/ttyUSB0`). Its jumper caps set the module's M0 and M1: **a fitted cap = 0, a removed cap
+= 1**; a second jumper selects the module supply, 3.3 V or 5 V (EBYTE E51-TTL-500 datasheet
+v1.0, sections 3.6 and 5, which describe this board). On the owner's board (USB plug up) the
+supply header (3 pins, "5V" printed at its top) is on the left edge and the M0/M1 header (two
+pairs) on the right edge (docs/21 record 2026-10-13-A).
 
 A new E22 has the RSSI byte and the noise register switched off; the ground needs both. The
-spacecraft configures its own radio at every boot, the ground radio is configured **once** now,
-before the M0/M1 control wires are connected.
+spacecraft configures its own radio at every boot; the ground radio is configured **once** now.
 
 1. In App Lab press **Stop** on the ground App: while it runs it holds the serial port.
-2. Wire the USB-UART adapter (3.3 V logic): adapter TXD -> E22 pin 3 RXD, adapter RXD -> E22
-   pin 4 TXD, adapter GND -> E22 pin 7 GND. Plug the adapter into a VENTUNO Q USB-A port.
-3. Put the module in configuration mode: E22 pin 2 **M1 -> 3.3 V** (JANALOG pin 4), pin 1
-   **M0 -> GND**.
+2. Supply jumper on **5V**.
+3. Configuration mode is **M1 = 1, M0 = 0**: one cap on the **M0** pair, the M1 pair open.
+   (Both caps removed is the E51's configuration mode in that datasheet, but an E22's **deep
+   sleep**, in which it does not answer.) Not sure which pair is M0? Put the cap on one pair,
+   run step 4, and on `no reply` move it to the other pair.
 4. In a terminal on the VENTUNO Q (`ssh arduino@<VENTUNO-Q-IP>`):
 
    ```bash
-   ls /dev/serial/by-id/                    # the adapter must be listed
+   ls -l /dev/serial/by-id/                 # a Silicon_Labs_CP2102 entry -> ttyUSB0
    cd ~/ArduinoApps/dssq-groundstation/python
    python3 -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config ~/ArduinoApps/dssq-groundstation/data/station.toml
    ```
 
-Check: the output shows `model: E22-400T33D`, `product info: ...`, `written.` and a table with
-`channel 23`, `freq_mhz 433.125`, `air_rate 2.4k`, `uart_bps 9600`, `rssi_byte True`,
-`rssi_noise_enable True`.
+   Check: the output shows `model: E22-400T33D`, `product info: ...`, `written.` and a table with
+   `channel 23`, `freq_mhz 433.125`, `air_rate 2.4k`, `uart_bps 9600`, `rssi_byte True`,
+   `rssi_noise_enable True`.
+5. Fit **both** caps (M0 = M1 = 0, normal mode).
+6. `[gds] rcu = false` (the default in `data/station.toml`): the ground never switches the module's
+   mode itself, and the commands that need that (`RADIO`, `GSCAN`, `WAKE`, `LINKRATE`,
+   `LINKCHAN`) are refused. To change channel or rate, repeat steps 1-5 with the new values in
+   `station.toml`, or use the Radio Control Unit (9.3).
 
-If not: `no reply: is the module in CONFIG mode` -> check M1 = 3.3 V, M0 = GND, VCC, and that
-adapter TXD goes to E22 RXD. `permission denied` -> `sudo usermod -aG dialout $USER`, log out and
-in again. A different device name (`/dev/ttyUSB1`, `/dev/ttyACM0`) -> use it here and in
-`station.toml` `[radio] port`.
+Press **Run** on the ground App. Check: no RADIO error at start, and every 10 s
+`STATUS LOS sync=SEARCH ...` until the spacecraft transmits.
 
-5. Remove the M1-to-3.3 V and M0-to-GND wires.
+If not: `no reply: is the module in CONFIG mode` -> the cap on the other pair, the supply jumper,
+the module pushed fully onto the socket. `ERROR RADIO ground E22-400T33D did not answer the
+configuration read` at start -> `rcu = true` in `data/station.toml` without the 9.3 wires: set it
+to `false`. `permission denied` -> `sudo usermod -aG dialout $USER`, log out and in again. A
+different device name (`/dev/ttyUSB1`, `/dev/ttyACM0`) -> use it here and in `station.toml`
+`[radio] port`.
 
-### 9.3 Radio Control Unit (M0/M1/AUX)
+### 9.3 Option: Radio Control Unit (M0/M1/AUX)
+
+With the Radio Control Unit the VENTUNO Q MCU switches the module between NORMAL, WOR,
+CONFIG and SLEEP itself, which `RADIO`, `GSCAN`, `WAKE`, `LINKRATE` and `LINKCHAN` need. It
+needs the module's M0, M1 and AUX pins, so the module sits on a plain **3.3 V-logic** USB-UART
+adapter instead of the E15-USB-T2 (a 5 V adapter can damage the E22), with its own supply (9.1):
+adapter TXD -> E22 pin 3 RXD, adapter RXD -> E22 pin 4 TXD, adapter GND -> E22 pin 7 GND, and
 
 | E22 pin | VENTUNO Q |
 |---|---|
@@ -649,12 +681,13 @@ in again. A different device name (`/dev/ttyUSB1`, `/dev/ttyACM0`) -> use it her
 | 5 AUX | D4 |
 | 7 GND | GND |
 
-Press **Run** on the ground App. Check: an event
+Do the one-time configuration of 9.2 (steps 1, 4) with wires instead of caps, **before** the
+M0/M1 wires go to D2/D3: E22 pin 2 M1 -> 3.3 V (JANALOG pin 4), pin 1 M0 -> GND. Then set
+`[gds] rcu = true` and press **Run**. Check: an event
 `ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k pwr 0 LBT/CAD False - matches station.toml`
 and the RED "radio backend unavailable" alarm is gone.
 
-If it says `MISMATCH [...]`: repeat 9.2. Without the RCU wires, tie M0 and M1 to GND and set
-`[gds] rcu = false` (docs/03 section 5.3.1).
+If it says `MISMATCH [...]`: repeat the configuration (docs/03 section 5.3.1).
 
 ### 9.4 Lamps and buzzer
 
@@ -719,6 +752,9 @@ Two transmitters on one table can damage each other's receivers. Use one of thes
   ground SMA. 100 dB in total: the ground receives about 33 - 100 = **-67 dBm**. Both outer
   attenuators must take the full power of the radio next to them (both ends transmit).
 * **Antennas far apart**: at least 10 m, better 100 m (docs/03 section 10).
+* **A step attenuator in line on one side**, antennas still fitted (record 2026-10-13-A: 54 dB
+  gave RSSI -39 / -40 dBm on the bench). It must take the full 2 W of the radio on its side.
+  Fitted on the spacecraft side, it also cuts what the spacecraft radiates.
 
 1. Power off both. Remove the dummy loads and connect the coax set (or the antennas).
 2. Power the ground station, then the spacecraft.
@@ -728,6 +764,8 @@ Check (within one or two frame periods, about 5-10 s in SAFE mode):
 * Dashboard header: **AOS**, **LOCK**, frames counting; the green **AOS lamp** lights.
 * RECEIVER tab: RSSI about -67 dBm with the 100 dB set (the exact value depends on cable and
   attenuator tolerances); frames lost 0; RS decoder: no uncorrectable code blocks.
+  ⚠ RSSI jumping between -1 and -256 dBm (`SNRest` about 71 / -184 dB) means the receiver is
+  overdriven: add attenuation or distance at once (docs/20 V-70).
 * LINK & SECURITY tab: the spacecraft identification `DE <your callsign> VGQ-1`; with AE the TM
   epoch and "protected".
 * The ground console prints every 10 s: `STATUS AOS sync=LOCK RSSI=-67.0 dBm ... frames=...`.

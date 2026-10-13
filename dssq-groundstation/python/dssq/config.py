@@ -97,7 +97,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "interop": {"tm_frames_udp": "", "tm_packets_udp": "", "tc_frames_udp_listen": ""},
     "gds": {"archive_dir": "archive", "http_host": "127.0.0.1", "http_port": 8080, "http_token": "",
             "http_allowed_hosts": [],
-            "los_timeout_s": 90.0, "frontpanel": True, "rcu": True, "router_address": "",
+            "los_timeout_s": 90.0, "frontpanel": True, "rcu": False, "router_address": "",
             "console_interval_s": 10.0, "archive_keep_days": 180, "archive_max_gb": 16.0,
             "archive_min_free_mb": 2048.0},
     "commanding": {"t1_s": 45.0, "tx_limit": 3, "window": 5, "verify_timeout_s": 300.0,

@@ -401,7 +401,7 @@ often (SPECTRAL WARN `... DISAGREE`). The last five are ground-only plausibility
 | `http_allowed_hosts` | `[]` | list of <= 32 host names (no port) | - | DNS names the dashboard may be reached by on a LAN-bound server, besides IP addresses, single-label names, `<name>.local` and the board's host name (DNS-rebinding guard) |
 | `los_timeout_s` | 90.0 | > 0 | s | Minimum LOS timeout; the GDS uses max(this, 3 x the spacecraft's longest frame period) - e.g. 90 s at E22 2.4 kbit/s, 208 s at SX126x profile 1 |
 | `frontpanel` | true | bool | - | Use the station I/O sketch (CardKB, LEDs, buzzer) over the Router Bridge |
-| `rcu` | true | bool | - | The station MCU drives the ground E22's M0/M1/AUX (Radio Control Unit): needed for `RADIO`, `GSCAN`, `WAKE`, `LINKRATE`, `LINKCHAN` with an E22 |
+| `rcu` | false | bool | - | true: the station MCU drives the ground E22's M0/M1/AUX on D2/D3/D4 (Radio Control Unit), needed for `RADIO`, `GSCAN`, `WAKE`, `LINKRATE`, `LINKCHAN` with an E22 (docs/03 5.3.1). false (default since D-68): the E22 sits on an EBYTE E15-USB-T2 whose jumper caps hold M0/M1 (docs/03 5.3.0); with `true` and no RCU wired the start reports `did not answer the configuration read` |
 | `router_address` | `""` | string | - | Router Bridge address; host default `unix:///var/run/arduino-router.sock`; App Lab uses `APP_SOCKET` |
 | `console_interval_s` | 10.0 | > 0 | s | Period of the `STATUS` line in the log |
 | `archive_keep_days` | 180 | 0..36500, 0 = no age limit | days | Day folders and rx_stats / params / frames rows older than this are deleted (never the current UTC day); exports older than this too |

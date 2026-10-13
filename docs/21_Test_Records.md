@@ -45,7 +45,8 @@ Conventions:
 | [IDENT](#ident---station-identification-on-air) | plain-text identification of both transmitters | T-TC-07 (station identification on air) | `VGQ_CALLSIGN`, `[station] callsign`, [09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.3 |
 | [WDG](#wdg---hardware-watchdog) | the flight MCU's hardware watchdog resets a hung loop | T-FD-09 (hardware watchdog) | closes docs/20 V-28 (L-38); not yet provoked on hardware: VERIFY |
 
-Completed records: [2026-10-12-A](#2026-10-12-a---first-bench-run-of-the-flight-app) (first bench run of the flight App, spacecraft only).
+Completed records: [2026-10-12-A](#2026-10-12-a---first-bench-run-of-the-flight-app) (first bench run of the flight App, spacecraft only);
+[2026-10-13-A](#2026-10-13-a---first-downlink-received-by-the-ground-station) (first downlink received by the ground station).
 
 ---
 
@@ -595,7 +596,7 @@ Wiring (photos): E22 GND -> GND, VCC -> 5V, AUX -> D7, TXD -> header pin "SDA", 
 | # | Observation | Evidence (EGSE console) | Result | Feeds |
 |---|---|---|---|---|
 | 1 | Build, link and load on arduino:zephyr 0.90.0 | build sizes above; App started, no loader error | pass | the 0.90.0 fixes of the CHANGELOG (`__errno`, `_ZTH13z_tls_current`, `AppError`) |
-| 2 | Flight status reaches the EGSE with 64-octet rings | status box every 10 s from 23:12:48Z, `status age core 0-1 s` | pass | D-66, docs/20 V-30 |
+| 2 | Flight status reaches the EGSE with 64-octet rings | status box every 10 s from 23:12:48Z, `status age core 0-1 s` | pass | D-66, docs/20 V-68 |
 | 3 | Radio start-up check (configuration written and read back) | `FDIR 0x0000` (bit 0 RADIO_CFG clear in every box), `radio fault 0`, no AUX timeout | pass: both UART directions and the M0/M1/AUX wires work | docs/00 part 8.3 |
 | 4 | Beacon and duty cycle | `MODE SAFE`, `BEACON URGENT(3)`; `frames` 2 -> 19 in 101 s; `period` 6108-6116 ms, `busy` 1527-1529 ms, `duty` 24.9-25.0 %; no LOOP_OVERRUN | as designed; `busy` is 20.6 % above the busy-time model (1267 ms) | docs/20 V-19 |
 | 5 | CADU copies over the router (472 hex characters each) | `archived 19 CADUs {TM VC0: 8, TM VC7: 11}` = `frames` 19; `NOT FORWARDED ... CADUs 0` | pass on 0.90.0 | docs/20 V-22 |
@@ -617,5 +618,45 @@ logged it at the first re-probe, about 30 s after boot; this run reached SCLK 55
 | Result summary | |
 |---|---|
 | Open issues | V-19 model error 20.6 % at code 2; RF output not seen by a receiver; noise reading 12-18 dB higher in the second run, cause not known |
+| Signed (operator, date) | |
+
+### 2026-10-13-A - First downlink received by the ground station
+
+From the owner's App Lab console logs, terminal output and photos. The spacecraft ran as in
+record 2026-10-12-A (zip of commit `f71475e`, SAFE mode, beacon URGENT). No command was sent.
+
+| Field (SES) | Value |
+|---|---|
+| Session ID | 2026-10-13-A |
+| Date and UTC start / end | 2026-10-13; ground App starts 00:04:51Z, 00:35:10Z and 00:43:32Z; last status 00:44:12Z |
+| Operator(s) | project owner |
+| Site(s) and weather | indoor bench; not recorded |
+| Repository commit or release | ground: `dist/dssq-groundstation-ventunoq.zip` (contents unchanged since the Phase D packaging; station sketch 100324 octets flash, 40632 RAM, arduino:zephyr 1.0.0); spacecraft: `f71475e` |
+| Ground software version | `DSS-Q ground station 3.0.0 started (applab)` |
+| Spacecraft radio model and strap state | E22-400T33D, A0 open |
+| Ground radio | E22-400T33D (label V2.1; product info `00 22 40 21 0a 00 00`) plugged straight onto an **EBYTE E15-USB-T2 V1.2** (CP2102 USB-UART) in a VENTUNO Q USB-A port, `/dev/ttyUSB0`; supply jumper 5V; M0/M1 set by the adapter's jumper caps; no wires to D2/D3/D4 |
+| Callsigns | `N0CALL` at both ends (no licence yet; the ground did not transmit commands) |
+| Channel / rate code / power code | ch 23 = 433.125 MHz, rate code 2, power code 0 at both ends |
+| Framing and SDLS services | TM; SDLS NONE at both ends (no key files) |
+| Antennas | an antenna on each radio, on one bench (type, gain and distance not recorded) |
+| Attenuation | first link: none; then a push-button step attenuator set to 54 dB in line on one side (which side, and its power rating, not recorded) |
+| `rssi_cal_offset_db` in force | 0.0 (default) |
+| Instruments used | none: every value is the ground software's own reading |
+| Deviations from the procedure | no Radio Control Unit (`rcu = false` from the third start); ground radio powered from USB; antennas instead of the coax set of docs/00 part 11 |
+
+| # | Observation | Evidence | Result | Feeds |
+|---|---|---|---|---|
+| 1 | First start of the ground App (00:04Z) | `first start: default configuration copied to /app/data/station.toml`; `ERROR RADIO ground E22-400T33D did not answer the configuration read`; `LOS sync=SEARCH` | No radio: `rcu = true` switched D2/D3, which were not connected; the module's M0/M1 sat on the adapter's open jumper pairs, M0 = M1 = 1 = deep sleep (T33D manual 6.1), in which it does not answer | docs/14 section 2.2 |
+| 2 | The App opened the USB-UART | no `radio backend unavailable` event, the serial port open (`gds.py _open_e22`) | pass: `/dev/ttyUSB0` usable inside the App container | docs/20 V-31 (closed) |
+| 3 | E15-USB-T2 jumpers | EBYTE E51-TTL-500 datasheet v1.0, sections 3.6 and 5, which describe the E15-USB-T2 (CP2102): a fitted mode jumper = 0, a removed one = 1; a 3.3 V / 5 V supply jumper | The E22's configuration mode is M1 = 1, M0 = 0, i.e. one cap on the M0 pair only. Both caps removed is the E51's configuration mode but the E22's deep sleep | docs/00 section 9.2 |
+| 4 | One-time configuration (`python3 -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config .../station.toml`) | first try `no reply: is the module in CONFIG mode (M0 = 0, M1 = 1) and powered?`, second try, after the cap was moved, `written.`: ch 23, 433.125 MHz, 2.4k, uart 9600, sub-packet 240, `rssi_byte True`, `rssi_noise_enable True`, power code 0 (33.0 dBm, `power_verified False`) | pass; the pair whose cap gave `written.` is M0 | docs/00 section 9.2 |
+| 5 | Callsign | `TAN` would stop the App: `[station] callsign` needs 3-16 letters and digits, at least one of each (`dssq/config.py`) | `N0CALL` kept until a licence; only a WARN at start | docs/09 section 1.3, docs/14 |
+| 6 | First downlink, no attenuator (00:35Z start, both caps fitted, `rcu` still true) | `RX AOS` 6 s after start; 80 s: `frames=13 lost=0 RScorr=0`; `RSSI` alternating -1.0 / -256.0 dBm, `SNRest` 71 / -184 dB, `noise` -72 / -73 dBm; RED `beacon URGENT` (SAFE beacon, expected); still `did not answer the configuration read` | Frames, Reed-Solomon and telemetry decode: pass. RSSI at the end of its range: the receiver was overdriven (antennas too close) | docs/20 V-70 |
+| 7 | TDM warning | `WARN TDM station clock outside 2000..2100 (NTP not synchronised?): TDM records skipped (rx_power_dbm = -256.0 outside -200..60)` | The clock was right; the -256 dBm reading was rejected. The message now names the real cause (`gds.py _tdm_add`, test `test_tdm_rejection_names_the_field_not_the_clock`) | CHANGELOG |
+| 8 | Second downlink, 54 dB in line, `rcu = false` (00:43Z start) | no RADIO error; `RX AOS` 2 s after start; `RSSI` -39 / -40 dBm, `noise` -73 dBm, `SNRest` 33-34 dB; `frames` 2 -> 7, `lost=0`, `RScorr=0`; `sync` LOCK with occasional FLYWHEEL | pass. RSSI and noise uncalibrated (V-18): the -40 dBm is not yet a measured power | docs/20 V-18, V-70 |
+
+| Result summary | |
+|---|---|
+| Open issues | which side the attenuator was on and its power rating; RSSI calibration (T-RF-02) with a closed coax path; the uplink (needs a licence or a fully closed coax path, and a ground supply for transmitting, V-69) |
 | Signed (operator, date) | |
 

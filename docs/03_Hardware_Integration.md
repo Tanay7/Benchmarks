@@ -539,7 +539,23 @@ high-performance workloads", ABX00181 12.1). Sizing: section 6.5.
 
 ### 5.3 Ground radio
 
-#### 5.3.1 E22-400T33D (default): USB-UART adapter + Radio Control Unit
+#### 5.3.0 E22-400T33D on the EBYTE E15-USB-T2 (default, `[gds] rcu = false`)
+
+The setup the ground station runs with (D-68, record 2026-10-13-A): the E22 plugs straight onto
+EBYTE's USB test board **E15-USB-T2** (CP2102 USB-UART, 3.3 V / 5 V supply jumper), which plugs
+into a VENTUNO Q USB-A port (`/dev/ttyUSB0`, `[radio] port`). The adapter's jumper caps hold M0
+and M1: a fitted cap = 0, a removed cap = 1 (EBYTE E51-TTL-500 datasheet v1.0 sections 3.6 and 5,
+which describe this board). Normal operation: both caps fitted. One-time configuration: the M0
+cap only (M1 = 1, M0 = 0); both removed is the E22's deep sleep, which does not answer
+(T33D manual 6.1). Step by step: [00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) 9.2.
+
+| Item | Value | Note |
+|---|---|---|
+| Module supply | 5 V from the USB port through the adapter (supply jumper on 5V) | Enough to receive. Transmitting draws 1.0 A typical, 1.2 A maximum (T33D manual 2.2), more than a USB port is meant to supply: docs/20 V-69. For uplink use 5.3.1 with the module's own 5 V supply |
+| M0 / M1 | the adapter's jumper caps | No wires to D2/D3/D4; `[gds] rcu = false` |
+| Lost without the RCU | `RADIO`, `GSCAN`, `WAKE`, `LINKRATE`, `LINKCHAN` are refused | Channel or rate changes: repeat the one-time configuration with the new `station.toml` values |
+
+#### 5.3.1 E22-400T33D: USB-UART adapter + Radio Control Unit (option, `[gds] rcu = true`)
 
 The module's UART reaches Linux through a **3.3 V-logic USB-UART adapter**; the VENTUNO Q MCU
 drives M0/M1 and reads AUX (the "Radio Control Unit", RCU), so the ground data system can
@@ -559,8 +575,9 @@ Do not power the module from the adapter's VCC pin or a USB port: it draws up to
 transmitting (T33D manual 2.2).
 
 Until `setup()` drives M0/M1 LOW (NORMAL), the pull-ups hold the module in deep sleep
-(sketch.ino pin map comment). Without the RCU (`[gds] rcu = false` in station.toml) tie M0 and
-M1 to GND (normal mode; EBYTE: "if not used, it can be grounded").
+(sketch.ino pin map comment). Without the RCU (`[gds] rcu = false` in station.toml, the default)
+tie M0 and M1 to GND (normal mode; EBYTE: "if not used, it can be grounded"), as the E15-USB-T2's
+fitted caps do (5.3.0).
 
 **One-time configuration of the ground module** (the GDS verifies but never rewrites the full
 register set): the factory default has the RSSI byte and the ambient-noise register disabled
@@ -569,8 +586,8 @@ register set): the factory default has the RSSI byte and the ambient-noise regis
 the RCU, with the module in configuration mode (M1 = 3.3 V, M0 = GND):
 `python3 -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config <station.toml>`
 (run from `dssq-groundstation/python`; the step-by-step version is in
-[00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) part 9.2). At every start the GDS reads
-the configuration back and reports `ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k ... -
+[00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) parts 9.2 and 9.3). With the RCU, at every
+start the GDS reads the configuration back and reports `ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k ... -
 matches station.toml` or `MISMATCH [...]` (dssq/gds.py `_run_job`).
 
 #### 5.3.2 E22-400T37S on the E22-400TBH-02 board
