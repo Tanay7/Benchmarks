@@ -54,12 +54,23 @@ which the owner keeps; the defaults follow it.
   otherwise `a measurement outside the TDM limits` with the field (`dssq/gds.py _tdm_add`; new test
   `test_tdm_rejection_names_the_field_not_the_clock`).
 - docs/20: the 64-octet ring item added on 2026-10-12 reused the number V-30; it is V-68 now.
+- RECEIVER statistics: the `± SEM` column showed the received-power rows' SEM rounded to the
+  readings' resolution (with the E22 nearly always `0`), against the D-70 rule in docs/13 that
+  these means carry no SEM. It now shows `—` there; the snapshot keeps the value.
 
 ### Added
 - docs/21 record 2026-10-13-A (first downlink: the E15-USB-T2 jumpers, the one-time
   configuration, RSSI -1 / -256 dBm with both antennas on one bench, -39 / -40 dBm with 54 dB in
   line). docs/20: V-31 closed (the App container opens `/dev/ttyUSB0`); new V-69 (ground radio
   powered from USB, transmit current) and V-70 (the E22 RSSI byte at the end of its range).
+- docs/20: six open items found in the E22-400T33D manual v1.05 and JPL's *Deep Space
+  Communications* (Taylor, 2014): V-71 the module's over-the-air configuration (`CF CF`), V-72 a
+  module restart reloads its saved settings while the flight writes volatile ones, V-73 no
+  self-interference survey yet, L-39 command loss rewrites the radio only when the flight's
+  copy differs, L-45 overload RSSI readings (-256 dBm) enter the statistics, L-46 a link
+  budget without tolerances and rate advice judged on the downlink only. docs/08: tests
+  T-HW-12 (module restart), T-RF-11 (over-the-air configuration, read only) and T-RF-12
+  (self-interference survey). The fixes are planned, not made.
   docs/14: rows for the configuration-read error, `no reply` from the one-time configuration,
   the callsign refusal, the overdriven receiver, the empty spectrometer page in SAFE and the
   start-up EVRs not forwarded. docs/03 section 5.3.0; FAQ: the USB-UART adapter, the empty

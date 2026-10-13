@@ -851,7 +851,8 @@ a sample.
 
 Example (E22 at 2.4 kbit/s, CRUISE, 10-minute window), the full-precision values of the snapshot
 (`rx.windows`); the page shows the received-power rows at the readings' resolution (1.5), here
--112, 0, 3, -120, -116, -112, -108, -106, -113 and 8:
+-112, —, 3, -120, -116, -112, -108, -106, -113 and 8 (the ± SEM column shows "—" on these rows:
+the SEM lies below the resolution; the snapshot keeps it):
 
 | Metric | n | mean | ± SEM | σ | min | p10 | p50 | p90 | max | last | fade p90-p10 |
 |---|---|---|---|---|---|---|---|---|---|---|---|

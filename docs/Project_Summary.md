@@ -60,9 +60,10 @@ named test.
 > **First bench link, downlink only.** All automated verification passes. The flight App has run
 > on a UNO Q with its radio and the AS7265X, and the ground station received and decoded its
 > downlink on the bench (2026-10-12/13, [21_Test_Records.md](21_Test_Records.md) records 2026-10-12-A
-> and 2026-10-13-A); commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet. The 63 hardware and standards items (58 still open: power
+> and 2026-10-13-A); commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet. The 66 hardware and standards items (61 still open: power
 > ladders, the frequency-error sign, sensor timings, platform behaviour, the watchdog, on-air
-> identification, power draw, three standards checks; one closed by record 2026-10-13-A) are listed with their tests in
+> identification, power draw, the radio module's restart and over-the-air configuration,
+> self-interference, three standards checks; one closed by record 2026-10-13-A) are listed with their tests in
 > [20_Known_Limitations.md](20_Known_Limitations.md) and
 > [08_Verification_and_Test.md](08_Verification_and_Test.md); measured results will go into
 > [21_Test_Records.md](21_Test_Records.md).

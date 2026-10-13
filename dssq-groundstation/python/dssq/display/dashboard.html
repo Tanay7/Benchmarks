@@ -1254,7 +1254,8 @@ function renderReceiver() {
     for (const [w, wl] of WINDOWS) {
       const st = stat(w, k);
       const r = [wl + (st.truncated ? " (truncated)" : "")];
-      for (const s of STATS) r.push(s === "n" ? fint(st.n || 0) : !st.n ? NA : d === "R" || d === "D" ? fres(st[s], d === "R" ? "rssi" : "db") : fx(st[s], d));
+      // Received-power rows: no SEM, which lies below the readings' resolution (D-70).
+      for (const s of STATS) r.push(s === "n" ? fint(st.n || 0) : !st.n ? NA : d === "R" || d === "D" ? (s === "sem" ? NA : fres(st[s], d === "R" ? "rssi" : "db")) : fx(st[s], d));
       srows.push(r);
     }
   }
