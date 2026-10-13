@@ -164,6 +164,13 @@ HOST_TEST(spectral_saturation_and_agc) {
   CHECK(spec_saturation_mask(raw, 0x11, kSpecAllChannels & ~(1u << 5)) == (1u << 3),
         "saturation: raw >= full scale - 1 only, invalid channels ignored");
   CHECK(spec_peak(raw, ~(1u << 5) & kSpecAllChannels) == 18430, "peak over valid channels");
+  // D-69: a frame's saturation covers every channel of the devices read, valid or not (raw 5 =
+  // 65535 with an unusable calibrated value), and no channel of a device that was not read
+  // (its raw stays at the 0xFFFF placeholder).
+  CHECK(spec_frame_saturation(raw, 0x11, 0x7) == ((1u << 3) | (1u << 5)),
+        "frame saturation: channels of the devices read, valid or not");
+  CHECK(spec_frame_saturation(raw, 0x11, 0x3) == 0,
+        "frame saturation: AS72653 (A-F) not read -> none of its channels counts");
 
   SpecExposure nx;
   const SpecExposure c16{2, 59};

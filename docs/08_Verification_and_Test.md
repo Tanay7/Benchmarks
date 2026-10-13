@@ -25,7 +25,7 @@ telecommand (T-TM, T-TC) - 10 Instruments (T-SC) - 11 Fault protection (T-FD) - 
 
 | Layer | What it is | Size and result on the Phase D tree | Where it runs |
 |---|---|---|---|
-| 1 Host tests | The flight C++ (protocols, algorithms, radio tables) compiled for a PC and checked | **975 checks** in 90 groups, 0 failures (974 when the official CCSDS 121.0 test data is absent). Built twice: warnings as errors, and under AddressSanitizer + UBSan | PC, CI |
+| 1 Host tests | The flight C++ (protocols, algorithms, radio tables) compiled for a PC and checked | **977 checks** in 90 groups, 0 failures (976 when the official CCSDS 121.0 test data is absent). Built twice: warnings as errors, and under AddressSanitizer + UBSan | PC, CI |
 | 2 Ground tests | The ground data system and the spacecraft EGSE under pytest | **751 tests: 748 passed, 3 skipped** (optional reference files not on the bench), on Python 3.13 and 3.11 | PC, CI |
 | 3 Firmware type-check | `check_firmware.sh`: every Arduino file compiled against strict stand-ins of the board API, in every build option | **70 ok, 0 fail, 0 warn**, incl. 80 of 80 RadioLib units for each board and a negative control | PC, CI |
 | 4 Station sketch harness | The real VENTUNO Q station sketch built for a PC and run on real threads | **26 checks**, 0 failures (12 E22 + 7 SX1268 + 7 SX1262) | PC, CI (ASan + UBSan, TSan) |
@@ -68,11 +68,11 @@ prints one `ok:` line; any `FAIL` stops CI. The run also writes the **cross-chec
 | [test_integration.cpp](../tools/host_test/test_integration.cpp) | 16 | 177 | APID map; v3 packet layouts and lengths; telemetry vectors; TC header and command table; SSR export; downlink scheduler and load plan; the TC accept chain; ground-built TC round trip; CFDP relay and EVR gates; EGSE status texts (worst case 307 / 444 characters, under the 480 limit); integration streams for the ground; the RPC mailbox on real threads; packet length guards |
 | [test_radio.cpp](../tools/host_test/test_radio.cpp) | 14 | 115 | E22 rate / power tables, air time, register images, stream parser, TX tracker; SX126x profiles 0-7, air time, duty-cycled RX periods, frequency-offset limits; brown-out derating; the A0 strap mapping and its pin |
 | [test_rice.cpp](../tools/host_test/test_rice.cpp) | 5 | 23 | CCSDS 121.0-B-3 encoder: official CCSDS test vectors (SHA-256-pinned subset embedded; the **full official suite, 56 files, when `CCSDS121_TESTDATA` is set**), hand-derived cases, argument and worst-case bounds, corpus round trip |
-| [test_spectral.cpp](../tools/host_test/test_spectral.cpp) | 11 | 130 | AS7265X exposure table, saturation and AGC, HDR merge, lock-in, log encoding, light-source classifier, change detection, boresight, **LED current limits**, the virtual-register protocol, SPEC/SPECBURST packing |
+| [test_spectral.cpp](../tools/host_test/test_spectral.cpp) | 11 | 132 | AS7265X exposure table, saturation and AGC, HDR merge, lock-in, log encoding, light-source classifier, change detection, boresight, **LED current limits**, the virtual-register protocol, SPEC/SPECBURST packing |
 | [test_station_id.cpp](../tools/host_test/test_station_id.cpp) | 2 | 12 | The ground's plain-text station identification through the flight receive chain (E22 stream parser, `tc_accept()`): no CLTU, BCH / SDLS / FARM-1 state untouched, CLTUs before or after it in one burst still accepted |
 | [test_tx_duty.cpp](../tools/host_test/test_tx_duty.cpp) | 4 | 17 | RF `tx_duty` over whole transmission cycles (`TxDutyMeter`): never above the 50 % PA limit for any model, rate code and mode, also across a radio reconfiguration (with a no-hold negative control); SX126x SF12 without the window artefact of the replaced 60 s window (kept as a negative control); open cycle, silence, window, wrap |
 | [test_uslp.cpp](../tools/host_test/test_uslp.cpp) | 6 | 46 | USLP header fields, TM frames, security roll-back, CADU streams, USLP TC frames incl. truncated VCF count (732.1-B-2) |
-| **Total** | **90** | **975** | |
+| **Total** | **90** | **977** | |
 
 The same binary is built **twice**: once with `-Wall -Wextra -Wshadow -Werror` (no warning
 allowed), once with `-fsanitize=address,undefined -fno-sanitize-recover=undefined` (any memory

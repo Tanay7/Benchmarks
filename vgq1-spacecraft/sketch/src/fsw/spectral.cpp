@@ -212,6 +212,11 @@ uint32_t spec_saturation_mask(const uint16_t raw[kSpecChannels], uint8_t int_cyc
   return m;
 }
 
+uint32_t spec_frame_saturation(const uint16_t raw[kSpecChannels], uint8_t int_cycles,
+                               uint8_t dev_mask) {
+  return spec_saturation_mask(raw, int_cycles, spec_device_channels(dev_mask));
+}
+
 uint16_t spec_peak(const uint16_t raw[kSpecChannels], uint32_t valid) {
   uint16_t p = 0;
   for (uint8_t i = 0; i < kSpecChannels; ++i)

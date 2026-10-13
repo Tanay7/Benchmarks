@@ -109,6 +109,7 @@ hardware**; every such item is listed in [20_Known_Limitations.md](20_Known_Limi
 | [D-66](#d-66) | 64-octet Serial rings (arduino:zephyr before 1.0.0): a UART pump thread for the E22 port, long notifications into an empty ring | Software |
 | [D-67](#d-67) | I2C bus clear releases the lines with the MCU's weak pull-ups: an empty A4/A5 bus is not a stuck bus | Software |
 | [D-68](#d-68) | Ground radio by default on the EBYTE E15-USB-T2, `[gds] rcu = false`; the Radio Control Unit becomes the option | Hardware / software |
+| [D-69](#d-69) | Spectrometer saturation judged on the raw counts of every channel read, valid or not | Software |
 
 Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C review outcomes](#appendix-a---phase-c-review-outcomes),
 [Appendix B - Citation tags in code](#appendix-b---citation-tags-in-code),
@@ -910,6 +911,17 @@ written. Each belongs to the area named in the [Index](#index).
 | **Alternatives** | (recorded) Keep `rcu = true` as the default (every start of the owner's setup then reports `did not answer the configuration read`, and with the module in normal mode the read command goes out on air); wire the E15-USB-T2's jumper pins to D2/D3 (AUX is not on its headers; not verified). |
 | **Reason** | The owner's ground station uses the E15-USB-T2 and will keep it (2026-10-13). It received the spacecraft's downlink with `rcu = false` (record 2026-10-13-A). |
 | **Evidence** | Record 2026-10-13-A (docs/21); EBYTE E51-TTL-500 datasheet v1.0 sections 3.6 and 5 (the E15-USB-T2's mode and supply jumpers); `dssq/gds.py` (`attach_radio`: no RadioManager without an RCU, so no `VERIFY`). Open: transmitting from the USB supply (docs/20 V-69). |
+| **Status** | Current. |
+
+<a id="d-69"></a>
+### D-69 Spectrometer saturation judged on the raw counts of every channel read, valid or not
+
+| | |
+|---|---|
+| **Decision** | A frame's saturation mask covers every channel of the devices it read (`spec_frame_saturation()`, `fsw/spectral.cpp`; `As7265x::frame_done()`), not only the channels with a usable calibrated value. The AGC therefore steps the exposure down when any channel reaches full scale - 1, and the SPEC packet's `sat_mask` names it (the ground then shows its raw count as 65535 with the saturation mark). `spec_saturation_mask()` and the AGC peak are unchanged; HDR still needs a channel valid in every bracket frame. |
+| **Alternatives** | (recorded) Accept any calibrated float for a saturated channel (an unusable value would reach the ground as data); lower the AGC target (does not help when the overloaded channel is invisible to it). |
+| **Reason** | Record 2026-10-13-A: with a phone torch on the sensor and AGC on, channels at full scale came with an unusable calibrated value, were dropped as invalid, and the AGC, seeing only the valid channels (brightest 32 % of full scale), held 64x / 711.68 ms: B435, C460, E510, F535 (01:09Z) and R610 (01:24Z, 01:25Z) shown as "-" in every column, `no saturated channel`. At fixed 1x / 166.8 ms under the same torch all 18 channels were valid. |
+| **Evidence** | The SPEC raw code 0xFFFF on the wire for those channels while the other channels of the same device were read (`PH_READ` writes all six raw counts of a device; a failed read never reaches `frame_done`, `on_failure`); host test `spectral_saturation_and_agc` (2 new checks). The chip's calibrated output at saturation is not documented in the reference set: VERIFY with T-SC-08. |
 | **Status** | Current. |
 
 ---

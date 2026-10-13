@@ -218,7 +218,7 @@ Results on the current tree (details and commands: [docs/08](docs/08_Verificatio
 
 | Layer | Result |
 |---|---|
-| Host tests (flight C++ on a PC; `-Werror` and ASan + UBSan) | 975 checks, 0 failures |
+| Host tests (flight C++ on a PC; `-Werror` and ASan + UBSan) | 977 checks, 0 failures |
 | Ground tests (pytest, Python 3.11 and 3.13) | 751 tests: 748 passed, 3 skipped (optional reference files) |
 | Firmware type-check, every build option (`check_firmware.sh`) | 70 ok, 0 fail, 0 warn |
 | Station sketch harness (plain, ASan + UBSan, TSan) / RouterBridge harness | 26 / 12 checks pass; negative controls fail as intended |

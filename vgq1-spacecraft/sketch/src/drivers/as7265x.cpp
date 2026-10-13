@@ -1057,7 +1057,9 @@ void As7265x::begin_main(uint32_t now) {
 
 void As7265x::frame_done(uint32_t now) {
   if (frames_done_ < 255) ++frames_done_;
-  const uint32_t sat = spec_saturation_mask(cur_.raw, cur_.exp.int_cycles, cur_.valid);
+  // Every channel this frame read counts, valid or not (D-69): a frame that failed is never
+  // finished here (on_failure), so the raw counts of the devices read are the chip's.
+  const uint32_t sat = spec_frame_saturation(cur_.raw, cur_.exp.int_cycles, cycle_dev_);
   if (stage_ == STAGE_PROBE) {
     ++probes_;
     SpecExposure nx;

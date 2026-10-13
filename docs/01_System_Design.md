@@ -775,20 +775,20 @@ percentages below are of the `boards.txt` limits, not of the chip.
 
 | Build | Core | Flash (octets) | % of limit | Static RAM (octets) | % of limit |
 |---|---|---|---|---|---|
-| Flight, E22 (default) | main | 234392 | 29.8 % of 786432 | 128924 | 49.2 % of 262144 |
-| Flight, E22 (default) | rel100 | 233936 | 29.7 % | 128836 | 49.1 % |
-| Flight, E22 (default) | rel090 | 224756 | 28.6 % | 123925 | 47.3 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 326976 | 41.6 % | 169952 | 64.8 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 326532 | 41.5 % | 169864 | 64.8 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | rel090 | 317488 | 40.4 % | 163478 | 62.4 % |
+| Flight, E22 (default) | main | 234676 | 29.8 % of 786432 | 129020 | 49.2 % of 262144 |
+| Flight, E22 (default) | rel100 | 234220 | 29.8 % | 128932 | 49.2 % |
+| Flight, E22 (default) | rel090 | 225044 | 28.6 % | 124021 | 47.3 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 327260 | 41.6 % | 170048 | 64.9 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 326816 | 41.6 % | 169960 | 64.8 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel090 | 317772 | 40.4 % | 163574 | 62.4 % |
 | Station, E22 (default) | main | 100828 | 9.6 % of 1048576 | 40716 | 15.5 % of 262144 |
 | Station, E22 (default) | rel100 | 100324 | 9.6 % | 40632 | 15.5 % |
 | Station, SX1268 (`DSSQ_RADIO_SX126X = 1`) | main | 207692 | 19.8 % | 89216 | 34.0 % |
 
 Sources: the flight figures are the real builds after the changes for cores before 1.0.0
 (`src/libc_compat.cpp`, `RpcMailbox::current_thread()`, the UART pump of D-66, built on rel090
-only) and the AS7265X Qwiic option (0 warnings in project code). On rel100 these changes add
-1120 octets of flash and 424 of RAM to the Phase D fix round (232816 / 128412); on rel090 the
+only), the AS7265X Qwiic option, D-67 and D-69 (0 warnings in project code). On rel100 these
+changes add 1404 octets of flash and 520 of RAM to the Phase D fix round (232816 / 128412); on rel090 the
 pump's FIFOs (1536 octets) and thread object are part of the static RAM figure. The
 station sketch was not changed in that round: its figures are from the builds made for this
 document and the Phase D build log of [08_Verification_and_Test.md](08_Verification_and_Test.md)

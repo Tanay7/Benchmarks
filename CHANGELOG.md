@@ -33,6 +33,12 @@ which the owner keeps; the defaults follow it.
   and the sign of an overdriven receiver.
 
 ### Fixed
+- Spectrometer AGC blind to saturated channels (D-69): with a phone torch on the sensor, channels
+  at full scale arrived with an unusable calibrated value, were dropped as invalid, and the AGC,
+  judging saturation on the valid channels only, held 64x / 711.68 ms; the dashboard showed them
+  as `-` with `no saturated channel` (record 2026-10-13-A, observations 11 and 13). Saturation is
+  now judged on the raw counts of every channel read (`spec_frame_saturation()`,
+  `As7265x::frame_done()`); new host checks (977 in total).
 - The TDM warning named the station clock for every rejected record. On the bench an overdriven
   E22 gave RSSI -256 dBm with a correct clock and the console said `station clock outside
   2000..2100 (NTP not synchronised?)`. It now names the clock only when the time is out of range,

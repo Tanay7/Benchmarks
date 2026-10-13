@@ -91,6 +91,12 @@ uint8_t spec_hdr_bracket(const SpecExposure& center, uint8_t n,
 // Channels in `valid` whose raw count reached full scale - 1.
 uint32_t spec_saturation_mask(const uint16_t raw[kSpecChannels], uint8_t int_cycles,
                               uint32_t valid);
+// Saturation of one frame: every channel of the devices read (dev_mask), valid or not. A
+// channel at full scale can come with an unusable calibrated value and so be invalid; judged
+// on the valid channels only it was hidden from the AGC, which then kept the highest gain
+// (record 2026-10-13-A, D-69).
+uint32_t spec_frame_saturation(const uint16_t raw[kSpecChannels], uint8_t int_cycles,
+                               uint8_t dev_mask);
 uint16_t spec_peak(const uint16_t raw[kSpecChannels], uint32_t valid);
 static const float kSpecAgcLow = 0.25f;         // accept window [25 %, 75 %] of full scale
 static const float kSpecAgcHigh = 0.75f;
