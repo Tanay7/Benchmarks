@@ -45,6 +45,9 @@ Conventions:
 | [IDENT](#ident---station-identification-on-air) | plain-text identification of both transmitters | T-TC-07 (station identification on air) | `VGQ_CALLSIGN`, `[station] callsign`, [09_Regulatory_and_Safety.md](09_Regulatory_and_Safety.md) section 1.3 |
 | [WDG](#wdg---hardware-watchdog) | the flight MCU's hardware watchdog resets a hung loop | T-FD-09 (hardware watchdog) | closes docs/20 V-28 (L-38); not yet provoked on hardware: VERIFY |
 
+Completed records: [2026-10-12-A](#2026-10-12-a---first-bench-run-of-the-flight-app) (first bench run of the flight App, spacecraft only);
+[2026-10-13-A](#2026-10-13-a---first-downlink-received-by-the-ground-station) (first downlink received by the ground station).
+
 ---
 
 ## SES - Session header
@@ -556,3 +559,110 @@ Pass criteria:
 |---|---|
 | V-28 (L-38) closed? (yes / no, why) | |
 | Signed (operator, date) | |
+
+---
+
+## Completed records
+
+### 2026-10-12-A - First bench run of the flight App
+
+The spacecraft alone (no ground station), from the owner's App Lab console log and photos of the
+wiring. Not a complete run of any test in [08_Verification_and_Test.md](08_Verification_and_Test.md);
+it closes no item on its own, and adds the observations below to the items it names.
+
+| Field (SES) | Value |
+|---|---|
+| Session ID | 2026-10-12-A |
+| Date and UTC start / end | 2026-10-12; EGSE start 23:12:38Z, last status box 23:14:29Z (111 s of log) |
+| Operator(s) | project owner |
+| Site(s) and weather | indoor bench; not recorded |
+| Repository commit or release | `6cbe1a8`, `dist/vgq1-spacecraft-unoq.zip`; App Lab built it with arduino:zephyr 0.90.0 (64-octet Serial rings, D-66): 224756 octets flash (28 %), 123925 RAM (47 %) |
+| Flight software version | n/a: EVR 0x0001 was raised before the EGSE was listening (observation 7) |
+| Ground software version / station I/O firmware | n/a: no ground station |
+| Spacecraft radio model and strap state | E22-400T33D (status box `RADIO E22-400T33D(1)`); A0 open (photos) |
+| Ground radio model | n/a |
+| Callsigns | not recorded |
+| Channel / rate code / power code | spacecraft: ch 23 = 433.125 MHz, rate code 2, power code 0 (33 dBm); ground n/a |
+| Framing and SDLS services | TM; SDLS TC NONE, TM NONE |
+| Spacecraft power configuration | UNO Q from its USB-C socket (supply not recorded); E22 VCC from JANALOG pin 5 (5V), i.e. board-powered (docs/20 V-27); **no** 470-1000 uF / 100 nF at the E22, **no** 10 kOhm M0/M1 pull-ups |
+| Antennas and feeder loss | not recorded (an antenna or a 50 Ohm dummy load is required, docs/00 part 8.1) |
+| `rssi_cal_offset_db` in force | n/a |
+| Instruments used | none: every value below is the flight software's own telemetry in the EGSE console |
+| Deviations from the procedure | AS7265X on the Qwiic connector (D-13 revision), nothing on A4/A5; Nicla Sense ME and RM3100 not connected; E22 capacitors and M0/M1 pull-ups not fitted |
+
+Wiring (photos): E22 GND -> GND, VCC -> 5V, AUX -> D7, TXD -> header pin "SDA", RXD -> header pin
+"SCL", M1 -> D3, M0 -> D2, as in docs/00 part 8.3.
+
+| # | Observation | Evidence (EGSE console) | Result | Feeds |
+|---|---|---|---|---|
+| 1 | Build, link and load on arduino:zephyr 0.90.0 | build sizes above; App started, no loader error | pass | the 0.90.0 fixes of the CHANGELOG (`__errno`, `_ZTH13z_tls_current`, `AppError`) |
+| 2 | Flight status reaches the EGSE with 64-octet rings | status box every 10 s from 23:12:48Z, `status age core 0-1 s` | pass | D-66, docs/20 V-68 |
+| 3 | Radio start-up check (configuration written and read back) | `FDIR 0x0000` (bit 0 RADIO_CFG clear in every box), `radio fault 0`, no AUX timeout | pass: both UART directions and the M0/M1/AUX wires work | docs/00 part 8.3 |
+| 4 | Beacon and duty cycle | `MODE SAFE`, `BEACON URGENT(3)`; `frames` 2 -> 19 in 101 s; `period` 6108-6116 ms, `busy` 1527-1529 ms, `duty` 24.9-25.0 %; no LOOP_OVERRUN | as designed; `busy` is 20.6 % above the busy-time model (1267 ms) | docs/20 V-19 |
+| 5 | CADU copies over the router (472 hex characters each) | `archived 19 CADUs {TM VC0: 8, TM VC7: 11}` = `frames` 19; `NOT FORWARDED ... CADUs 0` | pass on 0.90.0 | docs/20 V-22 |
+| 6 | Board-powered radio, no bulk capacitor, code 0 at 25 % duty | SCLK 1/14 -> 1/115 s without a restart, no new boot | no reset in 111 s; supply voltage not measured | docs/20 V-27 |
+| 7 | Start-up EVRs | `8 EVRs not forwarded by the MCU since its boot (+8)` once at 23:12:39Z, constant afterwards; SCLK 14 s at 23:12:48Z puts the MCU boot about 4 s before the EGSE start | the start-up EVRs did not reach the console: raised before the EGSE was listening, and 8 of them refused by the MCU's own notification limits; they are in the downlink | docs/00 section 5.3 |
+| 8 | AS7265X on the Qwiic connector | `sensors 0x0080` (bit 7) | detected; its lamps not exercised (SAFE mode schedules no SPEC, docs/07 5.3.3), so only the board's red power LED was lit | D-13 revision |
+| 9 | Empty A4/A5 bus | `EVR 0x060A ERROR I2C bus clear: SDA or SCL still low after 9 clocks` at 23:13:05Z and 23:14:06Z (re-probes of the absent Nicla Sense ME / RM3100) | a false bus fault: no pull-up on an empty bus; fixed by D-67. Second run (below): no EVR 0x060A | D-67 |
+| 10 | Spacecraft radio noise reading | `noise` -70 to -75 dBm; -57 to -58 dBm in the second run | recorded only: absolute values are uncalibrated (T-RF-02); what changed between the runs was not recorded | docs/13 |
+| 11 | Transient flags after boot | `FDIR 0x0100` (bit 8 VC_CONGEST, VC0 579 octets) in the first box only | cleared by the second box: the start-up packets queued faster than one frame per 6 s drains them | - |
+
+Second run, the same evening (App re-imported from the zip of commit `f71475e`, D-67; hardware
+unchanged as far as recorded): EGSE start 23:49:34Z, last status box 23:50:24Z (50 s of log).
+Same build sizes; `RADIO E22-400T33D(1)`, `FDIR 0x0000` from the second box (0x0100 VC_CONGEST in
+the first, as before), `sensors 0x0080`, `busy 1528 ms`, `period 6112 ms`, `duty 25.0 %`, `frames`
+2 -> 9, CADUs archived 8, `CADUs 0` not forwarded, no restart. **No EVR 0x060A** (the first run
+logged it at the first re-probe, about 30 s after boot; this run reached SCLK 55 s without it), and
+`7 EVRs not forwarded` instead of 8. `noise` -57 to -58 dBm.
+
+| Result summary | |
+|---|---|
+| Open issues | V-19 model error 20.6 % at code 2; RF output not seen by a receiver; noise reading 12-18 dB higher in the second run, cause not known |
+| Signed (operator, date) | |
+
+### 2026-10-13-A - First downlink received by the ground station
+
+From the owner's App Lab console logs, terminal output and photos. The spacecraft ran as in
+record 2026-10-12-A (zip of commit `f71475e`, SAFE mode, beacon URGENT). No command was sent by
+radio; one went by hardline (observation 10).
+
+| Field (SES) | Value |
+|---|---|
+| Session ID | 2026-10-13-A |
+| Date and UTC start / end | 2026-10-13; ground App starts 00:04:51Z, 00:35:10Z and 00:43:32Z; last status 00:44:12Z |
+| Operator(s) | project owner |
+| Site(s) and weather | indoor bench; not recorded |
+| Repository commit or release | ground: `dist/dssq-groundstation-ventunoq.zip` (contents unchanged since the Phase D packaging; station sketch 100324 octets flash, 40632 RAM, arduino:zephyr 1.0.0); spacecraft: `f71475e` |
+| Ground software version | `DSS-Q ground station 3.0.0 started (applab)` |
+| Spacecraft radio model and strap state | E22-400T33D, A0 open |
+| Ground radio | E22-400T33D (label V2.1; product info `00 22 40 21 0a 00 00`) plugged straight onto an **EBYTE E15-USB-T2 V1.2** (CP2102 USB-UART) in a VENTUNO Q USB-A port, `/dev/ttyUSB0`; supply jumper 5V; M0/M1 set by the adapter's jumper caps; no wires to D2/D3/D4 |
+| Callsigns | `N0CALL` at both ends (no licence yet; the ground did not transmit commands) |
+| Channel / rate code / power code | ch 23 = 433.125 MHz, rate code 2, power code 0 at both ends |
+| Framing and SDLS services | TM; SDLS NONE at both ends (no key files) |
+| Antennas | an antenna on each radio, on one bench (type, gain and distance not recorded) |
+| Attenuation | first link: none; then a push-button step attenuator set to 54 dB in line on one side (which side, and its power rating, not recorded) |
+| `rssi_cal_offset_db` in force | 0.0 (default) |
+| Instruments used | none: every value is the ground software's own reading |
+| Deviations from the procedure | no Radio Control Unit (`rcu = false` from the third start); ground radio powered from USB; antennas instead of the coax set of docs/00 part 11 |
+
+| # | Observation | Evidence | Result | Feeds |
+|---|---|---|---|---|
+| 1 | First start of the ground App (00:04Z) | `first start: default configuration copied to /app/data/station.toml`; `ERROR RADIO ground E22-400T33D did not answer the configuration read`; `LOS sync=SEARCH` | No radio: `rcu = true` switched D2/D3, which were not connected; the module's M0/M1 sat on the adapter's open jumper pairs, M0 = M1 = 1 = deep sleep (T33D manual 6.1), in which it does not answer | docs/14 section 2.2 |
+| 2 | The App opened the USB-UART | no `radio backend unavailable` event, the serial port open (`gds.py _open_e22`) | pass: `/dev/ttyUSB0` usable inside the App container | docs/20 V-31 (closed) |
+| 3 | E15-USB-T2 jumpers | EBYTE E51-TTL-500 datasheet v1.0, sections 3.6 and 5, which describe the E15-USB-T2 (CP2102): a fitted mode jumper = 0, a removed one = 1; a 3.3 V / 5 V supply jumper | The E22's configuration mode is M1 = 1, M0 = 0, i.e. one cap on the M0 pair only. Both caps removed is the E51's configuration mode but the E22's deep sleep | docs/00 section 9.2 |
+| 4 | One-time configuration (`python3 -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config .../station.toml`) | first try `no reply: is the module in CONFIG mode (M0 = 0, M1 = 1) and powered?`, second try, after the cap was moved, `written.`: ch 23, 433.125 MHz, 2.4k, uart 9600, sub-packet 240, `rssi_byte True`, `rssi_noise_enable True`, power code 0 (33.0 dBm, `power_verified False`) | pass; the pair whose cap gave `written.` is M0 | docs/00 section 9.2 |
+| 5 | Callsign | `TAN` would stop the App: `[station] callsign` needs 3-16 letters and digits, at least one of each (`dssq/config.py`) | `N0CALL` kept until a licence; only a WARN at start | docs/09 section 1.3, docs/14 |
+| 6 | First downlink, no attenuator (00:35Z start, both caps fitted, `rcu` still true) | `RX AOS` 6 s after start; 80 s: `frames=13 lost=0 RScorr=0`; `RSSI` alternating -1.0 / -256.0 dBm, `SNRest` 71 / -184 dB, `noise` -72 / -73 dBm; RED `beacon URGENT` (SAFE beacon, expected); still `did not answer the configuration read` | Frames, Reed-Solomon and telemetry decode: pass. RSSI at the end of its range: the receiver was overdriven (antennas too close) | docs/20 V-70 |
+| 7 | TDM warning | `WARN TDM station clock outside 2000..2100 (NTP not synchronised?): TDM records skipped (rx_power_dbm = -256.0 outside -200..60)` | The clock was right; the -256 dBm reading was rejected. The message now names the real cause (`gds.py _tdm_add`, test `test_tdm_rejection_names_the_field_not_the_clock`) | CHANGELOG |
+| 8 | Second downlink, 54 dB in line, `rcu = false` (00:43Z start) | no RADIO error; `RX AOS` 2 s after start; `RSSI` -39 / -40 dBm, `noise` -73 dBm, `SNRest` 33-34 dB; `frames` 2 -> 7, `lost=0`, `RScorr=0`; `sync` LOCK with occasional FLYWHEEL | pass. RSSI and noise uncalibrated (V-18): the -40 dBm is not yet a measured power | docs/20 V-18, V-70 |
+| 9 | Spacecraft receiver with the attenuator fitted | EGSE `noise` -91 to -93 dBm from 01:03Z (-57 to -75 dBm before) | Consistent with the attenuator on the spacecraft side (its receiver then hears the room 54 dB weaker); side and rating still to be confirmed | docs/20 V-18 |
+| 10 | First hardline command (no RF from the ground) | VENTUNO Q: `python3 -m dssq.cltu "PKTRATE SPEC 30" --app-data ../data` -> `EB9020A7...C579` (34-octet CLTU, unprotected). UNO Q: the hex inside `< >` failed (`syntax error near unexpected token '>>'`); without them it was queued. 01:04:10Z `hardline CLTU 34 octets -> flight command path`; 01:04:25Z `CMD acc 1 rej 0`, `VC1 141 B`, archived `TM VC1: 1`; 01:04:43Z `EVR 0x0701 spectral event: angle 5.28 deg (threshold 5.00)` | pass: the hardline path and the command acceptance chain work; SPEC packets every 30 s in SAFE | docs/07 section 2.6 |
+| 11 | First spectrum at the ground (dashboard SPECTROMETER, 01:09:43Z) | `Spectrum available / valid yes / yes`, SURVEY, flags `0x11 valid agc`, gain 64x (AGC), integration 711.68 ms (N = 255), lamps none (passive), die temperatures 22 / 20 / 22 C; header RSSI(1 m) -39.2000 +/- 0.3266 dBm, SNR 32.00 dB est., 260 frames, lost 0 | Spectrum received and decoded end to end. **Open:** of the AS72653 channels only A410 and D485 carry data (D485 the strongest of all, about 8500 counts); B435, C460, E510 and F535 have no value, which no broadband light explains. Cause not yet known (light source, the chip, or the flight / ground channel handling) | to be investigated |
+| 12 | Dashboard after App Lab was switched to the UNO Q | the page stopped updating | The ground App had stopped with the App Lab session; restarted with **Run**. **Run at startup** on both boards avoids it | docs/14 section 2.2 |
+| 13 | The four empty AS72653 channels of observation 11, by hardline `SPECCFG` (phone torch on the sensor) | `SPECCFG 0 59 0 0 0` (1x, 166.8 ms): 01:18:42Z without light every channel 0, `DARK 100 %`; 01:21:12Z with the torch all 18 valid (raw A 2 ... S680 981, F535 311, R610 255). `SPECCFG AUTO 59 0 0 0`: 01:24:44Z and 01:25:45Z 64x / 711.68 ms, R610 `-` in every column, brightest valid channel S680 20 948 (32 %), `no saturated channel` | Channels at full scale arrived invalid and were hidden from the AGC, which kept the highest gain. Fixed by D-69 (to be confirmed on the board). The spiky shape is the torch lighting the three chips unequally, not its spectrum | D-69 |
+
+| Result summary | |
+|---|---|
+| Open issues | which side the attenuator was on and its power rating; the saturation fix D-69 to confirm on the board (observations 11, 13); RSSI calibration (T-RF-02) with a closed coax path; the RF uplink (needs a licence or a fully closed coax path, and a ground supply for transmitting, V-69) |
+| Signed (operator, date) | |
+

@@ -244,8 +244,9 @@ each kind of value uses.
 
 | Kind of value | Shown as | Example | Rule (dashboard.html) |
 |---|---|---|---|
-| dB and dBm statistics (window means, SEM, percentiles) | 4 decimals | -111.9213 dBm | `fx(v, 4)` |
-| single readings (RSSI, noise, margin) | 4 decimals plus the hardware resolution | -113.0000 dBm (resolution 1.0 dB) | `fu(v, 4)` |
+| measured received power and what is derived from it (RSSI, noise floor, SNR est., margin est., signal power est., N0, C/N0, Eb/N0, measured path loss): single readings and window statistics alike | at the readings' resolution, never finer (D-70): whole dB with the E22; with the SX126x RSSI in 0.5 dB steps, the rest in 0.1 dB; means are shown without "± SEM" | -39 dBm (E22), -113.5 dBm (SX126x) | `fres(v, kind)` |
+| SX126x measured SNR (SnrPkt/4) | 2 decimals (0.25 dB steps) | 6.25 dB | `fx(v, 2)` |
+| computed link-budget figures (the "design" column) | 4 decimals | -110.4321 dBm | `fx(v, 4)` |
 | frequencies, frequency errors, Doppler | 1 decimal, Hz | 433125000.0 Hz, 469.0 Hz | `fu(v, 1, "Hz")` |
 | frequency in MHz | 6 decimals | 433.125000 MHz | RF now |
 | range rate | 3 decimals, m/s | -1161.447 m/s | Doppler panel |
@@ -268,7 +269,7 @@ each kind of value uses.
 
 | Reading | Resolution | Source |
 |---|---|---|
-| E22 packet RSSI and noise register | 1 dB | E22 manuals: dBm = -(256 - register); `rxstats.E22_RSSI_RESOLUTION_DB` |
+| E22 packet RSSI and noise register | 1 dB | E22-400T33D manual v1.05 REG1 bit 5 (registers 0x00 noise, 0x01 last packet) and REG3 bit 7 (the appended RSSI octet): one whole octet, dBm = -(256 - octet); the manual states no finer step and no accuracy (V-18). The SX1262's own 0.5 dB register is not passed through. `rxstats.E22_RSSI_RESOLUTION_DB` |
 | SX126x packet RSSI | 0.5 dB | SX1261/2 datasheet GetPacketStatus: RssiPkt / 2; `rxstats.SX126X_RSSI_RESOLUTION_DB` |
 | SX126x packet SNR | 0.25 dB | SnrPkt / 4 |
 | SX126x noise floor | 0.1 dB | median of 8 instantaneous RSSI samples, sent in 0.1 dBm (`rf_noise`) |
@@ -320,13 +321,15 @@ sorted -114, -113, -112, -111, -110: p10 at k = 0.4 gives -114 + 0.4 x 1 = -113.
 p50 = -112.0000, p90 at k = 3.6 gives -111 + 0.6 x 1 = -110.4000; fade depth = 3.2000 dB;
 last = -114.0000.
 
-**Why four decimals?** A single E22 RSSI reading is a whole dB, so four decimals are not a
-claim of accuracy. They are there so that window means can be compared with each other and
-with their SEM: a 10-minute mean of 178 one-dB readings, -111.9213 ± 0.2144 dBm, is known to
-about ±0.43 dB (two SEM) relative to other readings of the same radio, and rounding it to
--112 would hide changes of a few tenths of a dB between windows or passes. The absolute
-accuracy is a separate matter: it is limited by the calibration offset (T-RF-02), not by
-the decimals.
+**Why the readings' resolution?** (D-70, on the owner's request after the first bench link.)
+The E22 reports received power and its noise register in whole dB, so the page shows no
+digit finer than that: a 1-minute mean of -39.2 dBm is shown as -39 dBm, and its SEM, below the
+resolution, is not shown at all. The statistics are still computed at full precision: the
+snapshot (`rx.windows`), the RECEIVER statistics' source data, the CSV exports and the data
+logger keep every digit, for anyone who wants to compare window means more finely. The
+absolute accuracy is a separate matter again: it is limited by the calibration offset
+(T-RF-02), not by the resolution. The worked example above shows the full-precision values;
+the page shows them as -112, 1, 2, 1, -114, -114, -112, -110, -110, 3 and -114 dB(m).
 
 **How to read SEM.** Two means differ significantly when their difference is larger than
 about 2√(SEM1² + SEM2²). SEM assumes independent readings; slow fading makes neighbouring
@@ -419,9 +422,9 @@ by `renderHeader()` from `/api/state`.
 | ALARM pill | `alarm`, tooltip `alarm_reasons` | green NONE, amber YELLOW, red RED | the station alarm ([section 15](#15-alarm-logic)); hover to read every reason |
 | MODE | `decoded.mode` | text | the **spacecraft** flight-software mode from HK `fsw_mode`: BOOT, SAFE, CRUISE, ENCOUNTER, TEST. (The GDS run mode is at the right end.) |
 | UTC | `utc` | ISO 8601 | the station clock when the snapshot was built; check it against a reference clock: SCET, TDM and latency depend on it (NTP) |
-| RSSI 1-min mean | `rx.windows.1m.rssi.mean`, `.sem` | "-110.6923 ± 0.4985 dBm", 4 decimals | mean packet RSSI of the last minute with its standard error ([1.6](#16-the-statistics-windows-explained)) |
-| SNR | `rx.rf.packet.snr_db`, else `rx.rf.snr_est_db` | SX126x: measured SNR, 2 decimals, "dB"; E22: "dB est." (RSSI - noise); **—** during LOS | the newest frame's signal-to-noise ratio; during LOS the last value is history, not the link, so it is hidden here (the RECEIVER tab keeps it with its time) |
-| MARGIN | `rx.rf.margin_est_db` | 2 decimals, dB; **—** during LOS | newest RSSI minus the receiver sensitivity ([4.2](#42-rf-now)) |
+| RSSI | `rx.rf.rssi_dbm` | "-111 dBm", at the readings' resolution (1.5); **—** during LOS | the newest frame's calibrated packet RSSI as the radio reported it (D-70; the window means are on the RECEIVER tab) ([1.6](#16-the-statistics-windows-explained)) |
+| SNR | `rx.rf.packet.snr_db`, else `rx.rf.snr_est_db` | SX126x: measured SNR, 2 decimals, "dB"; E22: "dB est." (RSSI - noise), whole dB; **—** during LOS | the newest frame's signal-to-noise ratio; during LOS the last value is history, not the link, so it is hidden here (the RECEIVER tab keeps it with its time) |
+| MARGIN | `rx.rf.margin_est_db` | dB at the readings' resolution (1.5); **—** during LOS | newest RSSI minus the receiver sensitivity ([4.2](#42-rf-now)) |
 | FER | `rx.frames.fer` | scientific | frame error rate since the GDS started ([4.11](#411-frames)) |
 | FRAMES | `rx.frames.ok`, `rx.frames.lost` | "344 / lost 15" | frames received and frames missing (master-channel counter gaps) |
 | SCLK | `time.partition`, `time.sclk_estimate_s` | "1/1224" | spacecraft clock: partition (boot counter) / estimated SCLK seconds now ([5.8](#58-time-correlation)) |
@@ -479,9 +482,9 @@ green, the other tabs can wait.
 | Tile | Big value (key) | Small line | Colour | Meaning; if abnormal |
 |---|---|---|---|---|
 | Signal | AOS / LOS (`rx.state.los`) | "pass 4m 11s" (`rx.state.pass_duration_s`) or "since frame 2m 5s" (`rx.state.since_last_frame_s`) | green AOS, red LOS | are frames arriving; LOS: [17](#17-reading-the-receiver-tab-during-a-range-test) step 1 |
-| RSSI 1-min mean | `rx.windows.1m.rssi.mean`, 4 dp | "± SEM dBm (n=...)"; tooltip: last RSSI and its resolution | - | signal strength, averaged ([4.2](#42-rf-now)) |
-| SNR est. 1-min | `rx.windows.1m.snr_est.mean`, 4 dp | "dB ± SEM", plus "meas x.xx" with an SX126x (`rx.rf.packet.snr_db`) | - | RSSI minus noise floor, averaged |
-| Margin est. | `rx.rf.margin_est_db`, 2 dp | "dB vs <sensitivity> dBm (<source>)"; during LOS "LOS · last x dB, t ago" | red < 3 dB, amber 3-6 dB, green >= 6 dB | how far above the decode threshold the newest frame was; below 3 dB frames start to drop |
+| RSSI | `rx.rf.rssi_dbm`, at the readings' resolution; **—** during LOS | "dBm, newest frame"; tooltip: its resolution | - | signal strength, averaged ([4.2](#42-rf-now)) |
+| SNR est. | `rx.rf.snr_est_db`, at the readings' resolution; **—** during LOS | "dB, newest frame", plus "meas x.xx" with an SX126x (`rx.rf.packet.snr_db`) | - | RSSI minus noise floor, averaged |
+| Margin est. | `rx.rf.margin_est_db`, at the readings' resolution | "dB vs <sensitivity> dBm (<source>)"; during LOS "LOS · last x dB, t ago" | red < 3 dB, amber 3-6 dB, green >= 6 dB | how far above the decode threshold the newest frame was; below 3 dB frames start to drop |
 | Frames | `rx.frames.ok` | "lost n · FER x" | - | frames received, lost, frame error rate |
 | Throughput | `rx.frames.info_rate_bps`, 1 dp | "bit/s info · n frames/min" | - | useful telemetry bits per second over the last 60 s ([4.11](#411-frames)) |
 | RS decoder | `rx.decoder.symbols_corrected` | "sym corrected · uncorrectable n" | amber when any codeblock was uncorrectable | how hard the error correction works ([4.10](#410-decoder)) |
@@ -608,7 +611,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Packet RSSI, last (calibrated)" and "Packet RSSI, last (raw)", each followed by "(resolution x dB)" |
 | Keys | `rx.rf.rssi_dbm` (calibrated), `rx.rf.rssi_raw_dbm` (raw); the same value is `rx.rf.packet.rssi_dbm` |
-| Unit, display | dBm, 4 decimals; resolution 1 dB (E22), 0.5 dB (SX126x) |
+| Unit, display | dBm at the resolution: whole dB (E22), 0.5 dB steps (SX126x) |
 | Source | E22: the RSSI octet the module appends to each received packet (REG3 bit 7, `[radio] rssi_byte = true`), dBm = -(256 - octet) (`framesync._emit`). SX126x: RssiPkt / 2 from GetPacketStatus, sent by the station MCU in 0.1 dBm in `rf_rx` |
 | Formula | RSSI_cal = RSSI_raw + C, with C = `[radio] rssi_cal_offset_db` (shown below) |
 | Updates | every received radio unit, also ones that later fail RS, the frame check or the LoRa CRC |
@@ -652,7 +655,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Noise floor (calibrated)", "Noise source", "Noise reading age" |
 | Keys | `rx.rf.noise_dbm`, `rx.rf.noise_source`, `rx.rf.noise_age_s` |
-| Unit, display | dBm 4 decimals; text; s 1 decimal |
+| Unit, display | dBm at the resolution (whole dB with the E22, 0.1 dB with the SX126x); text; s 1 decimal |
 | Source | E22: the ambient-noise register, read with the query C0 C1 C2 C3 (reply C1 00 02 <noise> <last RSSI>), dBm = -(256 - octet); needs `[radio] rssi_noise = true`. SX126x: the station MCU's `rf_noise` RPC, the median of 8 instantaneous RSSI samples (GetRssiInst) in 0.1 dBm. Source text: "E22 noise register" or "SX126x GetRssiInst median of 8" |
 | Formula | noise_cal = noise_raw + C (the same calibration offset as the RSSI) |
 | Updates | one reading at most every `[radio] noise_poll_s` (default 20 s, minimum 5 s), requested in the quiet window after a received frame when no command is waiting. No frames, no new noise readings: the age grows during LOS |
@@ -668,7 +671,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "SNR est. (RSSI − noise)" |
 | Key | `rx.rf.snr_est_db` |
-| Unit, display | dB, 4 decimals |
+| Unit, display | dB at the readings' resolution (1.5) |
 | Formula | SNR_est = RSSI_cal - noise_cal, shown only when the noise reading belongs to the same pass as the RSSI: their times differ by no more than the LOS timeout (90 s before the first housekeeping tick); otherwise "—" (an RSSI minus a noise reading taken hours later was never an SNR) |
 | Updates | every reception (with the newest noise reading) |
 | This hardware | E22: the only SNR there is. LoRa demodulates below the noise, so SNR est. goes negative near the limit: at the datasheet sensitivity of -128 dBm with a floor near -118 dBm it would read about -10 dB. SX126x: compare with the measured SNR, which is the better number |
@@ -683,7 +686,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Signal power est. (noise removed)" |
 | Key | `rx.rf.pr_est_dbm` |
-| Unit, display | dBm, 4 decimals |
+| Unit, display | dBm at the readings' resolution (1.5) |
 | Formula | P_r = 10 log10(10^(RSSI_cal/10) - 10^(noise_cal/10)): the RSSI includes the noise power in the bandwidth, so the noise is subtracted on a linear scale. "—" when RSSI <= noise (the difference is not positive) or a value is missing |
 | Updates | every reception |
 | This hardware | equals RSSI within 0.1 dB when the RSSI is 15 dB or more above the noise; undefined for LoRa packets received below the noise floor |
@@ -697,7 +700,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "N₀ est.", "Noise bandwidth", "Noise-bandwidth basis" |
 | Keys | `rx.rf.n0_est_dbm_hz`, `rx.rf.noise_bw_hz`, `rx.rf.noise_bw_source` |
-| Unit, display | dBm/Hz 4 decimals; Hz 1 decimal; text |
+| Unit, display | dBm/Hz at the readings' resolution (1.5); Hz 1 decimal; text |
 | Formula | N0 = noise_cal - 10 log10(B). B = the LoRa profile bandwidth for the SX126x (basis "profile BW"); `[radio] noise_bw_hz` (default 125000 Hz) for the E22 (basis "assumed": EBYTE does not publish the bandwidth behind each air rate) |
 | Updates | with the noise reading; B with the configuration |
 | This hardware | thermal limit -174 dBm/Hz plus the receiver noise figure: about -168 dBm/Hz for a 6 dB noise figure |
@@ -711,7 +714,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "C/N₀ est.", "C/N₀ basis" |
 | Keys | `rx.rf.cn0_est_dbhz`, `rx.rf.cn0_source` |
-| Unit, display | dB-Hz, 4 decimals; text |
+| Unit, display | dB-Hz at the readings' resolution (1.5); text |
 | Formula | SX126x: C/N0 = SNR_meas + 10 log10(B) (basis "measured SNR + 10 log10(profile BW)"); E22: C/N0 = P_r - N0 (basis "estimate: (RSSI - noise) / assumed noise bandwidth") |
 | Updates | every reception |
 | This hardware | the LoRa demodulator limit SNRmin (Semtech, `LORA_SNR_MIN_DB`) corresponds to C/N0 = SNRmin + 10 log10(B): 25.0 dB-Hz (profile 0), 28.0 (1), 31.0 (2), 33.5 (3), 36.0 (4), 38.5 (5), 41.0 (6), 43.5 dB-Hz (7). More than 6 dB above that is comfortable, 3 to 6 dB marginal, less than 3 dB poor (the dashboard's margin bands). For the E22 there is no published threshold: use the link margin |
@@ -726,7 +729,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Eᵦ/N₀ est." |
 | Key | `rx.rf.ebn0_est_db` |
-| Unit, display | dB, 4 decimals |
+| Unit, display | dB at the readings' resolution (1.5) |
 | Formula | Eb/N0 = C/N0 - 10 log10(Rb), Rb = the air data rate above (nominal LoRa bit rate for the SX126x) |
 | Updates | every reception |
 | This hardware | at the LoRa demodulator limit every profile needs about 6.0 to 6.3 dB (SNRmin + 10 log10(B) - 10 log10(Rb)); SF12 profiles 6.30 dB |
@@ -755,7 +758,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Link margin est. (RSSI − sensitivity)"; also the header MARGIN, the OVERVIEW tile and the link budget "= Link margin" (measured) |
 | Key | `rx.rf.margin_est_db` |
-| Unit, display | dB, 4 decimals (2 in the header and tile) |
+| Unit, display | dB at the readings' resolution (1.5) |
 | Formula | M = RSSI_cal - S |
 | Updates | every reception |
 | This hardware | colour bands (dashboard.html): green >= 6 dB, amber 3 to 6 dB, red < 3 dB. The link manager aims for `[linkmgr] target_margin_db` = 6 dB on the 10th-percentile margin of the last 10 minutes ([4.16](#416-link-manager-and-pass-events)) |
@@ -770,7 +773,7 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Required SNR (LoRa SNRmin of the SF)", "SNR margin (measured − required)" |
 | Keys | `rx.rf.required_snr_db`, `rx.rf.snr_margin_db` |
-| Unit, display | dB, 2 and 4 decimals; "—" for the E22 |
+| Unit, display | dB, 2 decimals; "—" for the E22 |
 | Formula | required = SNRmin(SF): SF7 -7.5, SF8 -10, SF9 -12.5, SF10 -15, SF11 -17.5, SF12 -20 dB (Semtech, `LORA_SNR_MIN_DB`); SNR margin = SNR_meas - required |
 | Updates | every SX126x packet |
 | This hardware | a direct demodulator margin, independent of any RSSI calibration. Read it with the same bands as the link margin (>= 6 dB good, 3 to 6 marginal, < 3 poor). The AFC trusts a packet's frequency error only when SNR >= SNRmin + 3 dB |
@@ -812,8 +815,8 @@ checks in [4.6](#46-radio-configuration).
 
 | Shown as | Key | Unit, display | Meaning |
 |---|---|---|---|
-| RSSI | `rx.rf.packet.rssi_dbm` | dBm, 4 decimals | the newest reception's calibrated RSSI |
-| SNR (SnrPkt/4) | `rx.rf.packet.snr_db` | dB, 4 decimals | SX126x measured SNR (0.25 dB steps); "—" for the E22 |
+| RSSI | `rx.rf.packet.rssi_dbm` | dBm at the resolution (1.5) | the newest reception's calibrated RSSI |
+| SNR (SnrPkt/4) | `rx.rf.packet.snr_db` | dB, 2 decimals | SX126x measured SNR (0.25 dB steps); "—" for the E22 |
 | Frequency error (raw) | `rx.rf.packet.freq_err_hz` | Hz, 1 decimal | SX126x LoRa frequency-error estimate, before calibration and AFC sign (`rf_rx` freq_err_hz) |
 | CRC | `rx.rf.packet.crc_ok` | ok / FAILED (amber) | the LoRa payload CRC (E22 receptions are "ok") |
 | Time | `rx.rf.packet.t` | ISO 8601 | when the reception reached the GDS (ERT) |
@@ -846,7 +849,10 @@ a sample.
 | RS symbols corrected / codeblock (sym) | `rs` | symbols, 4 | every correctable codeblock: 0..16 | 0 at good SNR; a mean rising toward 16 means the decoder is near its limit (E = 16 per codeword) |
 | ASM bit errors / frame (bit) | `asm` | bits, 4 | every codeblock: 0..4 | bit errors in the 32-bit sync marker, which RS does not protect; accepted up to 2 while searching and 4 in lock |
 
-Example (E22 at 2.4 kbit/s, CRUISE, 10-minute window):
+Example (E22 at 2.4 kbit/s, CRUISE, 10-minute window), the full-precision values of the snapshot
+(`rx.windows`); the page shows the received-power rows at the readings' resolution (1.5), here
+-112, —, 3, -120, -116, -112, -108, -106, -113 and 8 (the ± SEM column shows "—" on these rows:
+the SEM lies below the resolution; the snapshot keeps it):
 
 | Metric | n | mean | ± SEM | σ | min | p10 | p50 | p90 | max | last | fade p90-p10 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -908,9 +914,9 @@ receiver sensitivity, N noise floor, RSSI the measured received power.
 | path loss 10-min mean | - | `rx.budget.measured_path_loss_mean10m_db` | EIRP + G_r - L_r - (10-minute RSSI mean) | measured |
 | + Ground antenna gain | `rx.budget.ground_gain_dbi` | - | `[station] antenna_gain_dbi` (default 12.0 dBi) | configured |
 | − Ground line loss | `rx.budget.ground_line_loss_db` | - | `[station] rx_line_loss_db` (default 1.0 dB) | configured |
-| = Received power | `rx.budget.predicted_pr_dbm` | 10-min RSSI mean ± SEM (n) | P_r,pred = EIRP + G_r - L_r - FSPL | computed, measured |
+| = Received power | `rx.budget.predicted_pr_dbm` | 10-min RSSI mean (n), at the readings' resolution | P_r,pred = EIRP + G_r - L_r - FSPL | computed, measured |
 | Excess loss (measured − free space) | - | `rx.budget.excess_loss_db_est` | measured path loss (last) - FSPL; amber above 20 dB | est. |
-| Thermal noise kTB (NF assumed) | `rx.budget.thermal_noise_dbm` | 10-min noise mean ± SEM | kTB = -174 + 10 log10(B) dBm (B = noise bandwidth, [4.2](#42-rf-now)); the NF shown for the SX126x is `rx.budget.noise_figure_assumed_db` = 6 dB ("—" for the E22) | computed, measured |
+| Thermal noise kTB (NF assumed) | `rx.budget.thermal_noise_dbm` | 10-min noise mean, at the readings' resolution | kTB = -174 + 10 log10(B) dBm (B = noise bandwidth, [4.2](#42-rf-now)); the NF shown for the SX126x is `rx.budget.noise_figure_assumed_db` = 6 dB ("—" for the E22) | computed, measured |
 | SNR | `rx.budget.predicted_snr_db` | 10-min measured SNR mean (SX126x) or SNR est. mean | predicted P_r - current noise floor | measured or est. |
 | Sensitivity | `rx.budget.sensitivity_dbm` (+ `rx.budget.sensitivity_source`) | - | as in [4.2](#42-rf-now) | source badge |
 | = Link margin | `rx.budget.predicted_margin_db` | `rx.rf.margin_est_db` (coloured as in 4.2) | predicted P_r - S; measured RSSI_cal - S | est. |
@@ -3036,7 +3042,9 @@ point, how strong the link is and how many frames survive. The record sheets are
 1. Wait until AOS and at least 60 frames are in the 10-minute window
    (`rx.windows.10m.rssi.n`); at E22 2.4 kbit/s in CRUISE that is about 3 minutes, at SX126x
    profile 1 a frame comes every 43 s, so use the pass window and wait longer.
-2. Record from the statistics table: RSSI 10-min mean ± SEM, σ, p10 and fade depth;
+2. Record RSSI 10-min mean ± SEM, σ, p10 and fade depth at full precision from the snapshot
+   (`curl -s http://<board>:8080/api/state`, `rx.windows.10m.rssi`) or the CSV export; the
+   statistics table shows them at the readings' resolution only (1.5);
    noise mean; SNR (measured for the SX126x, est. for the E22). Use the means, never a
    single reading: one E22 reading has 1 dB steps and fading moves it by several dB.
 3. Record the margins: the 10-minute p10 of RSSI minus the sensitivity (the robust margin

@@ -761,27 +761,35 @@ stateDiagram-v2
 ### 9.1 Flash and static RAM per build
 
 Real builds with the exact App Lab toolchain (arduino-cli 1.5.2 as App Lab embeds it,
-arduino:zephyr platform built from source, Zephyr SDK 1.0.1, `-Os`). "Static RAM" is what
+arduino:zephyr platform built from source, Zephyr SDK 1.0.1, `-Os`; for 0.90.0 the SDK 0.16.8
+it depends on). "Static RAM" is what
 arduino-cli reports as global variables; the limits come from the platform's `boards.txt`
 (`unoq.upload.maximum_size` 786432, `maximum_data_size` 262144; `ventunoq` 1048576 / 262144).
 
-The final tree was built against two versions of the ArduinoCore-zephyr platform: "main"
-(commit b08a650) and "rel100" (tag 1.0.0, commit 79b3f1a). The UNO Q has 2 MB of flash and
+The final tree was built against three versions of the ArduinoCore-zephyr platform: "main"
+(commit b08a650), "rel100" (tag 1.0.0, commit 79b3f1a) and, for the UNO Q flight sketch,
+"rel090" (tag 0.90.0, commit ad87416, GCC 12.2: the last release before 1.0.0, still used by
+App Lab installations that were not updated; it has no VENTUNO Q). The UNO Q has 2 MB of flash and
 786 kB of SRAM in total (ABX00162), but a sketch is loaded into a fixed partition, so the
 percentages below are of the `boards.txt` limits, not of the chip.
 
 | Build | Core | Flash (octets) | % of limit | Static RAM (octets) | % of limit |
 |---|---|---|---|---|---|
-| Flight, E22 (default) | main | 233264 | 29.7 % of 786432 | 128492 | 49.0 % of 262144 |
-| Flight, E22 (default) | rel100 | 232816 | 29.6 % | 128412 | 49.0 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 326348 | 41.5 % | 169592 | 64.7 % |
-| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 325892 | 41.4 % | 169496 | 64.7 % |
+| Flight, E22 (default) | main | 234676 | 29.8 % of 786432 | 129020 | 49.2 % of 262144 |
+| Flight, E22 (default) | rel100 | 234220 | 29.8 % | 128932 | 49.2 % |
+| Flight, E22 (default) | rel090 | 225044 | 28.6 % | 124021 | 47.3 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | main | 327260 | 41.6 % | 170048 | 64.9 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel100 | 326816 | 41.6 % | 169960 | 64.8 % |
+| Flight, SX1268 (`VGQ_RADIO = 3`) | rel090 | 317772 | 40.4 % | 163574 | 62.4 % |
 | Station, E22 (default) | main | 100828 | 9.6 % of 1048576 | 40716 | 15.5 % of 262144 |
 | Station, E22 (default) | rel100 | 100324 | 9.6 % | 40632 | 15.5 % |
 | Station, SX1268 (`DSSQ_RADIO_SX126X = 1`) | main | 207692 | 19.8 % | 89216 | 34.0 % |
 
-Sources: the flight figures are the real builds of the final Phase D fix round (watchdog, TX
-duty meter included; 0 warnings in project code, 6 in the platform's own `Wire.cpp`). The
+Sources: the flight figures are the real builds after the changes for cores before 1.0.0
+(`src/libc_compat.cpp`, `RpcMailbox::current_thread()`, the UART pump of D-66, built on rel090
+only), the AS7265X Qwiic option, D-67 and D-69 (0 warnings in project code). On rel100 these
+changes add 1404 octets of flash and 520 of RAM to the Phase D fix round (232816 / 128412); on rel090 the
+pump's FIFOs (1536 octets) and thread object are part of the static RAM figure. The
 station sketch was not changed in that round: its figures are from the builds made for this
 document and the Phase D build log of [08_Verification_and_Test.md](08_Verification_and_Test.md)
 section 2.6 (station flash equal to commit 5b06a04). All builds used the bundled patched Arduino_RouterBridge 0.4.3 and,
@@ -801,6 +809,7 @@ in project code.
 | Main thread (`setup()`, `loop()`, `__loopHook`), both MCUs | 32768 octets | 1976 octets static call chain (deepest: `__loopHook`, `update_safe()`, the `hl_cltu` handler, `process_tc`, `cmd_magcal`, the EVR formatter `vsnprintf`); + 108 octets FP exception frame + 56 octets TLS = about 2140 octets (6.5 %) | `CONFIG_MAIN_STACK_SIZE=32768` in ArduinoCore-zephyr `loader/prj.conf` (b08a650; with `CONFIG_USERSPACE=n` the sketch runs on the main thread); chain measured for this document, see below |
 | `loop()` alone / `setup()` alone | (same thread) | 1480 / 1400 octets | same analysis |
 | SX126x driver, deepest call through `Radio::poll()` | (same thread) | 1220 octets from `Sx126xRadio::poll()` (+ 120 octets of `loop()` / `service_radio()`) | same analysis, SX1268 build; [drivers/sx126x.h](../vgq1-spacecraft/sketch/src/drivers/sx126x.h) states 1.3 KiB |
+| UART pump thread (E22 port, only with the 64-octet Serial rings of cores before 1.0.0, D-66) | 1024 octets (dynamic-thread pool) | 428 octets (256 call chain through `k_msleep` + 8 thread entry + 108 FP frame + 56 TLS), 58 % margin | `stackcalc.py` with root `UartPump::entry` on the rel090 build |
 | Router Bridge "bridge" thread | 1536 octets (patched; stock 500) | 1084 octets (920 call chain + 108 FP frame + 56 TLS), 42 % margin | commit 5b06a04, [22_Bundled_Libraries.md](22_Bundled_Libraries.md) |
 | Rice encoder (part of a loop chain) | - | 384 octets at -O2, 320 at -Os on x86-64 | [ccsds/rice.h](../vgq1-spacecraft/sketch/src/ccsds/rice.h); **VERIFY** with the ARM `-fstack-usage` |
 

@@ -166,7 +166,9 @@ http_allowed_hosts = []     # LAN server: DNS names (no port) the dashboard may 
                             # IP addresses, single-label and <name>.local names (DNS-rebinding guard)
 los_timeout_s = 90.0        # minimum; the GDS uses max(this, 3 x the spacecraft frame period)
 frontpanel = true           # VENTUNO Q MCU station I/O (CardKB, LEDs, buzzer) via arduino-router
-rcu = true                  # VENTUNO Q MCU drives the ground E22 M0/M1/AUX (jumpers removed)
+rcu = false                 # default: the E22 sits on an EBYTE E15-USB-T2 whose M0/M1 jumpers set
+                            # its mode (both fitted = normal); true: the VENTUNO Q MCU drives
+                            # M0/M1/AUX on D2/D3/D4 instead (needed for RADIO, GSCAN, WAKE, LINK*)
 router_address = ""         # host default unix:///var/run/arduino-router.sock; App: APP_SOCKET
 console_interval_s = 10.0
 # ---- Receiver data logger: retention and free-space guard (contract 39) ----------

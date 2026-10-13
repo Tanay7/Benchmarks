@@ -53,7 +53,7 @@ hardware**; every such item is listed in [20_Known_Limitations.md](20_Known_Limi
 | [D-10](#d-10) | SX126x SPI module as the long-range option, LoRa profiles 0-7 | Hardware |
 | [D-11](#d-11) | E22 UART on `Serial3` (header SDA/SCL pins), not on D0/D1 | Hardware |
 | [D-12](#d-12) | External 10 kOhm pull-ups on M0/M1; T37S board jumpers removed | Hardware |
-| [D-13](#d-13) | One sensor bus: `Wire2` = I2C3 on A4/A5, no Qwiic, no multiplexer | Hardware |
+| [D-13](#d-13) | One sensor bus: `Wire2` = I2C3 on A4/A5 (the AS7265X optionally on the Qwiic socket), no multiplexer | Hardware |
 | [D-14](#d-14) | Instrument set: Nicla Sense ME, AS7265X, one or two RM3100 | Hardware |
 | [D-15](#d-15) | One CardKB on the VENTUNO Q header I2C; second operator in the web UI | Hardware |
 | [D-16](#d-16) | The web dashboard is the only station display | Hardware |
@@ -106,6 +106,11 @@ hardware**; every such item is listed in [20_Known_Limitations.md](20_Known_Limi
 | [D-63](#d-63) | Transmitter duty measured over whole transmission cycles (`TxDutyMeter`) | Link |
 | [D-64](#d-64) | RSTCNT also clears the four event-latched FDIR flags | Autonomy |
 | [D-65](#d-65) | An unknown TC counter is held, then re-synchronised onto a time floor (4 numbers per second since 2026-01-01) | Security |
+| [D-66](#d-66) | 64-octet Serial rings (arduino:zephyr before 1.0.0): a UART pump thread for the E22 port, long notifications into an empty ring | Software |
+| [D-67](#d-67) | I2C bus clear releases the lines with the MCU's weak pull-ups: an empty A4/A5 bus is not a stuck bus | Software |
+| [D-68](#d-68) | Ground radio by default on the EBYTE E15-USB-T2, `[gds] rcu = false`; the Radio Control Unit becomes the option | Hardware / software |
+| [D-69](#d-69) | Spectrometer saturation judged on the raw counts of every channel read, valid or not | Software |
+| [D-70](#d-70) | Received power shown at the readings' resolution (E22 whole dB), not 4 decimals | Software |
 
 Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C review outcomes](#appendix-a---phase-c-review-outcomes),
 [Appendix B - Citation tags in code](#appendix-b---citation-tags-in-code),
@@ -254,7 +259,7 @@ Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C revie
 | **Status** | Current. |
 
 <a id="d-13"></a>
-### D-13 One sensor bus: `Wire2` = I2C3 on A4/A5, no Qwiic, no multiplexer
+### D-13 One sensor bus: `Wire2` = I2C3 on A4/A5 (the AS7265X optionally on the Qwiic socket), no multiplexer
 
 | | |
 |---|---|
@@ -262,6 +267,7 @@ Also: [Superseded decisions](#superseded-decisions), [Appendix A - Phase C revie
 | **Alternatives** | (recorded) v2: one Qwiic bus (`Wire1`, I2C4) daisy-chained through the boards' Qwiic sockets (commit `ae6087d`); a TCA9548A multiplexer. |
 | **Reason** | Owner directive "No Qwiic connectors ANYWHERE in the system" (contract 16.1; the CardKB exception is D-15). The core's UNO Q variant lists `i2cs = <&i2c2>, <&i2c4>, <&i2c3>`, so `Wire2` is I2C3 on A4/A5 and `Wire1` (I2C4) is the Qwiic socket. The addresses are distinct, so no multiplexer is needed (fewer parts, fewer failure points); one controller polls one target at a time, and open-drain lines cannot clash. 100 kHz tolerates a long boom cable. A4/A5 are **3.3 V only** ("use pull-ups to 3.3 V only ... not 5 V-tolerant in any mode", ABX00162), so every pull-up goes to 3.3 V and no breakout whose pull-ups follow its supply is powered from 5 V. |
 | **Evidence** | Commit `eaefd3b`; variant overlay `i2cs`; `config.h` `SENSOR_WIRE`, `kI2cClockHz`; I2C bus clear (up to 9 SCL pulses + STOP) on the same pins (`kPinSensorSda` 18, `kPinSensorScl` 19). |
+| **Revision 2026-10-12** | On the owner's request the AS7265X may instead be plugged into the UNO Q Qwiic socket (`Wire1` = I2C4, `config.h` `QWIIC_WIRE`), the only Qwiic use in the system. `As7265x::begin()` takes the Qwiic bus as an alternate: every probe (boot wait, absent and fault re-probes) tries the bus in use, then the other, and the driver stays on the bus that answered; EVR 0x0706 names it. The Qwiic bus is a second `I2cBus` without GPIO bus clear (PD12/PD13 are not Arduino pin numbers): its errors add to HK `i2c_errors` and FDIR `I2C_BUS`, whose response there is a controller re-initialisation (EVR 0x0605 `Qwiic I2C bus fault ...`). On Qwiic the AS7265X no longer provides the A4/A5 pull-ups (03 section 4.7). |
 | **Status** | Current since `eaefd3b`. |
 
 <a id="d-14"></a>
@@ -873,6 +879,61 @@ written. Each belongs to the area named in the [Index](#index).
 | **Alternatives** | (recorded) Treat a missing file as first use: start at 0 and let the next protected HK raise the counter to `sdls_last_sn` (the behaviour before this round); (recorded) hold only for TC AE with TM AE (the rule before this round: AUTH and TM NONE stations were not held); (recorded) `sdls_last_sn` + 1 000 000 alone (the rule earlier in this round: a stale report brings the counter back onto numbers already used); the floor plus the 1 000 000 gap; continue at `sdls_last_sn` + 1; refuse to start the GDS; make the operator always write the file by hand. |
 | **Reason** | The spacecraft reports only the last number it **accepted**. Numbers above it may already have been radiated and lost (on the uplink, or COP-1 retransmissions, each of which takes a fresh number), so continuing at `sdls_last_sn` + 1 can radiate two different frames under one GCM nonce (AE) or make a recorded, never-accepted frame valid again while the station's own new frames are refused (AUTH, which has no IV): both services are held. Nothing on disk tells a new key from a used one. No single HK can be proven fresh either: a recording replayed after an archive loss (which also loses the TM replay state), the boot HK sent before the EGSE restores the flight's counter, or a forged HK at a TM NONE station can report a number from before numbers the key has already used, and `sdls_last_sn` + 1 000 000 then lands on them again (the review's reproduction: a new key's first numbers 1 000 001 to 1 000 005, the archive lost, the recorded first-pass HK replayed: the next number was 1 000 001 again). The time floor does not depend on the report: because the station uses fewer than 3 numbers per second, every number used with a key stays below 4 x (seconds since 2026-01-01) as long as the station clock is right, and a release lands on the floor, above the file, the report and any lost numbers. No gap is added on top: a key released once numbers its frames from the floor, so a genuine report is close to the floor, and floor + gap would push the counter up to 1 000 000 numbers ahead of the floor, where a second loss with a stale report could reuse them. At a TM NONE station no HK can be authenticated, so an unprotected one must be allowed to end the hold; with the floor its value no longer matters, a higher one only uses up number space, and `SDLS_SN_RELEASE_MAX` keeps at least 2^26 - 1 numbers whatever it reports. Residuals ([17_Security_Model.md](17_Security_Model.md) R15): a clock behind at a release, before 2026 only the gap, a burst of up to 5 numbers in the first 5 s after a release. Holding only the uplink keeps telemetry, alarms and the web UI working (as D-32). |
 | **Evidence** | `dssq/ccsds/sdls.py` module docstring (the rate argument), `sn_time_floor()`, `SDLS_SN_TIME_T0`, `SDLS_SN_TIME_RATE`, `SDLS_SN_RESYNC_GAP`, `SDLS_SN_RELEASE_MAX`, `SDLS_SN_RESTORE_WAIT_S`, `SdlsSender` (`require_file`, `hold()`, `observe_spacecraft_sn()`); `dssq/gds.py` `WINDOW_MIN_SPACING_S`, `WAKE_MIN_INTERVAL_S`, `GroundStation.__init__` (`keep_security_state`, `_sn_release_unprotected`), `_uplink_window()`, `run_radio_jobs()`; `dssq/cltu.py` `build_hardline_cltu()`; `tests/test_end_to_end.py::test_existing_key_without_sn_file_holds_and_resyncs_above_the_lost_tail`, `test_every_numbered_tc_service_holds_without_its_sn_file`, `test_a_replayed_first_pass_hk_after_archive_loss_cannot_reuse`, `test_a_forged_hk_under_tm_none_cannot_reuse`, `test_the_boot_hk_before_the_restore_never_ends_the_hold`, `test_the_simulator_never_touches_the_real_counter`, `test_no_archive_keeps_and_uses_the_sn_file`; `tests/test_sdls.py::test_hardline_uses_the_app_copy_and_refuses_without_an_sn_file`, `test_held_sender_never_writes_below_the_file`, `test_a_replayed_or_forged_hk_cannot_cause_reuse`, `test_resync_fallbacks_and_limits`, `test_hardline_never_outruns_the_time_floor`; `tests/test_station_id.py::test_sdls_numbers_stay_below_3_per_second_whatever_the_downlink_does`, `test_wake_at_most_once_per_interval`; [17_Security_Model.md](17_Security_Model.md) section 7.6 and R15. |
+| **Status** | Current. |
+
+<a id="d-66"></a>
+### D-66 64-octet Serial rings (arduino:zephyr before 1.0.0): a UART pump thread for the E22 port, long notifications into an empty ring
+
+| | |
+|---|---|
+| **Decision** | The flight sketch detects the core's Serial ring size at compile time (`CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE` from the core's `autoconf.h`; `config.h VGQ_SMALL_SERIAL_RINGS` when below 1024). With small rings: (1) the E22 port goes through a UART pump (`drivers/uart_pump.h`), a thread at priority 6 (the loop runs at 14, the bridge thread at 5) that every 1 ms moves the received octets into a 1024-octet FIFO and tops the 64-octet TX ring up from a 512-octet FIFO; the E22 driver reads and writes those FIFOs (single producer / single consumer, `drivers/byte_fifo.h`), so `transmit()` never blocks and no received octet is lost to a long loop pass; (2) `Flight::notify_room()` lets a notification longer than the ring go out only into an empty ring, where `Bridge.notify()` then waits at most ~45 ms (530 octets at 115200 bit/s, one large notification per pass) while the bridge thread keeps reading the router link and the pump the radio port. With 1024-octet rings nothing changes. |
+| **Alternatives** | (recorded) Require arduino:zephyr 1.0.0 (not possible: the stable App Lab pins the board's core below 1.0.0, `ARDUINO_APP_CLI__PLATFORM_VERSION_CONSTRAINT` default `<1.0.0` until arduino-app-cli 0.14.0); enlarge the rings from the sketch (not possible: the size is a core Kconfig value compiled into the core's Serial objects); split the frame over several loop passes (a pause in the UART stream splits the E22's RF packet); raise the bridge thread above the loop (not needed: at priority 5 it already preempts the loop and reads the router link every ~1 ms). |
+| **Reason** | Found on the owner's UNO Q (2026-10-12): with 64-octet rings every notification over 16 octets failed `notify_room()` for ever (the EGSE waited for `sc_status`), and `ZephyrSerial::write()` would block ~180 ms for a 240-octet E22 frame, while a 64-octet RX ring holds only 67 ms of radio data at 9600 bit/s. |
+| **Evidence** | Core commit `40abc1f7` ("Serial: increase default ringbuffer size to 1024", 2026-08-18; `Kconfig` default 64 at tag 0.90.0, 1024 at 1.0.0); `zephyrSerial.cpp` `write()` (put / `yield()` loop) and `availableForWrite()`; `CONFIG_MAIN_THREAD_PRIORITY` 14 in the 0.90.0 loader configuration; host test `byte_fifo` (two threads, 4 MiB through a 64-octet FIFO, also under ThreadSanitizer); `check_firmware.sh` small-ring checks; real builds on 0.90.0 and 1.0.0 with the loader symbol check; pump thread stack 428 of 1024 octets (`stackcalc.py` root `UartPump::entry`: 256 call chain + 8 + 108 FP frame + 56 TLS). First board run on 0.90.0, 2026-10-12 ([21_Test_Records.md](21_Test_Records.md) record 2026-10-12-A): `sc_status` every 10 s, radio check passed (FDIR 0x0000, no LOOP_OVERRUN), 19 of 19 frames archived by the EGSE as `tm_cadu` copies; the receive half is not exercised until a ground station transmits (V-68). |
+| **Status** | Current. |
+
+<a id="d-67"></a>
+### D-67 I2C bus clear releases the lines with the MCU's weak pull-ups: an empty A4/A5 bus is not a stuck bus
+
+| | |
+|---|---|
+| **Decision** | `I2cBus::bus_clear()` releases SDA and SCL with `pinMode(pin, INPUT_PULLUP)` instead of `INPUT`, so the MCU's own weak pull-up (about 40 kOhm) is on whenever it reads a line. A bus with external pull-ups behaves as before (the weak pull-up is in parallel); a bus with nothing on it reads high, so the bus clear passes and nothing is retried; a target that holds a line low still reads low (EVR 0x060A as before). Wire `begin()` re-applies the I2C pinctrl state afterwards, so I2C traffic itself is unchanged. |
+| **Alternatives** | (recorded) Leave it and tell the operator to fit 4.7 kOhm pull-ups on A4/A5 even with no instrument there (an error event for a correct, empty bus); skip the bus clear while no A4/A5 instrument has ever answered (more state, and the boot clear would still report); report "no pull-ups" as its own event (the weak pull-ups make the case harmless, so there is nothing to act on until an instrument is added, and then a missing pull-up shows as that instrument absent, docs/14). |
+| **Reason** | Found on the owner's UNO Q (2026-10-12, record 2026-10-12-A): with the AS7265X on the Qwiic connector and nothing on A4/A5, no pull-up held those lines, they read low, and every re-probe of the absent Nicla Sense ME / RM3100 (30 s doubling to 10 min) logged EVR 0x060A `I2C bus clear: SDA or SCL still low after 9 clocks`. |
+| **Evidence** | ArduinoCore-zephyr `pinMode()` implements `INPUT_PULLUP` (wiring_digital.cpp, see `drivers/i2c_bus.h`); STM32U585 datasheet weak pull-up RPU about 40 kOhm; the EGSE log of record 2026-10-12-A (EVR 0x060A at 23:13:05Z and 23:14:06Z). Confirmed on the board in a second run the same evening (23:49-23:50Z, the zip of commit `f71475e`): no EVR 0x060A, also not at the first re-probe about 30 s after boot, and 7 start-up EVRs not forwarded instead of 8 (the boot bus clear no longer fails), record 2026-10-12-A. |
+| **Status** | Current. |
+
+<a id="d-68"></a>
+### D-68 Ground radio by default on the EBYTE E15-USB-T2, `[gds] rcu = false`; the Radio Control Unit becomes the option
+
+| | |
+|---|---|
+| **Decision** | The default ground radio interface is the E22-400T33D plugged straight onto EBYTE's E15-USB-T2 (CP2102 USB-UART, supply jumper 5V) in a VENTUNO Q USB-A port, its M0/M1 held by the adapter's jumper caps (both fitted = normal mode). `[gds] rcu` defaults to `false` (`dssq/config.py`, `config/station.toml`): the GDS neither reads the module's configuration back at start nor switches its mode. The Radio Control Unit (a plain 3.3 V USB-UART adapter, M0/M1/AUX on D2/D3/D4, `rcu = true`) stays the option for `RADIO`, `GSCAN`, `WAKE`, `LINKRATE` and `LINKCHAN`. |
+| **Alternatives** | (recorded) Keep `rcu = true` as the default (every start of the owner's setup then reports `did not answer the configuration read`, and with the module in normal mode the read command goes out on air); wire the E15-USB-T2's jumper pins to D2/D3 (AUX is not on its headers; not verified). |
+| **Reason** | The owner's ground station uses the E15-USB-T2 and will keep it (2026-10-13). It received the spacecraft's downlink with `rcu = false` (record 2026-10-13-A). |
+| **Evidence** | Record 2026-10-13-A (docs/21); EBYTE E51-TTL-500 datasheet v1.0 sections 3.6 and 5 (the E15-USB-T2's mode and supply jumpers); `dssq/gds.py` (`attach_radio`: no RadioManager without an RCU, so no `VERIFY`). Open: transmitting from the USB supply (docs/20 V-69). |
+| **Status** | Current. |
+
+<a id="d-69"></a>
+### D-69 Spectrometer saturation judged on the raw counts of every channel read, valid or not
+
+| | |
+|---|---|
+| **Decision** | A frame's saturation mask covers every channel of the devices it read (`spec_frame_saturation()`, `fsw/spectral.cpp`; `As7265x::frame_done()`), not only the channels with a usable calibrated value. The AGC therefore steps the exposure down when any channel reaches full scale - 1, and the SPEC packet's `sat_mask` names it (the ground then shows its raw count as 65535 with the saturation mark). `spec_saturation_mask()` and the AGC peak are unchanged; HDR still needs a channel valid in every bracket frame. |
+| **Alternatives** | (recorded) Accept any calibrated float for a saturated channel (an unusable value would reach the ground as data); lower the AGC target (does not help when the overloaded channel is invisible to it). |
+| **Reason** | Record 2026-10-13-A: with a phone torch on the sensor and AGC on, channels at full scale came with an unusable calibrated value, were dropped as invalid, and the AGC, seeing only the valid channels (brightest 32 % of full scale), held 64x / 711.68 ms: B435, C460, E510, F535 (01:09Z) and R610 (01:24Z, 01:25Z) shown as "-" in every column, `no saturated channel`. At fixed 1x / 166.8 ms under the same torch all 18 channels were valid. |
+| **Evidence** | The SPEC raw code 0xFFFF on the wire for those channels while the other channels of the same device were read (`PH_READ` writes all six raw counts of a device; a failed read never reaches `frame_done`, `on_failure`); host test `spectral_saturation_and_agc` (2 new checks). The chip's calibrated output at saturation is not documented in the reference set: VERIFY with T-SC-08. |
+| **Status** | Current. |
+
+<a id="d-70"></a>
+### D-70 Received power shown at the readings' resolution (E22 whole dB), not 4 decimals
+
+| | |
+|---|---|
+| **Decision** | The dashboard and the GDS console show measured received power and everything derived from it (RSSI, noise floor, SNR est., margin est., signal power est., N0, C/N0, Eb/N0, measured path loss; single readings, window means and percentiles) rounded to the resolution of the readings: whole dB with the E22 (one-byte RSSI and noise register, dBm = -(256 - value)), 0.5 dB steps for the SX126x RSSI (RssiPkt / 2) and 0.1 dB for its noise floor and derived values; no "± SEM" next to these means (`dashboard.html fres()`, `rxstats.at_resolution()`). The header and the OVERVIEW tiles show the newest frame's RSSI and SNR est. instead of 1-minute means; the window statistics stay on the RECEIVER tab. The SX126x measured SNR keeps 2 decimals (0.25 dB steps); computed link-budget figures keep 4. The snapshot, the CSV exports and the data logger keep full precision. |
+| **Alternatives** | (recorded) Keep 4 decimals for means (the earlier design: means of 1-dB readings compared to tenths of a dB); show the mean with one extra decimal. |
+| **Reason** | The owner's request after the first bench link (2026-10-13): "-39.2000 ± 0.3266 dBm" read as a precision the E22 does not have. |
+| **Evidence** | E22 manuals (RSSI byte), SX1261/2 datasheet GetPacketStatus; `rxstats.E22_RSSI_RESOLUTION_DB`, `SX126X_RSSI_RESOLUTION_DB`; test `test_received_power_text_at_the_radio_resolution`. Supersedes the 4-decimal display rule of the RSSI statistics work (docs/13 1.5). |
 | **Status** | Current. |
 
 ---

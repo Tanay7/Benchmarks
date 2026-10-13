@@ -218,7 +218,7 @@ Jump to: [A](#a) [B](#b) [C](#c) [D](#d) [E](#e) [F](#f) [G](#g) [H](#h) [I](#i)
 
 | Term | Meaning |
 |---|---|
-| Qwiic | SparkFun's I2C connector system; not used by any sensor in this project |
+| Qwiic | SparkFun's I2C connector system; used only if the AS7265X is plugged into the UNO Q Qwiic socket (optional, D-13) |
 
 ### R
 

@@ -1,7 +1,7 @@
 // =============================================================================
 //  AS7265X 18-channel spectrometer driver (ams AS72651 + AS72652 + AS72653, SparkFun
-//  "Triad" board), I2C address 0x49 on the sensor bus (Wire2, header pins - never a
-//  Qwiic connector). Own implementation of the datasheet's virtual-register protocol
+//  "Triad" board), I2C address 0x49 on the sensor bus (Wire2, header pins A4/A5) or on
+//  the UNO Q Qwiic connector (Wire1), whichever it answers on. Own implementation of the datasheet's virtual-register protocol
 //  (ams AS7265x datasheet v1-04, "I2C Virtual Register Write/Read Access",
 //  Figures 24-51); no vendor library.
 //
@@ -125,12 +125,17 @@ class As7265x {
   // Probes 0x49 (every kSpecBootProbeMs for up to kSpecBootWaitMs, as SparkFun
   // isConnected(): the chip may still be loading its firmware) and runs identification +
   // configuration to completion (lamps and indicator off, one-shot mode). int_pin: MCU pin
-  // wired to the board's INT, -1 = not wired (DATA_RDY is then polled over I2C). Blocking
-  // but bounded: the boot probe (<= kSpecBootWaitMs plus 100 probes) then at most
-  // kBeginMaxPolls passes of poll() + 5 ms, which covers one soft reset with its boot wait;
-  // call from setup() only. false = absent or not responding: poll() keeps retrying
-  // (ST_ABSENT / ST_FAULT) and the instrument comes up when it answers.
-  bool begin(I2cBus& bus, int int_pin);
+  // wired to the board's INT, -1 = not wired (DATA_RDY is then polled over I2C). alt_bus:
+  // a second bus the board may be plugged into instead (the UNO Q Qwiic connector); every
+  // probe tries the bus in use first, then the other one, and the driver stays on the bus
+  // that answered. Blocking but bounded: the boot probe (kSpecBootWaitMs plus one probe per
+  // bus) then at most kBeginMaxPolls passes of poll() + 5 ms, which covers one soft reset
+  // with its boot wait; call from setup() only. false = absent or not responding: poll()
+  // keeps retrying (ST_ABSENT / ST_FAULT, both buses) and the instrument comes up when it
+  // answers.
+  bool begin(I2cBus& bus, int int_pin, I2cBus* alt_bus = nullptr);
+  // True while the driver uses alt_bus (the instrument answered there).
+  bool on_alt_bus() const { return alt_ != nullptr && bus_ == alt_; }
 
   // Advances the state machine; never blocks longer than the poll budget plus one engine
   // step (<= 2 I2C transactions). Safe with the PA keyed. now_ms = millis() of this pass.
@@ -254,8 +259,12 @@ class As7265x {
   uint8_t config_value(uint8_t gain, uint8_t bank) const;
   void decode_devsel(uint8_t v);
 
+  bool probe_any();
+
   // bus and engine state
-  I2cBus* bus_ = nullptr;
+  I2cBus* bus_ = nullptr;                 // the bus in use: main_ or alt_
+  I2cBus* main_ = nullptr;
+  I2cBus* alt_ = nullptr;                 // nullptr: one bus only
   int int_pin_ = -1;
   uint32_t budget_us_ = kSpecPollBudgetUs;
   State state_ = ST_ABSENT;

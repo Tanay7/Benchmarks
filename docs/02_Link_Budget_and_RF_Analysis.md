@@ -148,7 +148,7 @@ The rate code is REG0 bits 2..0 (both manuals, section 7.2). Codes 0, 1 and 2 ar
 
 | Code | Air rate | Sensitivity T33D | Sensitivity T37S | Source | Flight busy time per CADU | Air time per CADU (ground estimate) |
 |---|---|---|---|---|---|---|
-| 0, 1, 2 | 2.4 kbit/s | -128.0 dBm | -126.0 dBm | datasheet | 1267 ms | 1022.7 ms |
+| 0, 1, 2 | 2.4 kbit/s | -128.0 dBm | -126.0 dBm | datasheet | 1267 ms (measured 1527-1529 ms, T33D, docs/20 V-19) | 1022.7 ms |
 | 3 | 4.8 kbit/s | -125.0 dBm | -123.0 dBm | estimated | 756 ms | 511.3 ms |
 | 4 | 9.6 kbit/s | -122.0 dBm | -120.0 dBm | estimated | 500 ms | 255.7 ms |
 | 5 | 19.2 kbit/s | -119.0 dBm | -117.0 dBm | estimated | 372 ms | 127.8 ms |

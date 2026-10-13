@@ -63,6 +63,22 @@
 #define RADIO_SERIAL Serial3          // "SCL"(PB10) = TX -> E22 RXD, "SDA"(PB11) = RX <- E22 TXD
 #endif
 
+// ---- Serial ring size of the core --------------------------------------------------------
+// arduino:zephyr gives every Serial a TX and an RX ring of CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE
+// octets (core -imacros autoconf.h): 1024 from 1.0.0, 64 before (core commit 40abc1f7). The
+// App Lab release that pins the board's core below 1.0.0 builds with 0.90.0. With small
+// rings the E22 port goes through a UART pump thread (drivers/uart_pump.h) and notifications
+// longer than the ring wait for an empty ring (Flight::notify_room()); with 1024 nothing
+// changes. Not defined (host checks): treated as 1024.
+#if defined(CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE) && CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE < 1024
+#define VGQ_SMALL_SERIAL_RINGS 1
+#else
+#define VGQ_SMALL_SERIAL_RINGS 0
+#endif
+static const int      kUartPumpPriority   = 6;     // above the loop (14), below the bridge thread (5)
+static const int32_t  kUartPumpPeriodMs   = 1;     // 9600 bit/s: ~1 octet per pass each way
+static const size_t   kUartPumpStackBytes = 1024;  // one dynamic-thread pool slot
+
 // ---- E22 control pins (both E22 models) ------------------------------------------------
 // E22-400T33D: the module's DIP pins M0, M1 and AUX. E22-400T37S on the E22-400TBH-02
 // board: remove the board's M0/M1 jumper caps (they short M1-GND and GND-M0) and its
@@ -154,16 +170,19 @@ static const uint32_t kSdlsEpochWaitS = 120;
 // a restore (EGSE absent) they are accepted again from the in-RAM counter, EVR 0x0124.
 static const uint32_t kSdlsSnWaitS = 120;
 
-// ---- Sensor bus: one I2C bus on the UNO Q header pins, no Qwiic, no multiplexer ----------
+// ---- Sensor bus: one I2C bus on the UNO Q header pins, no multiplexer -------------------
 //   Nicla Sense ME  0x2A  attitude reference unit (custom firmware, two 32-octet pages)
 //   AS7265X         0x49  SparkFun Spectral Triad (18 channels, 410-940 nm)
 //   RM3100 outboard 0x20  science magnetometer at the boom tip   (SA1 = 0, SA0 = 0)
 //   RM3100 inboard  0x23  OPTIONAL, boom mid-point, auto-detected (SA1 = 1, SA0 = 1)
 // Wire2 = I2C3 on header pins A4 (SDA, PC1) and A5 (SCL, PC0): ArduinoCore-zephyr
-// variant arduino_uno_q_stm32u585xx, i2cs = <&i2c2>, <&i2c4>, <&i2c3>. Wire1 (I2C4)
-// is the Qwiic connector and is NOT used. A4/A5 are 3.3 V only (ABX00162): every
-// pull-up on this bus goes to 3.3 V.
+// variant arduino_uno_q_stm32u585xx, i2cs = <&i2c2>, <&i2c4>, <&i2c3>. A4/A5 are 3.3 V
+// only (ABX00162): every pull-up on this bus goes to 3.3 V.
 #define SENSOR_WIRE Wire2                       // header A4 = SDA (PC1), A5 = SCL (PC0)
+// Wire1 (I2C4, PD12/PD13) is the Qwiic connector (3.3 V). Only the AS7265X may be plugged
+// in there instead of A4/A5: the driver probes A4/A5 first, then Qwiic, at boot and at
+// every re-probe, and uses the bus it answers on (owner request 2026-10-12, D-13).
+#define QWIIC_WIRE Wire1
 // The same two pins as GPIOs, for the bus clear (I2cBus, open drain emulated):
 // digital-pin-gpios index 18 = A4 = PC1, 19 = A5 = PC0 (variant overlay).
 static const int      kPinSensorSda  = 18;

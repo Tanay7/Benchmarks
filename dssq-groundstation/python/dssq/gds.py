@@ -87,7 +87,7 @@ from .linkmgr import LinkManager
 from .magcal import MagCalCollector, MagCalResult, clear_args, magcal_command
 from .radio.e22 import NOISE_QUERY
 from .radioctl import RadioManager
-from .rxstats import ReceiverStats, Window
+from .rxstats import E22_RSSI_RESOLUTION_DB, SX126X_RSSI_RESOLUTION_DB, ReceiverStats, Window, at_resolution
 from .spectral import LED_CUR_ALLOWED, LED_MAX_CODE, SpectralState
 
 log = logging.getLogger("dssq")
@@ -693,8 +693,11 @@ class GroundStation:
             self.health["tdm_rejected"] += 1
             if not self._tdm_warned:
                 self._tdm_warned = True
-                self.event("WARN", "TDM", f"station clock outside 2000..2100 (NTP not synchronised?): TDM records "
-                           f"skipped ({e})")
+                # Name the real cause: on the first bench link an E22 RSSI byte at the end of its
+                # range (-256 dBm) was reported as a clock fault (record 2026-10-13-A).
+                why = "station clock outside 2000..2100 (NTP not synchronised?)" if str(e).startswith("t_utc") \
+                    else "a measurement outside the TDM limits"
+                self.event("WARN", "TDM", f"{why}: TDM records skipped ({e})")
             return
         self.tdm.add(rec)
 
@@ -2566,9 +2569,12 @@ class Runner:
             r = gs.rx
             rssi, noise = r.last_rx["rssi_dbm"], r.noise_dbm
             snr = None if rssi is None or noise is None else rssi - noise
+            sx = gs.settings.model.packet_mode
             log.info("STATUS %s sync=%s RSSI=%s dBm noise=%s dBm SNRest=%s dB frames=%d lost=%d RScorr=%d alarm=%s",
-                     "LOS" if r.los else "AOS", "PACKET" if gs.settings.model.packet_mode else gs.sync.state,
-                     None if rssi is None else round(rssi, 1), noise, None if snr is None else round(snr, 1),
+                     "LOS" if r.los else "AOS", "PACKET" if sx else gs.sync.state,
+                     at_resolution(rssi, SX126X_RSSI_RESOLUTION_DB if sx else E22_RSSI_RESOLUTION_DB),
+                     at_resolution(noise, 0.1 if sx else E22_RSSI_RESOLUTION_DB),
+                     at_resolution(snr, 0.1 if sx else E22_RSSI_RESOLUTION_DB),
                      r.frames_ok, r.frames_lost, r.sym_corrected, gs.alarm)
 
     def step(self) -> None:

@@ -7,7 +7,151 @@ software identifies itself as flight software 3.0 (boot event 0x0001) and ground
 commit that introduced each change. Verification numbers are those reported in the commit
 messages; the current numbers are in [docs/08_Verification_and_Test.md](docs/08_Verification_and_Test.md).
 
-Nothing in this log has been run on the real boards yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
+Bench runs so far: the flight App on the UNO Q (2026-10-12) and the first downlink received by the
+ground station (2026-10-13), [docs/21_Test_Records.md](docs/21_Test_Records.md) records 2026-10-12-A and
+2026-10-13-A. Commanding: commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
+
+---
+
+## [Unreleased] - First downlink to the ground station; E15-USB-T2 ground radio (2026-10-13)
+
+The ground station on the owner's VENTUNO Q received and decoded the spacecraft's downlink on the
+bench (record 2026-10-13-A): AOS within seconds, `lost=0`, no Reed-Solomon corrections, the
+SAFE beacon decoded. The ground radio is an E22-400T33D on EBYTE's E15-USB-T2 USB test board,
+which the owner keeps; the defaults follow it.
+
+### Changed
+- Received power is shown at the resolution of the readings (D-70), on the owner's request:
+  whole dB with the E22 (`-39 dBm` instead of `-39.2000 ± 0.3266 dBm`), 0.5 dB steps for the
+  SX126x RSSI and 0.1 dB for its noise floor; window means without `± SEM`; the header and the
+  OVERVIEW tiles show the newest frame's RSSI and SNR est. instead of 1-minute means. Dashboard
+  (`fres()`), console `STATUS` line (`rxstats.at_resolution()`, new test), docs/13. The
+  snapshot, the CSV exports and the data logger keep full precision. The 1 dB step was checked
+  against the E22-400T33D manual v1.05 the owner supplied: REG1 bit 5 and REG3 bit 7 give one
+  whole octet, dBm = -(256 - octet), with no finer step, no accuracy and no receiver-gain
+  setting (docs/10, docs/13).
+- `[gds] rcu` defaults to `false` (`dssq/config.py`, `config/station.toml`; D-68): the E22 sits on
+  the E15-USB-T2, whose jumper caps hold M0/M1 (both fitted = normal mode). With `true` and no
+  Radio Control Unit wired, every start reported `ERROR RADIO ground E22-400T33D did not answer
+  the configuration read`. The RCU (`rcu = true`, D2/D3/D4) remains the option for `RADIO`,
+  `GSCAN`, `WAKE`, `LINKRATE`, `LINKCHAN`. Existing `data/station.toml` files keep their value.
+- Setup guide part 9 rewritten for the E15-USB-T2: supply jumper on 5V; a fitted cap = 0, a
+  removed cap = 1 (EBYTE E51-TTL-500 datasheet, which describes the board); the E22's
+  configuration mode is the M0 cap only, both removed is its deep sleep; the RCU as option 9.3.
+  Part 7: the callsign rule (keep `N0CALL` until licensed). Part 11: a step attenuator in line,
+  and the sign of an overdriven receiver.
+
+### Fixed
+- Spectrometer AGC blind to saturated channels (D-69): with a phone torch on the sensor, channels
+  at full scale arrived with an unusable calibrated value, were dropped as invalid, and the AGC,
+  judging saturation on the valid channels only, held 64x / 711.68 ms; the dashboard showed them
+  as `-` with `no saturated channel` (record 2026-10-13-A, observations 11 and 13). Saturation is
+  now judged on the raw counts of every channel read (`spec_frame_saturation()`,
+  `As7265x::frame_done()`); new host checks (977 in total).
+- The TDM warning named the station clock for every rejected record. On the bench an overdriven
+  E22 gave RSSI -256 dBm with a correct clock and the console said `station clock outside
+  2000..2100 (NTP not synchronised?)`. It now names the clock only when the time is out of range,
+  otherwise `a measurement outside the TDM limits` with the field (`dssq/gds.py _tdm_add`; new test
+  `test_tdm_rejection_names_the_field_not_the_clock`).
+- docs/20: the 64-octet ring item added on 2026-10-12 reused the number V-30; it is V-68 now.
+- RECEIVER statistics: the `± SEM` column showed the received-power rows' SEM rounded to the
+  readings' resolution (with the E22 nearly always `0`), against the D-70 rule in docs/13 that
+  these means carry no SEM. It now shows `—` there; the snapshot keeps the value.
+
+### Added
+- docs/21 record 2026-10-13-A (first downlink: the E15-USB-T2 jumpers, the one-time
+  configuration, RSSI -1 / -256 dBm with both antennas on one bench, -39 / -40 dBm with 54 dB in
+  line). docs/20: V-31 closed (the App container opens `/dev/ttyUSB0`); new V-69 (ground radio
+  powered from USB, transmit current) and V-70 (the E22 RSSI byte at the end of its range).
+- docs/20: six open items found in the E22-400T33D manual v1.05 and JPL's *Deep Space
+  Communications* (Taylor, 2014): V-71 the module's over-the-air configuration (`CF CF`), V-72 a
+  module restart reloads its saved settings while the flight writes volatile ones, V-73 no
+  self-interference survey yet, L-39 command loss rewrites the radio only when the flight's
+  copy differs, L-45 overload RSSI readings (-256 dBm) enter the statistics, L-46 a link
+  budget without tolerances and rate advice judged on the downlink only. docs/08: tests
+  T-HW-12 (module restart), T-RF-11 (over-the-air configuration, read only) and T-RF-12
+  (self-interference survey). The fixes are planned, not made.
+  docs/14: rows for the configuration-read error, `no reply` from the one-time configuration,
+  the callsign refusal, the overdriven receiver, the empty spectrometer page in SAFE and the
+  start-up EVRs not forwarded. docs/03 section 5.3.0; FAQ: the USB-UART adapter, the empty
+  spectrometer page, the callsign before a licence.
+- The first hardline command and the first spectrum at the ground (record 2026-10-13-A,
+  observations 9-12). docs/07 section 2.6: a concrete hardline line and the expected console
+  lines (typing the hex inside `< >` makes the shell fail). docs/14: rows for a dashboard that
+  stops updating after App Lab is switched to the other board (`curl .../api/state`, Run at
+  startup on both boards), the dashboard address (`http://<board name>.local:8080`) and the
+  hardline shell error. docs/00 part 5: the dashboard by board name.
+
+## [Unreleased] - UNO Q flight App on arduino:zephyr before 1.0.0 (2026-10-12)
+
+The first import of the flight App on a real UNO Q (App Lab building with arduino:zephyr up to
+0.90.0, Zephyr SDK 0.16.8 toolchain) stopped at the link, and once that was fixed, the EGSE
+stopped at its first import. All three faults were reproduced (0.90.0 built from source; the
+app-bricks-py release history) and are fixed; CI now builds the flight sketch on that core too.
+
+### Fixed
+- Link error `undefined reference to '__errno'` from `libm_nano.a` (`expf`, `log10f`, `powf`):
+  cores before 1.0.0 link the sketch with newlib-nano's libm, whose errno-setting wrappers need
+  `__errno`, which neither the sketch link nor the loader provides. New
+  `vgq1-spacecraft/sketch/src/libc_compat.cpp` defines it (weak, never read; unused and dropped
+  from the build on 1.0.0, whose picolibc libm does not need it).
+- The sketch would then have linked but not loaded on those cores: `k_current_get()` (Router
+  Bridge mailbox, `src/fsw/rpc_mailbox.h`) left a weak reference to the C++ thread-local init
+  function `_ZTH13z_tls_current`, which the Zephyr 4.2 loader of 0.90.0 does not export and
+  therefore refuses (1.0.0 compiles with `-fno-extern-tls-init`). The mailbox now asks the
+  scheduler (`k_sched_current_thread_query()`, exported by every release).
+- EGSE start: `cannot import name 'AppError' from 'arduino.app_utils'`, exit code 2.
+  `arduino.app_utils.AppError` exists only from app-bricks-py 0.13.0 (commit 9a95825,
+  2026-08-13); the EGSE imported it unconditionally. It now treats it as an optional "no answer"
+  error, as the ground's `BridgeLink.from_app_utils` already did. The App Lab test of
+  `test_cfdp.py` runs with and without `AppError` (fails on the previous `main.py`).
+
+- Notifications and the E22 radio on the 64-octet Serial rings of arduino:zephyr before 1.0.0
+  (core commit `40abc1f7` raised them to 1024; the stable App Lab builds the UNO Q with 0.90.0).
+  On the owner's board the EGSE's calls worked but no notification ever arrived:
+  `notify_room()` needed the payload + 48 octets free in a 64-octet ring. And
+  `ZephyrSerial::write()` would have blocked ~180 ms per 240-octet E22 frame, with the 64-octet
+  RX ring holding only 67 ms of radio data. D-66: with small rings (`config.h
+  VGQ_SMALL_SERIAL_RINGS`, from the core's `CONFIG_ARDUINO_API_SERIAL_BUFFER_SIZE`) the E22
+  port goes through a UART pump thread (`drivers/uart_pump.h`, priority 6, every 1 ms, 1024 /
+  512-octet FIFOs, `drivers/byte_fifo.h`), and a notification longer than the ring goes out
+  only into an empty ring (at most ~45 ms at 115200 bit/s). With 1024-octet rings nothing
+  changes. New host test `test_byte_fifo.cpp` (11 checks, incl. two threads, also under
+  ThreadSanitizer); `check_firmware.sh` checks the small-ring path (70 ok); pump thread
+  stack 428 of 1024 octets. Confirmed on the owner's UNO Q (record 2026-10-12-A).
+- False I2C bus fault with nothing on A4/A5 (the AS7265X on Qwiic): with no pull-up the empty
+  bus read low and every re-probe of the absent instruments logged EVR 0x060A `I2C bus clear:
+  SDA or SCL still low after 9 clocks` (owner's board, record 2026-10-12-A). D-67: the bus
+  clear releases the lines with the MCU's weak pull-ups (`INPUT_PULLUP`, about 40 kOhm), so an
+  empty bus reads high while a target holding a line low is still found
+  (`drivers/i2c_bus.cpp`). Confirmed on the owner's board (second run of record 2026-10-12-A).
+
+### Added
+- [docs/21](docs/21_Test_Records.md) record 2026-10-12-A, the first bench run of the flight App
+  (spacecraft alone): build and start on 0.90.0, radio configuration, beacon, AS7265X on Qwiic,
+  CADU copies over the router, no reset with the radio on the board's 5 V. Its numbers are
+  added to docs/20 V-19 (busy 1528 ms against the model's 1267 ms), V-22, V-27 and V-68 (first numbered V-30, a number already taken), and
+  the setup guide's expected `busy` / `period` now use the measured values.
+- The AS7265X may be plugged into the UNO Q Qwiic socket (`Wire1`, `config.h` `QWIIC_WIRE`) instead
+  of A4/A5, on the owner's request (D-13 revision). The driver probes A4/A5 first, then Qwiic, at
+  boot and at every re-probe and stays on the bus that answers; EVR 0x0706 names it (`on A4/A5` /
+  `on Qwiic`). The Qwiic bus counts into HK `i2c_errors` and FDIR `I2C_BUS` (re-initialisation;
+  EVR 0x0605 `Qwiic I2C bus fault ...`). The boot wait for the AS7265X is now bounded by time,
+  not by a probe count. On Qwiic the A4/A5 bus needs its own pull-ups (docs/03 section 4.7).
+- `tools/llext_check.py`: every undefined symbol of a sketch's final ELF must be exported by the
+  board's loader (`syms-dynamic.ld`) or also be undefined in a baseline sketch of the same core.
+  CI runs it for both sketches and both radio options, and builds the flight sketch again on
+  `arduino:zephyr` 0.90.0 with the same check.
+- [docs/14](docs/14_Troubleshooting_and_Event_Response.md) section 2.10: App Lab import and start
+  problems (`Invalid library directory in sketch project: libraries/RadioLib`, the link error
+  above, a sketch the loader refuses, the OpenOCD messages when flashing the VENTUNO Q).
+
+### Changed
+- `dist/vgq1-spacecraft-unoq.zip` rebuilt (the station package is unchanged; the ground App
+  already ran on the owner's VENTUNO Q, whose App Lab is newer). Flight sizes on
+  1.0.0: 232860 octets flash, 128396 RAM (+44 / -16); on 0.90.0: 222148 / 120913
+  ([docs/01](docs/01_System_Design.md) section 9.1). Bridge-thread worst-case stack unchanged
+  (1084 octets).
 
 ---
 

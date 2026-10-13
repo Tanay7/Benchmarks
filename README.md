@@ -19,8 +19,11 @@ and two 433 MHz LoRa radios, using the CCSDS standards space agencies use:
   a jumper on the spacecraft and one setting on the ground, no code edit; an **SX126x** (SPI, via a bundled patched RadioLib) for LoRa profiles down
   to SF12 / 31.25 kHz with SNR, frequency error, Doppler and automatic frequency correction.
 
-> **Status: not yet tested on real hardware.** Every automated check passes (section
-> "Verification" below); the boards and radios have not been run together yet. What only hardware
+> **Status: first bench link, downlink only.** Every automated check passes (section
+> "Verification" below). The flight App has run on a UNO Q with its radio and the AS7265X
+> (2026-10-12), and the ground station on the VENTUNO Q received and decoded its downlink on the
+> bench (2026-10-13; [docs/21_Test_Records.md](docs/21_Test_Records.md) records 2026-10-12-A and
+> 2026-10-13-A). Commanding: commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet. What only hardware
 > can confirm is listed in [docs/20_Known_Limitations.md](docs/20_Known_Limitations.md) with the
 > test that confirms it in [docs/08_Verification_and_Test.md](docs/08_Verification_and_Test.md).
 
@@ -215,11 +218,11 @@ Results on the current tree (details and commands: [docs/08](docs/08_Verificatio
 
 | Layer | Result |
 |---|---|
-| Host tests (flight C++ on a PC; `-Werror` and ASan + UBSan) | 964 checks, 0 failures |
-| Ground tests (pytest, Python 3.11 and 3.13) | 749 tests: 746 passed, 3 skipped (optional reference files) |
-| Firmware type-check, every build option (`check_firmware.sh`) | 64 ok, 0 fail, 0 warn |
+| Host tests (flight C++ on a PC; `-Werror` and ASan + UBSan) | 977 checks, 0 failures |
+| Ground tests (pytest, Python 3.11 and 3.13) | 752 tests: 749 passed, 3 skipped (optional reference files) |
+| Firmware type-check, every build option (`check_firmware.sh`) | 70 ok, 0 fail, 0 warn |
 | Station sketch harness (plain, ASan + UBSan, TSan) / RouterBridge harness | 26 / 12 checks pass; negative controls fail as intended |
-| Real Arduino builds (arduino-cli + `arduino:zephyr`): both sketches, default and SX126x radio, two core releases | 0 warnings in project code; flash and RAM per build in [docs/01](docs/01_System_Design.md) section 9.1 |
+| Real Arduino builds (arduino-cli + `arduino:zephyr`): both sketches, default and SX126x radio, core 1.0.0 and main; the flight sketch also on 0.90.0, the core of App Lab installations that were not updated | 0 warnings in project code; every symbol resolvable by the board's loader (`tools/llext_check.py`); flash and RAM per build in [docs/01](docs/01_System_Design.md) section 9.1 |
 | Lint and types | ruff, mypy, shellcheck (in CI); actionlint for the workflow file (locally) |
 | CI on every push | lint, host-tests, ground-tests, arduino-build |
 | Hardware tests | not yet run |

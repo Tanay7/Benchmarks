@@ -236,10 +236,17 @@ through exactly the same CLTU -> frame -> SDLS -> FARM-1 -> dispatcher path.
    faster than that - check the clock, or wait`. Check the station clock (`date -u`), or wait
    until the floor has passed the number.
 2. Append that line to `/home/arduino/ArduinoApps/vgq1-spacecraft/data/hardline_queue.txt` on
-   the UNO Q (e.g. `ssh` + `echo <hex> >> ...`).
-3. **Check:** CMDVER with source BD/HARDLINE; UNO Q log without `hardline ... rejected`. A
-   hardline command does not confirm a radio change (§7.1) and cannot be told apart from an RF
-   `BD` command of the same opcode in the command history.
+   the UNO Q, the hex digits only, **without** angle brackets (in the shell `<` and `>` are
+   redirections: `echo <EB90...> >> file` fails with `syntax error near unexpected token '>>'`):
+   `echo EB9020A700110010C0B4C00000040600228E001E3D5D55555554C5C5C5C5C5C5C579 >> ~/ArduinoApps/vgq1-spacecraft/data/hardline_queue.txt`
+   (that line is `PKTRATE SPEC 30` without a key). The EGSE takes the file over by itself; a
+   missing or empty file afterwards is normal.
+3. **Check:** UNO Q console `hardline CLTU <n> octets -> flight command path`, then the status box
+   `CMD acc` up by one; at the ground CMDVER with source BD/HARDLINE (record 2026-10-13-A:
+   `PKTRATE SPEC 30` accepted, the first SPEC packet on VC1 within 15 s). `hardline line <n>
+   rejected: ...` = a damaged line: generate it again and copy it exactly. A hardline command
+   does not confirm a radio change (§7.1) and cannot be told apart from an RF `BD` command of
+   the same opcode in the command history.
 
 ### 2.7 Routine command table
 

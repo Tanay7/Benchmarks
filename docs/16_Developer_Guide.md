@@ -63,6 +63,7 @@ vgq1-spacecraft/                 UNO Q App (flight software + Linux EGSE)
   sketch/src/drivers/            hardware access
     radio.*                      radio abstraction + pure tables / LoRa maths (host-tested)
     e22.*  sx126x.*              E22 UART driver; SX126x via the bundled RadioLib
+    uart_pump.*  byte_fifo.h     E22 port pump thread for 64-octet Serial rings (D-66)
     i2c_bus.*                    I2C with error accounting and bus clear
     sensors.*  payload.*  as7265x.*   RM3100, Nicla ARU link, AS7265X
   sketch/src/fsw/                executive and algorithms
@@ -71,6 +72,7 @@ vgq1-spacecraft/                 UNO Q App (flight software + Linux EGSE)
     commands.*  tlm_packets.*    flight half of the dictionary (host-tested)
     autonomy.*                   stored sequences, beacon level, MAGCAL store, BIST decode
     spectral.*  attitude.*  ssr.*  sclk.h  rpc_mailbox.h  status_display.*
+  sketch/src/libc_compat.cpp     __errno for cores before 1.0.0 (newlib-nano libm)
 dssq-groundstation/              VENTUNO Q App (station sketch + ground data system)
   app.yaml (ports: [8080]), README.md
   python/main.py                 App Lab entry: data folder, config copy, token, Runner
@@ -95,7 +97,7 @@ nicla_sense_me_aru/              Nicla Sense ME firmware (Arduino IDE, Mbed Nicl
 tools/
   host_test/                     flight code on a PC: Makefile, host_test.cpp (runner) and one
                                  test_<topic>.cpp per area - autonomy (sequences, beacon, IWDG
-                                 settings, RSTCNT), cfdp, crypto, integration (packets, commands,
+                                 settings, RSTCNT), byte_fifo (UART pump FIFO), cfdp, crypto, integration (packets, commands,
                                  vectors, mailbox), radio, rice, spectral, station_id (the ground
                                  identification is never a CLTU), tx_duty (TxDutyMeter), uslp
     check_firmware.sh            every Arduino file against strict stand-ins (arduino_stub/)
@@ -103,6 +105,7 @@ tools/
     routerbridge/run.sh, stackcalc.py   bundled RouterBridge: behaviour test, stack bound
   radiolib.py  routerbridge.py  libbundle.py  *.patch   bundled libraries (22_Bundled_Libraries.md)
   package_apps.py                builds / verifies the two App Lab zips
+  llext_check.py                 will the board's loader accept a built sketch (docs/08 section 2.6)
   gen_sdls_key.py                SDLS key for both ends
   gen_dictionary_doc.py          writes docs/05 from the code
   link_budget.py                 link budget; `sensitivity` = test T-RF-03 analysis
@@ -248,7 +251,7 @@ All of 4.1, plus:
 ### 4.5 Add a sensor (instrument)
 
 1. Hardware first: a unique 7-bit address on the `Wire2` bus (today 0x20, 0x23, 0x2A, 0x49 are
-   taken), 3.3 V supply and pull-ups only (A4/A5 are not 5 V tolerant), no Qwiic (D-13); update
+   taken), 3.3 V supply and pull-ups only (A4/A5 are not 5 V tolerant), no Qwiic (only the AS7265X may use it, D-13); update
    [03_Hardware_Integration.md](03_Hardware_Integration.md).
 2. Driver `src/drivers/<sensor>.*` on `I2cBus` (never `Wire` directly): register map from the
    datasheet with the section cited, a timeout on every wait, non-blocking (start / poll / result,

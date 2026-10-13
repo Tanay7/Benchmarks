@@ -123,7 +123,7 @@ input[type=number]{width:90px}
   <span class="pill p-dim" id="h-alarm">ALARM</span>
   <span class="kv">MODE <b id="h-mode">&#8212;</b></span>
   <span class="kv">UTC <b id="h-utc">&#8212;</b></span>
-  <span class="kv">RSSI&#772;<sub>1m</sub> <b id="h-rssi">&#8212;</b></span>
+  <span class="kv">RSSI <b id="h-rssi">&#8212;</b></span>
   <span class="kv">SNR <b id="h-snr">&#8212;</b></span>
   <span class="kv">MARGIN <b id="h-margin">&#8212;</b></span>
   <span class="kv">FER <b id="h-fer">&#8212;</b></span>
@@ -409,6 +409,22 @@ function hex(v, w) { return num(v) ? "0x" + Math.round(v).toString(16).toUpperCa
 function owlt(s) { if (!num(s)) return NA; if (s < 1e-3) return (s * 1e6).toFixed(3) + " µs"; if (s < 1) return (s * 1e3).toFixed(3) + " ms"; return s.toFixed(3) + " s"; }
 function stat(w, key) { return ((S && S.rx && S.rx.windows && S.rx.windows[w]) || {})[key] || {}; }
 function pm(st, d, u) { return st && st.n ? fx(st.mean, d) + (num(st.sem) ? " ± " + fx(st.sem, d) : "") + (u ? " " + u : "") + " (n=" + st.n + ")" : NA; }
+// Received power and what is derived from it are shown at the resolution of the readings,
+// never finer (D-70): the E22 reports whole dB (RSSI and noise register); the SX126x RSSI in
+// 0.5 dB, its noise floor in 0.1 dB. Window means and percentiles are rounded the same way and
+// carry no "± SEM", which is below that resolution.
+function rStep(kind) {
+  const r = ((S.rx || {}).rf || {}).rssi_resolution_db;
+  if (!num(r) || r >= 1) return 1;                       // E22 (and before the first reading)
+  return kind === "rssi" ? r : 0.1;                      // SX126x: RSSI 0.5 dB, the rest 0.1 dB
+}
+function fres(v, kind, u) {
+  if (!num(v)) return NA;
+  const st = rStep(kind), q = Math.round(v / st) * st + 0;
+  const s = q.toFixed(st >= 1 ? 0 : 1);
+  return u ? s + " " + u : s;
+}
+function pmres(st, kind, u) { return st && st.n ? fres(st.mean, kind, u) + " (n=" + st.n + ")" : NA; }
 // The page's ONE escaping function (PB-5.7). The page currently needs no template
 // string: every dynamic string is inserted as text. Kept for any future markup.
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[c]); }
@@ -1073,13 +1089,13 @@ function renderHeader() {
   pill("h-alarm", "ALARM " + (S.alarm || NA), S.alarm === "RED" ? "bad" : S.alarm === "YELLOW" ? "warn" : "ok", reasons.length ? reasons.join("\n") : "no alarm");
   setText("h-mode", (S.decoded || {}).mode || NA);
   setText("h-utc", iso(S.utc));
-  const w1 = stat("1m", "rssi");
-  setText("h-rssi", w1.n ? fx(w1.mean, 4) + " ± " + fx(w1.sem, 4) + " dBm" : NA);
   const pk = rf.packet || {};
-  // After LOS the last packet's SNR / margin are history, not the link: shown as "—" (the
-  // RECEIVER page keeps the last values with their time).
-  setText("h-snr", st.los ? NA : num(pk.snr_db) ? fx(pk.snr_db, 2) + " dB" : fu(rf.snr_est_db, 2, "dB est."));
-  setText("h-margin", st.los ? NA : fu(rf.margin_est_db, 2, "dB"));
+  // The newest frame's RSSI as the radio reported it (D-70), not a window mean. After LOS the
+  // last packet's RSSI / SNR / margin are history, not the link: shown as "—" (the RECEIVER page
+  // keeps the last values with their time).
+  setText("h-rssi", st.los ? NA : fres(rf.rssi_dbm, "rssi", "dBm"));
+  setText("h-snr", st.los ? NA : num(pk.snr_db) ? fx(pk.snr_db, 2) + " dB" : fres(rf.snr_est_db, "db", "dB est."));
+  setText("h-margin", st.los ? NA : fres(rf.margin_est_db, "db", "dB"));
   setText("h-fer", fsci(fr.fer));
   setText("h-frames", fint(fr.ok) + " / lost " + fint(fr.lost));
   const t = S.time || {};
@@ -1135,23 +1151,22 @@ function tile(label, value, sub, kind, title) {
 function seriesCharts(pwrId, snrId) {
   const sr = (S.rx || {}).series || {};
   const t = sr.t || [];
-  lineChart(pwrId, {x: t, xTime: true, unit: "dBm", minSpan: 6, series: [
+  lineChart(pwrId, {x: t, xTime: true, unit: "dBm", minSpan: 6, vfmt: v => fres(v, "db"), series: [
     {name: "RSSI", v: sr.rssi || [], color: COL.s1}, {name: "noise floor", v: sr.noise || [], color: COL.s2}], empty: "no frames yet"});
-  lineChart(snrId, {x: t, xTime: true, unit: "dB", minSpan: 6, series: [
+  lineChart(snrId, {x: t, xTime: true, unit: "dB", minSpan: 6, vfmt: v => fres(v, "db"), series: [
     {name: "SNR est.", v: sr.snr_est || [], color: COL.s3}, {name: "SNR measured", v: sr.snr_meas || [], color: COL.s7},
     {name: "margin est.", v: sr.margin || [], color: COL.s5}], hlines: [{y: 0, color: COL.crit, label: "0 dB"}], hlinesInRange: false, empty: "no frames yet"});
 }
 function renderOverview() {
   const rx = S.rx || {}, st = rx.state || {}, rf = rx.rf || {}, fr = rx.frames || {}, dec = rx.decoder || {};
   const hk = ((S.tlm || {}).HK || {}).values || {}, d = S.decoded || {}, cop = S.cop || {};
-  const w1 = stat("1m", "rssi"), sn = stat("1m", "snr_est");
   const m = rf.margin_est_db;
   const tiles = [
     tile("Signal", st.los ? "LOS" : "AOS", st.los ? "since frame " + dur(st.since_last_frame_s) : "pass " + dur(st.pass_duration_s), st.los ? "bad" : "ok"),
-    tile("RSSI 1-min mean", w1.n ? fx(w1.mean, 4) : NA, w1.n ? "± " + fx(w1.sem, 4) + " dBm (n=" + w1.n + ")" : "dBm", "", "last " + fu(rf.rssi_dbm, 4, "dBm") + " (resolution " + fu(rf.rssi_resolution_db, 1, "dB") + ")"),
-    tile("SNR est. 1-min", sn.n ? fx(sn.mean, 4) : NA, "dB ± " + fx(sn.sem, 4) + (num((rf.packet || {}).snr_db) ? " · meas " + fx(rf.packet.snr_db, 2) : "")),
-    st.los ? tile("Margin est.", NA, num(m) ? "LOS · last " + fx(m, 2) + " dB, " + dur(st.since_last_frame_s) + " ago" : "LOS", "")
-      : tile("Margin est.", fx(m, 2), "dB vs " + fu(rf.sensitivity_dbm, 1, "dBm") + " (" + (rf.sensitivity_source || NA) + ")", num(m) ? (m < 3 ? "bad" : m < 6 ? "warn" : "ok") : ""),
+    tile("RSSI", st.los ? NA : fres(rf.rssi_dbm, "rssi"), "dBm, newest frame", "", "resolution " + fu(rf.rssi_resolution_db, 1, "dB") + "; the RECEIVER tab has the window statistics"),
+    tile("SNR est.", st.los ? NA : fres(rf.snr_est_db, "db"), "dB, newest frame" + (num((rf.packet || {}).snr_db) ? " · meas " + fx(rf.packet.snr_db, 2) : "")),
+    st.los ? tile("Margin est.", NA, num(m) ? "LOS · last " + fres(m, "db") + " dB, " + dur(st.since_last_frame_s) + " ago" : "LOS", "")
+      : tile("Margin est.", fres(m, "db"), "dB vs " + fu(rf.sensitivity_dbm, 1, "dBm") + " (" + (rf.sensitivity_source || NA) + ")", num(m) ? (m < 3 ? "bad" : m < 6 ? "warn" : "ok") : ""),
     tile("Frames", fint(fr.ok), "lost " + fint(fr.lost) + " · FER " + fsci(fr.fer)),
     tile("Throughput", fx(fr.info_rate_bps, 1), "bit/s info · " + fx(fr.frames_per_min, 2) + " frames/min"),
     tile("RS decoder", fint(dec.symbols_corrected), "sym corrected · uncorrectable " + fint(dec.uncorrectable), dec.uncorrectable ? "warn" : ""),
@@ -1191,20 +1206,20 @@ function cmdState(s) { return V(s, s === "EXECUTED" ? "ok" : ["FAILED", "TIMEOUT
 const RF_KEYS = [
   ["model", "Station radio model"], ["freq_mhz", "Frequency", "MHz", 6], ["freq_hz", "Frequency", "Hz", 1],
   ["air_rate_code", "Air-rate code", "", 0], ["rate_label", "Air rate"], ["air_rate_bps", "Air data rate", "bit/s", 2],
-  ["rssi_dbm", "Packet RSSI, last (calibrated)", "dBm", 4, "res"], ["rssi_raw_dbm", "Packet RSSI, last (raw)", "dBm", 4, "res"],
+  ["rssi_dbm", "Packet RSSI, last (calibrated)", "dBm", "R", "res"], ["rssi_raw_dbm", "Packet RSSI, last (raw)", "dBm", "R", "res"],
   ["rssi_resolution_db", "RSSI resolution", "dB", 2], ["rssi_cal_offset_db", "RSSI calibration offset (T-RF-02)", "dB", 4],
-  ["rssi_mw", "Received power, linear", "pW", 4, "pw"], ["noise_dbm", "Noise floor (calibrated)", "dBm", 4],
+  ["rssi_mw", "Received power, linear", "pW", 4, "pw"], ["noise_dbm", "Noise floor (calibrated)", "dBm", "D"],
   ["noise_source", "Noise source"], ["noise_age_s", "Noise reading age", "s", 1],
-  ["snr_est_db", "SNR est. (RSSI − noise)", "dB", 4], ["pr_est_dbm", "Signal power est. (noise removed)", "dBm", 4],
-  ["n0_est_dbm_hz", "N₀ est.", "dBm/Hz", 4], ["cn0_est_dbhz", "C/N₀ est.", "dB-Hz", 4], ["cn0_source", "C/N₀ basis"],
-  ["ebn0_est_db", "Eᵦ/N₀ est.", "dB", 4], ["noise_bw_hz", "Noise bandwidth", "Hz", 1], ["noise_bw_source", "Noise-bandwidth basis"],
+  ["snr_est_db", "SNR est. (RSSI − noise)", "dB", "D"], ["pr_est_dbm", "Signal power est. (noise removed)", "dBm", "D"],
+  ["n0_est_dbm_hz", "N₀ est.", "dBm/Hz", "D"], ["cn0_est_dbhz", "C/N₀ est.", "dB-Hz", "D"], ["cn0_source", "C/N₀ basis"],
+  ["ebn0_est_db", "Eᵦ/N₀ est.", "dB", "D"], ["noise_bw_hz", "Noise bandwidth", "Hz", 1], ["noise_bw_source", "Noise-bandwidth basis"],
   ["sensitivity_dbm", "Sensitivity", "dBm", 4, "src"], ["sensitivity_source", "Sensitivity source"],
-  ["margin_est_db", "Link margin est. (RSSI − sensitivity)", "dB", 4], ["required_snr_db", "Required SNR (LoRa SNRmin of the SF)", "dB", 2],
-  ["snr_margin_db", "SNR margin (measured − required)", "dB", 4], ["freq_offset_limit_hz", "Frequency-offset limit FERR_L", "Hz", 1],
+  ["margin_est_db", "Link margin est. (RSSI − sensitivity)", "dB", "D"], ["required_snr_db", "Required SNR (LoRa SNRmin of the SF)", "dB", 2],
+  ["snr_margin_db", "SNR margin (measured − required)", "dB", 2], ["freq_offset_limit_hz", "Frequency-offset limit FERR_L", "Hz", 1],
   ["freq_offset_abs_median_hz", "|Frequency error| median", "Hz", 1], ["freq_offset_state", "Frequency-offset state", "", 0, "state"],
   ["crc_fail_packets", "CRC-failed packets", "", 0], ["packet_error_rate", "Packet error rate (CRC)", "", 0, "sci"]];
-const STAT_METRICS = [["rssi", "Packet RSSI", "dBm", 4], ["noise", "Noise floor", "dBm", 4], ["snr_est", "SNR est. (RSSI − noise)", "dB", 4],
-  ["snr_meas", "SNR measured (SX126x)", "dB", 4], ["freq_err", "Frequency error", "Hz", 1], ["iat", "Frame inter-arrival", "s", 4],
+const STAT_METRICS = [["rssi", "Packet RSSI", "dBm", "R"], ["noise", "Noise floor", "dBm", "D"], ["snr_est", "SNR est. (RSSI − noise)", "dB", "D"],
+  ["snr_meas", "SNR measured (SX126x)", "dB", 2], ["freq_err", "Frequency error", "Hz", 1], ["iat", "Frame inter-arrival", "s", 4],
   ["rs", "RS symbols corrected / codeblock", "sym", 4], ["asm", "ASM bit errors / frame", "bit", 4]];
 function renderReceiver() {
   const rx = S.rx || {}, rf = rx.rf || {}, b = rx.budget || {}, dec = rx.decoder || {}, fr = rx.frames || {}, R = S.radio || {};
@@ -1218,16 +1233,16 @@ function renderReceiver() {
     if (kind === "pw") cell = num(v) ? (v * 1e9).toPrecision(5) + " pW" : NA;
     else if (kind === "sci") cell = fsci(v);
     else if (kind === "state") cell = V(v || NA, v === "ALARM" ? "bad" : v === "WARN" ? "warn" : v === "OK" ? "ok" : "");
-    else if (typeof v === "number") cell = fu(v, d === undefined ? 4 : d, unit) + (kind === "res" && num(rf.rssi_resolution_db) ? "  (resolution " + fx(rf.rssi_resolution_db, 1) + " dB)" : "");
+    else if (typeof v === "number") cell = (d === "R" || d === "D" ? fres(v, d === "R" ? "rssi" : "db", unit) : fu(v, d === undefined ? 4 : d, unit)) + (kind === "res" && num(rf.rssi_resolution_db) ? "  (resolution " + fx(rf.rssi_resolution_db, 1) + " dB)" : "");
     else cell = v === null || v === undefined ? NA : String(v);
     rows.push([label, kind === "src" ? N([cell, srcBadge(rf.sensitivity_source)]) : cell]);
   }
   const nested = new Set(["packet", "snr_db", "freq_err_hz", "doppler", "afc"]);       // shown in their own sections
   for (const [k, v] of Object.entries(rf)) if (!known.has(k) && !nested.has(k) && (typeof v !== "object" || v === null)) rows.push([k, typeof v === "number" ? fx(v, 4) : v === null ? NA : String(v)]);
   const pk = rf.packet || {};
-  rows.push({section: "last packet (rf.packet)"}, ["RSSI", fu(pk.rssi_dbm, 4, "dBm")], ["SNR (SnrPkt/4)", fu(pk.snr_db, 4, "dB")],
+  rows.push({section: "last packet (rf.packet)"}, ["RSSI", fres(pk.rssi_dbm, "rssi", "dBm")], ["SNR (SnrPkt/4)", fu(pk.snr_db, 2, "dB")],
             ["Frequency error (raw)", fu(pk.freq_err_hz, 1, "Hz")], ["CRC", V(pk.crc_ok === false ? "FAILED" : pk.crc_ok ? "ok" : NA, pk.crc_ok === false ? "warn" : "")], ["Time", iso(pk.t)]);
-  for (const [k, label, u, d] of [["snr_db", "SNR window 10 min", "dB", 4], ["freq_err_hz", "Frequency error window 10 min", "Hz", 1]]) {
+  for (const [k, label, u, d] of [["snr_db", "SNR window 10 min", "dB", 2], ["freq_err_hz", "Frequency error window 10 min", "Hz", 1]]) {
     const w = rf[k] || {};
     rows.push([label, w.n ? fx(w.mean, d) + " ± " + fx(w.sem, d) + " " + u + " [" + fx(w.min, d) + ", " + fx(w.max, d) + "] n=" + w.n : NA]);
   }
@@ -1239,7 +1254,8 @@ function renderReceiver() {
     for (const [w, wl] of WINDOWS) {
       const st = stat(w, k);
       const r = [wl + (st.truncated ? " (truncated)" : "")];
-      for (const s of STATS) r.push(s === "n" ? fint(st.n || 0) : st.n ? fx(st[s], d) : NA);
+      // Received-power rows: no SEM, which lies below the readings' resolution (D-70).
+      for (const s of STATS) r.push(s === "n" ? fint(st.n || 0) : !st.n ? NA : d === "R" || d === "D" ? (s === "sem" ? NA : fres(st[s], d === "R" ? "rssi" : "db")) : fx(st[s], d));
       srows.push(r);
     }
   }
@@ -1255,23 +1271,23 @@ function renderReceiver() {
     ["+ S/C antenna gain", fx(b.sc_antenna_gain_dbi, 2), NA, "dBi", N(badge("configured"))],
     ["= EIRP", fx(b.sc_eirp_dbm_est, 2), NA, "dBm", N(badge("est.", "warn"))],
     ["Distance / one-way light time", fx(b.distance_km, 3) + " km", owlt(b.owlt_s), "", N(badge("configured"))],
-    ["− Free-space path loss", fx(b.fspl_db, 4), fx(b.measured_path_loss_db_est, 4) + " (last)", "dB", N([badge("computed", "info"), " ", badge("measured", "ok")])],
-    ["  path loss 10-min mean", NA, fx(b.measured_path_loss_mean10m_db, 4), "dB", N(badge("measured", "ok"))],
+    ["− Free-space path loss", fx(b.fspl_db, 4), fres(b.measured_path_loss_db_est, "db") + " (last)", "dB", N([badge("computed", "info"), " ", badge("measured", "ok")])],
+    ["  path loss 10-min mean", NA, fres(b.measured_path_loss_mean10m_db, "db"), "dB", N(badge("measured", "ok"))],
     ["+ Ground antenna gain", fx(b.ground_gain_dbi, 2), NA, "dBi", N(badge("configured"))],
     ["− Ground line loss", fx(b.ground_line_loss_db, 2), NA, "dB", N(badge("configured"))],
-    ["= Received power", fx(b.predicted_pr_dbm, 4), pm(r10, 4), "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
-    ["Excess loss (measured − free space)", NA, V(fx(b.excess_loss_db_est, 4), num(b.excess_loss_db_est) && b.excess_loss_db_est > 20 ? "warn" : ""), "dB", N(badge("est.", "warn"))],
-    ["Thermal noise kTB" + (num(b.noise_figure_assumed_db) ? " (NF " + fx(b.noise_figure_assumed_db, 1) + " dB assumed)" : ""), fx(b.thermal_noise_dbm, 4), pm(n10, 4), "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
-    ["SNR", fx(b.predicted_snr_db, 4), m10.n ? pm(m10, 4) + " meas" : pm(s10, 4) + " est.", "dB", N(badge(m10.n ? "measured" : "est.", m10.n ? "ok" : "warn"))],
+    ["= Received power", fx(b.predicted_pr_dbm, 4), pmres(r10, "rssi"), "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
+    ["Excess loss (measured − free space)", NA, V(fres(b.excess_loss_db_est, "db"), num(b.excess_loss_db_est) && b.excess_loss_db_est > 20 ? "warn" : ""), "dB", N(badge("est.", "warn"))],
+    ["Thermal noise kTB" + (num(b.noise_figure_assumed_db) ? " (NF " + fx(b.noise_figure_assumed_db, 1) + " dB assumed)" : ""), fx(b.thermal_noise_dbm, 4), pmres(n10, "db"), "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
+    ["SNR", fx(b.predicted_snr_db, 4), m10.n ? pm(m10, 2) + " meas" : pmres(s10, "db") + " est.", "dB", N(badge(m10.n ? "measured" : "est.", m10.n ? "ok" : "warn"))],
     ["Sensitivity", fx(b.sensitivity_dbm, 4), NA, "dBm", N(srcBadge(b.sensitivity_source))],
-    ["= Link margin", V(fx(b.predicted_margin_db, 4)), V(fx(rf.margin_est_db, 4), num(rf.margin_est_db) ? (rf.margin_est_db < 3 ? "bad" : rf.margin_est_db < 6 ? "warn" : "ok") : ""), "dB", N(badge("est.", "warn"))],
+    ["= Link margin", V(fx(b.predicted_margin_db, 4)), V(fres(rf.margin_est_db, "db"), num(rf.margin_est_db) ? (rf.margin_est_db < 3 ? "bad" : rf.margin_est_db < 6 ? "warn" : "ok") : ""), "dB", N(badge("est.", "warn"))],
     ["Range at sensitivity (free space + excess loss)", NA, fx(b.range_at_sensitivity_km_est, 3), "km", N(badge("est.", "warn"))],
     {section: "uplink (station → spacecraft)"},
     ["Station transmitter power", fx(up.gs_power_dbm, 2), NA, "dBm", N(up.gs_power_verified ? badge("datasheet", "info") : badge("VERIFY T-RF-07", "warn"))],
     ["Station EIRP", fx(up.gs_eirp_dbm_est, 2), NA, "dBm", N(badge("est.", "warn"))],
     ["S/C sensitivity", fx(up.sc_sensitivity_dbm, 4), NA, "dBm", N(srcBadge(up.sc_sensitivity_source))],
-    ["Received power at the S/C", fx(up.predicted_pr_dbm, 4), fx(up.measured_uplink_rssi_dbm, 4) + " (RF uplink_rssi)", "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
-    ["Uplink margin", fx(up.predicted_margin_db, 4), fx(up.measured_margin_db, 4), "dB", N(badge("est.", "warn"))],
+    ["Received power at the S/C", fx(up.predicted_pr_dbm, 4), fres(up.measured_uplink_rssi_dbm, "rssi") + " (RF uplink_rssi)", "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
+    ["Uplink margin", fx(up.predicted_margin_db, 4), fres(up.measured_margin_db, "db"), "dB", N(badge("est.", "warn"))],
   ]);
   // ---- charts
   seriesCharts("rx-pwr", "rx-snr");
@@ -1424,9 +1440,9 @@ function renderReceiver() {
     ["Serial octets / rate", fint(se.octets) + " / " + fu(se.octets_per_s, 1, "B/s")], ["Noise queries / replies", fint(se.noise_queries) + " / " + fint(se.noise_replies)]]);
   const tw = rx.two_way || {}, ul = rx.uplink || {};
   table("rx-2way", ["", "DOWNLINK (station)", "UPLINK (spacecraft)"], [
-    ["RSSI", fu(rf.rssi_dbm, 4, "dBm"), fu(tw.uplink_rssi, 4, "dBm")], ["SNR", fu(pk.snr_db, 2, "dB"), fu(tw.uplink_snr, 2, "dB")],
-    ["Frequency error", fu(pk.freq_err_hz, 1, "Hz"), fu(tw.uplink_freq_err, 1, "Hz")], ["Noise floor", fu(rf.noise_dbm, 4, "dBm"), fu(tw.sc_noise_floor, 4, "dBm")],
-    ["Margin est.", fu(rf.margin_est_db, 4, "dB"), fu(tw.uplink_margin_db_est, 4, "dB")],
+    ["RSSI", fres(rf.rssi_dbm, "rssi", "dBm"), fres(tw.uplink_rssi, "rssi", "dBm")], ["SNR", fu(pk.snr_db, 2, "dB"), fu(tw.uplink_snr, 2, "dB")],
+    ["Frequency error", fu(pk.freq_err_hz, 1, "Hz"), fu(tw.uplink_freq_err, 1, "Hz")], ["Noise floor", fres(rf.noise_dbm, "db", "dBm"), fres(tw.sc_noise_floor, "db", "dBm")],
+    ["Margin est.", fres(rf.margin_est_db, "db", "dB"), fres(tw.uplink_margin_db_est, "db", "dB")],
     ["Frames / CLTUs", fint(fr.ok) + " frames", fint(tw.cltu_ok) + " ok / " + fint(tw.cltu_bad) + " bad"],
     ["Errors corrected", fint(dec.symbols_corrected) + " RS sym", fint(tw.bch_corrected) + " BCH"],
     ["Transmitted", fint(ul.cltus) + " CLTUs / " + fint(ul.octets) + " B (" + (ul.framing || NA) + ")", fint(tw.frames_sent) + " frames, OID " + fint(tw.oid_frames_sent)],

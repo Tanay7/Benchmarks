@@ -39,12 +39,12 @@ both ends.
 
 | Layer | Result on the current tree |
 |---|---|
-| Flight C++ on a PC (host tests), strict warnings and AddressSanitizer + UBSan | 964 checks, 0 failures |
-| Ground and EGSE test suite (Python 3.11 and 3.13) | 749 tests: 746 passed, 3 skipped (optional reference files) |
+| Flight C++ on a PC (host tests), strict warnings and AddressSanitizer + UBSan | 977 checks, 0 failures |
+| Ground and EGSE test suite (Python 3.11 and 3.13) | 752 tests: 749 passed, 3 skipped (optional reference files) |
 | Flight-to-ground cross-checks | every packet, frame, CLTU, SDLS frame and CFDP file bit-exact |
 | Official CCSDS 121.0 test data | flight 56/56 and ground 74/74 files octet for octet |
-| Firmware type-check in every build option + station and RouterBridge harnesses | 64 ok, 26 and 12 checks, negative controls fail as intended |
-| Real Arduino builds (App Lab's compiler and board package) | 7 builds (both sketches, default and SX126x radio, two platform versions), 0 warnings in project code |
+| Firmware type-check in every build option + station and RouterBridge harnesses | 70 ok, 26 and 12 checks, negative controls fail as intended |
+| Real Arduino builds (App Lab's compiler and board package) | 9 builds (both sketches, default and SX126x radio; the flight sketch on three platform versions, back to 0.90.0), 0 warnings in project code, every symbol resolvable by the board's loader |
 | Adversarial review (18 reviewers with skeptic verification) | 62 confirmed findings fixed, with a regression test wherever one is feasible |
 | Continuous integration | lint, host tests, ground tests and real builds on every push |
 
@@ -57,10 +57,13 @@ named test.
 
 ## Status
 
-> **Not yet tested on real hardware.** All automated verification passes; the boards and radios
-> have not been run together yet. The 60 hardware and standards items (56 still open: power
+> **First bench link, downlink only.** All automated verification passes. The flight App has run
+> on a UNO Q with its radio and the AS7265X, and the ground station received and decoded its
+> downlink on the bench (2026-10-12/13, [21_Test_Records.md](21_Test_Records.md) records 2026-10-12-A
+> and 2026-10-13-A); commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet. The 66 hardware and standards items (61 still open: power
 > ladders, the frequency-error sign, sensor timings, platform behaviour, the watchdog, on-air
-> identification, power draw, three standards checks) are listed with their tests in
+> identification, power draw, the radio module's restart and over-the-air configuration,
+> self-interference, three standards checks; one closed by record 2026-10-13-A) are listed with their tests in
 > [20_Known_Limitations.md](20_Known_Limitations.md) and
 > [08_Verification_and_Test.md](08_Verification_and_Test.md); measured results will go into
 > [21_Test_Records.md](21_Test_Records.md).

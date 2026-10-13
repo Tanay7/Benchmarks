@@ -71,7 +71,8 @@ The quoted names **"SDA"** and **"SCL"** mean the header pins printed SDA and SC
 | Sensors | One I2C bus on UNO Q A4/A5 (`Wire2`) | RM3100 inboard unit optional |
 | Keyboard | One M5Stack CardKB on the VENTUNO Q header SDA/SCL (`Wire`) | 3.3 V supply (option A) or 5 V through a level shifter (option B) |
 
-No Qwiic connector is used on either board, for anything (contract sections 16.1 and 17.1).
+The only Qwiic use is optional: the AS7265X may be plugged into the UNO Q Qwiic socket instead of
+A4/A5 (section 4.7, D-13). Nothing else uses a Qwiic connector, on either board.
 
 ---
 
@@ -171,7 +172,8 @@ way round; the I2C4 peripheral fixes the roles (sketch.ino header; ABX00181 9.2)
 | On board | 13 x 8 LED matrix | - | Spacecraft status lights ([06_Displays.md](06_Displays.md)) | - | `fsw/status_display.*` |
 
 SX126x build only (section 4.6): D4, D5, D6, D8, D9, D10, D11, D12, D13.
-Not used: D0/D1 (Zephyr console), the Qwiic connector (`Wire1` = I2C4, PD12/PD13), JSPI.
+Not used: D0/D1 (Zephyr console), JSPI. The Qwiic connector (`Wire1` = I2C4, PD12/PD13) is
+used only when the AS7265X is plugged in there (section 4.7).
 
 **Hardware watchdog: nothing to wire.** The flight software arms the STM32U585's own independent
 watchdog (IWDG) at the end of `setup()` (config.h `VGQ_IWDG` = 1, `kIwdgTimeoutMs` = 40000 ms):
@@ -394,7 +396,10 @@ RM3100 address = 0x20 + (SA1 x 2 + SA0) (drivers/sensors.h). Do not use 0x21 or 
 | 9 VIN | 5 V (3.5-5.5 V): the buck in configuration A, JANALOG pin 5 in configuration B |
 | 7 VDDIO_EXT | **leave unconnected** (the firmware generates 3.3 V) |
 
-**AS7265X** (SparkFun SEN-15050), on its four solder pins, never the Qwiic sockets:
+**AS7265X** (SparkFun SEN-15050), either on its four solder pins to A4/A5 (table below) or with a
+Qwiic cable from one of its Qwiic sockets to the UNO Q Qwiic socket (after the table). The flight
+software looks for it on A4/A5 first, then on the Qwiic socket, at boot and at every re-probe,
+and names the bus in EVR 0x0706 (`... on A4/A5` or `... on Qwiic`). On A4/A5:
 
 | AS7265X pin | Connect to | Notes |
 |---|---|---|
@@ -405,7 +410,14 @@ RM3100 address = 0x20 + (SA1 x 2 + SA0) (drivers/sensors.h). Do not use 0x21 or 
 | INT | **leave unconnected** | first-generation "Moonlight" ICs have !INT and !RST-ADDR swapped; the driver polls DATA_RDY (`kPinSpecInt` = -1, contract 19) |
 
 Leave the front "I2C" jumper closed (it carries the SDA/SCL pull-ups to 3.3 V) and JP2 on the
-back open (closing it switches the board to UART/AT commands) (contract 19). The board needs no
+back open (closing it switches the board to UART/AT commands) (contract 19).
+
+On the Qwiic socket instead: one Qwiic cable, nothing else (it carries 3.3 V, GND, SDA and SCL);
+the same jumper settings, the board's pull-ups then serve the Qwiic bus. Two consequences:
+the A4/A5 bus loses the pull-ups the AS7265X provided, so with an RM3100 or the Nicla Sense ME on
+A4/A5 fit 4.7 kOhm from A4 and from A5 to 3.3 V (section 4.7.2, check 1); and the lamp current
+(section 10) then comes from the Qwiic socket's 3.3 V (**VERIFY** on the bench: a lamp
+measurement must not reset the board). The board needs no
 programming: its firmware is in an on-board EEPROM read at power-on (hookup guide).
 
 **RM3100** (outboard 0x20; the optional inboard unit 0x23 is identical except the address straps).
@@ -429,7 +441,8 @@ breakout):
 * Every pull-up on this bus goes to **3.3 V** (ABX00162 9.7: A4/A5 "use pull-ups to 3.3 V only").
   Never power a breakout from 5 V if its pull-ups go to its own supply (contract 16.1).
 * Aim for **one** effective set of pull-ups of about 2-5 kOhm. The AS7265X board provides one set
-  (I2C jumper closed). If other breakouts add their own, open their pull-up jumpers first.
+  (I2C jumper closed) while it is on A4/A5; on the Qwiic socket it does not. If other breakouts
+  add their own, open their pull-up jumpers first.
 * Why that range: in standard mode (100 kHz) the I2C specification needs
   Rp >= (VDD - 0.4 V) / 3 mA = 0.97 kOhm at 3.3 V, and Rp <= 1000 ns / (0.8473 x Cb), i.e. about
   5.9 kOhm for 200 pF of bus capacitance (NXP UM10204, section 7.1).
@@ -526,7 +539,23 @@ high-performance workloads", ABX00181 12.1). Sizing: section 6.5.
 
 ### 5.3 Ground radio
 
-#### 5.3.1 E22-400T33D (default): USB-UART adapter + Radio Control Unit
+#### 5.3.0 E22-400T33D on the EBYTE E15-USB-T2 (default, `[gds] rcu = false`)
+
+The setup the ground station runs with (D-68, record 2026-10-13-A): the E22 plugs straight onto
+EBYTE's USB test board **E15-USB-T2** (CP2102 USB-UART, 3.3 V / 5 V supply jumper), which plugs
+into a VENTUNO Q USB-A port (`/dev/ttyUSB0`, `[radio] port`). The adapter's jumper caps hold M0
+and M1: a fitted cap = 0, a removed cap = 1 (EBYTE E51-TTL-500 datasheet v1.0 sections 3.6 and 5,
+which describe this board). Normal operation: both caps fitted. One-time configuration: the M0
+cap only (M1 = 1, M0 = 0); both removed is the E22's deep sleep, which does not answer
+(T33D manual 6.1). Step by step: [00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) 9.2.
+
+| Item | Value | Note |
+|---|---|---|
+| Module supply | 5 V from the USB port through the adapter (supply jumper on 5V) | Enough to receive. Transmitting draws 1.0 A typical, 1.2 A maximum (T33D manual 2.2), more than a USB port is meant to supply: docs/20 V-69. For uplink use 5.3.1 with the module's own 5 V supply |
+| M0 / M1 | the adapter's jumper caps | No wires to D2/D3/D4; `[gds] rcu = false` |
+| Lost without the RCU | `RADIO`, `GSCAN`, `WAKE`, `LINKRATE`, `LINKCHAN` are refused | Channel or rate changes: repeat the one-time configuration with the new `station.toml` values |
+
+#### 5.3.1 E22-400T33D: USB-UART adapter + Radio Control Unit (option, `[gds] rcu = true`)
 
 The module's UART reaches Linux through a **3.3 V-logic USB-UART adapter**; the VENTUNO Q MCU
 drives M0/M1 and reads AUX (the "Radio Control Unit", RCU), so the ground data system can
@@ -546,8 +575,9 @@ Do not power the module from the adapter's VCC pin or a USB port: it draws up to
 transmitting (T33D manual 2.2).
 
 Until `setup()` drives M0/M1 LOW (NORMAL), the pull-ups hold the module in deep sleep
-(sketch.ino pin map comment). Without the RCU (`[gds] rcu = false` in station.toml) tie M0 and
-M1 to GND (normal mode; EBYTE: "if not used, it can be grounded").
+(sketch.ino pin map comment). Without the RCU (`[gds] rcu = false` in station.toml, the default)
+tie M0 and M1 to GND (normal mode; EBYTE: "if not used, it can be grounded"), as the E15-USB-T2's
+fitted caps do (5.3.0).
 
 **One-time configuration of the ground module** (the GDS verifies but never rewrites the full
 register set): the factory default has the RSSI byte and the ambient-noise register disabled
@@ -556,8 +586,8 @@ register set): the factory default has the RSSI byte and the ambient-noise regis
 the RCU, with the module in configuration mode (M1 = 3.3 V, M0 = GND):
 `python3 -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config <station.toml>`
 (run from `dssq-groundstation/python`; the step-by-step version is in
-[00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) part 9.2). At every start the GDS reads
-the configuration back and reports `ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k ... -
+[00_Beginner_Setup_Guide.md](00_Beginner_Setup_Guide.md) parts 9.2 and 9.3). With the RCU, at every
+start the GDS reads the configuration back and reports `ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k ... -
 matches station.toml` or `MISMATCH [...]` (dssq/gds.py `_run_job`).
 
 #### 5.3.2 E22-400T37S on the E22-400TBH-02 board

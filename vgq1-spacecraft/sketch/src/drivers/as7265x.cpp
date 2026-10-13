@@ -49,8 +49,9 @@ inline int8_t to_i8(uint8_t v) { return v < 128u ? (int8_t)v : (int8_t)((int16_t
 // =============================================================================
 // Public interface
 // =============================================================================
-bool As7265x::begin(I2cBus& bus, int int_pin) {
-  bus_ = &bus;
+bool As7265x::begin(I2cBus& bus, int int_pin, I2cBus* alt_bus) {
+  bus_ = main_ = &bus;
+  alt_ = alt_bus == &bus ? nullptr : alt_bus;
   int_pin_ = int_pin;
   info_ = Info();
   info_.int_pin_used = int_pin >= 0;
@@ -67,11 +68,13 @@ bool As7265x::begin(I2cBus& bus, int int_pin) {
   cfg_ = SpecConfig();
   // The AS72651 answers its address only once its firmware runs (loaded from the board's
   // EEPROM at power on): poll for the ACK like SparkFun isConnected() before declaring it
-  // absent. Bounded: kSpecBootWaitMs / kSpecBootProbeMs probes.
-  bool present = bus.probe(kAddr);
-  for (uint32_t i = 0; !present && i < kSpecBootWaitMs / kSpecBootProbeMs; ++i) {
+  // absent. Bounded by time (kSpecBootWaitMs plus the last probe), not by a probe count, so
+  // a slow probe on an empty bus cannot stretch it.
+  const uint32_t t0 = millis();
+  bool present = probe_any();
+  while (!present && millis() - t0 < kSpecBootWaitMs) {
     delay(kSpecBootProbeMs);
-    present = bus.probe(kAddr);
+    present = probe_any();
   }
   if (!present) {
     state_ = ST_ABSENT;
@@ -446,7 +449,7 @@ bool As7265x::phase_tick(uint32_t now) {
         if (state_ == ST_FAULT) return fault_retry(now);
         retry_at_ = now + retry_ms_;
         retry_ms_ = retry_ms_ * 2u > kSpecRetryMaxMs ? kSpecRetryMaxMs : retry_ms_ * 2u;
-        if (!bus_->probe(kAddr)) return false;         // still absent
+        if (!probe_any()) return false;                // still absent (on either bus)
         reset_tried_ = false;
         lamps_lit_ = true;                             // never commanded: unknown until verified
         start_init();
@@ -856,7 +859,7 @@ void As7265x::enter_fault(uint32_t now) {
 // A chip that answers is alternately re-identified without a reset (a healthy chip that
 // merely booted slowly) and soft-reset first.
 bool As7265x::fault_retry(uint32_t now) {
-  if (!bus_->probe(kAddr)) {
+  if (!probe_any()) {
     enter_fault(now);                                // reschedule (lamp-safety cadence or backoff)
     return false;
   }
@@ -865,6 +868,18 @@ bool As7265x::fault_retry(uint32_t now) {
   if (!init_only) { start_srst(now); return true; }
   reset_tried_ = true;                               // a failure returns to FAULT directly
   start_init();                                      // writes every LED_CONFIG off as well
+  return true;
+}
+
+// Uncounted probe of 0x49 on the bus in use, then on the other bus (if any): the board
+// may be on the header pins or on the Qwiic connector, and may be moved between them while
+// it is absent. The driver switches to the bus that answers.
+bool As7265x::probe_any() {
+  if (bus_->probe(kAddr)) return true;
+  if (alt_ == nullptr) return false;
+  I2cBus* other = bus_ == alt_ ? main_ : alt_;
+  if (!other->probe(kAddr)) return false;
+  bus_ = other;
   return true;
 }
 
@@ -1042,7 +1057,9 @@ void As7265x::begin_main(uint32_t now) {
 
 void As7265x::frame_done(uint32_t now) {
   if (frames_done_ < 255) ++frames_done_;
-  const uint32_t sat = spec_saturation_mask(cur_.raw, cur_.exp.int_cycles, cur_.valid);
+  // Every channel this frame read counts, valid or not (D-69): a frame that failed is never
+  // finished here (on_failure), so the raw counts of the devices read are the chip's.
+  const uint32_t sat = spec_frame_saturation(cur_.raw, cur_.exp.int_cycles, cycle_dev_);
   if (stage_ == STAGE_PROBE) {
     ++probes_;
     SpecExposure nx;
