@@ -320,7 +320,9 @@ sketch: press Stop and Run again; see
 
    Copy the **token** (32 hexadecimal characters). It is also stored on the board in
    `/home/arduino/ArduinoApps/dssq-groundstation/data/http_token`.
-3. On the PC open **http://&lt;VENTUNO-Q-IP&gt;:8080**. Check: the dashboard "DSS-Q1 GROUND STATION"
+3. On the PC open **http://&lt;VENTUNO-Q-IP&gt;:8080** (`hostname -I` on the board prints the IP), or by
+   the board's name, **http://&lt;board name&gt;.local:8080** (the name in the SSH prompt
+   `arduino@<board name>`; the owner's: `http://TanVentuno.local:8080`). Check: the dashboard "DSS-Q1 GROUND STATION"
    loads. Click **TOKEN** in the header and paste the token (the browser keeps it for this
    session; without it the dashboard is read-only).
 4. Expected for now: ALARM RED with "radio backend unavailable: E22-400T33D serial port: ..."

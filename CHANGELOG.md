@@ -49,6 +49,12 @@ which the owner keeps; the defaults follow it.
   the callsign refusal, the overdriven receiver, the empty spectrometer page in SAFE and the
   start-up EVRs not forwarded. docs/03 section 5.3.0; FAQ: the USB-UART adapter, the empty
   spectrometer page, the callsign before a licence.
+- The first hardline command and the first spectrum at the ground (record 2026-10-13-A,
+  observations 9-12). docs/07 section 2.6: a concrete hardline line and the expected console
+  lines (typing the hex inside `< >` makes the shell fail). docs/14: rows for a dashboard that
+  stops updating after App Lab is switched to the other board (`curl .../api/state`, Run at
+  startup on both boards), the dashboard address (`http://<board name>.local:8080`) and the
+  hardline shell error. docs/00 part 5: the dashboard by board name.
 
 ## [Unreleased] - UNO Q flight App on arduino:zephyr before 1.0.0 (2026-10-12)
 

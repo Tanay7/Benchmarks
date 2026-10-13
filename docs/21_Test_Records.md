@@ -623,7 +623,8 @@ logged it at the first re-probe, about 30 s after boot; this run reached SCLK 55
 ### 2026-10-13-A - First downlink received by the ground station
 
 From the owner's App Lab console logs, terminal output and photos. The spacecraft ran as in
-record 2026-10-12-A (zip of commit `f71475e`, SAFE mode, beacon URGENT). No command was sent.
+record 2026-10-12-A (zip of commit `f71475e`, SAFE mode, beacon URGENT). No command was sent by
+radio; one went by hardline (observation 10).
 
 | Field (SES) | Value |
 |---|---|
@@ -654,9 +655,13 @@ record 2026-10-12-A (zip of commit `f71475e`, SAFE mode, beacon URGENT). No comm
 | 6 | First downlink, no attenuator (00:35Z start, both caps fitted, `rcu` still true) | `RX AOS` 6 s after start; 80 s: `frames=13 lost=0 RScorr=0`; `RSSI` alternating -1.0 / -256.0 dBm, `SNRest` 71 / -184 dB, `noise` -72 / -73 dBm; RED `beacon URGENT` (SAFE beacon, expected); still `did not answer the configuration read` | Frames, Reed-Solomon and telemetry decode: pass. RSSI at the end of its range: the receiver was overdriven (antennas too close) | docs/20 V-70 |
 | 7 | TDM warning | `WARN TDM station clock outside 2000..2100 (NTP not synchronised?): TDM records skipped (rx_power_dbm = -256.0 outside -200..60)` | The clock was right; the -256 dBm reading was rejected. The message now names the real cause (`gds.py _tdm_add`, test `test_tdm_rejection_names_the_field_not_the_clock`) | CHANGELOG |
 | 8 | Second downlink, 54 dB in line, `rcu = false` (00:43Z start) | no RADIO error; `RX AOS` 2 s after start; `RSSI` -39 / -40 dBm, `noise` -73 dBm, `SNRest` 33-34 dB; `frames` 2 -> 7, `lost=0`, `RScorr=0`; `sync` LOCK with occasional FLYWHEEL | pass. RSSI and noise uncalibrated (V-18): the -40 dBm is not yet a measured power | docs/20 V-18, V-70 |
+| 9 | Spacecraft receiver with the attenuator fitted | EGSE `noise` -91 to -93 dBm from 01:03Z (-57 to -75 dBm before) | Consistent with the attenuator on the spacecraft side (its receiver then hears the room 54 dB weaker); side and rating still to be confirmed | docs/20 V-18 |
+| 10 | First hardline command (no RF from the ground) | VENTUNO Q: `python3 -m dssq.cltu "PKTRATE SPEC 30" --app-data ../data` -> `EB9020A7...C579` (34-octet CLTU, unprotected). UNO Q: the hex inside `< >` failed (`syntax error near unexpected token '>>'`); without them it was queued. 01:04:10Z `hardline CLTU 34 octets -> flight command path`; 01:04:25Z `CMD acc 1 rej 0`, `VC1 141 B`, archived `TM VC1: 1`; 01:04:43Z `EVR 0x0701 spectral event: angle 5.28 deg (threshold 5.00)` | pass: the hardline path and the command acceptance chain work; SPEC packets every 30 s in SAFE | docs/07 section 2.6 |
+| 11 | First spectrum at the ground (dashboard SPECTROMETER, 01:09:43Z) | `Spectrum available / valid yes / yes`, SURVEY, flags `0x11 valid agc`, gain 64x (AGC), integration 711.68 ms (N = 255), lamps none (passive), die temperatures 22 / 20 / 22 C; header RSSI(1 m) -39.2000 +/- 0.3266 dBm, SNR 32.00 dB est., 260 frames, lost 0 | Spectrum received and decoded end to end. **Open:** of the AS72653 channels only A410 and D485 carry data (D485 the strongest of all, about 8500 counts); B435, C460, E510 and F535 have no value, which no broadband light explains. Cause not yet known (light source, the chip, or the flight / ground channel handling) | to be investigated |
+| 12 | Dashboard after App Lab was switched to the UNO Q | the page stopped updating | The ground App had stopped with the App Lab session; restarted with **Run**. **Run at startup** on both boards avoids it | docs/14 section 2.2 |
 
 | Result summary | |
 |---|---|
-| Open issues | which side the attenuator was on and its power rating; RSSI calibration (T-RF-02) with a closed coax path; the uplink (needs a licence or a fully closed coax path, and a ground supply for transmitting, V-69) |
+| Open issues | which side the attenuator was on and its power rating; the four AS72653 channels without data (observation 11); RSSI calibration (T-RF-02) with a closed coax path; the RF uplink (needs a licence or a fully closed coax path, and a ground supply for transmitting, V-69) |
 | Signed (operator, date) | |
 
