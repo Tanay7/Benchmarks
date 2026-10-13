@@ -9,7 +9,7 @@ messages; the current numbers are in [docs/08_Verification_and_Test.md](docs/08_
 
 Bench runs so far: the flight App on the UNO Q (2026-10-12) and the first downlink received by the
 ground station (2026-10-13), [docs/21_Test_Records.md](docs/21_Test_Records.md) records 2026-10-12-A and
-2026-10-13-A. Commanding has not been run on hardware yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
+2026-10-13-A. Commanding: commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet ([docs/20_Known_Limitations.md](docs/20_Known_Limitations.md)).
 
 ---
 
@@ -26,7 +26,10 @@ which the owner keeps; the defaults follow it.
   SX126x RSSI and 0.1 dB for its noise floor; window means without `± SEM`; the header and the
   OVERVIEW tiles show the newest frame's RSSI and SNR est. instead of 1-minute means. Dashboard
   (`fres()`), console `STATUS` line (`rxstats.at_resolution()`, new test), docs/13. The
-  snapshot, the CSV exports and the data logger keep full precision.
+  snapshot, the CSV exports and the data logger keep full precision. The 1 dB step was checked
+  against the E22-400T33D manual v1.05 the owner supplied: REG1 bit 5 and REG3 bit 7 give one
+  whole octet, dBm = -(256 - octet), with no finer step, no accuracy and no receiver-gain
+  setting (docs/10, docs/13).
 - `[gds] rcu` defaults to `false` (`dssq/config.py`, `config/station.toml`; D-68): the E22 sits on
   the E15-USB-T2, whose jumper caps hold M0/M1 (both fitted = normal mode). With `true` and no
   Radio Control Unit wired, every start reported `ERROR RADIO ground E22-400T33D did not answer

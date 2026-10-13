@@ -23,7 +23,7 @@ and two 433 MHz LoRa radios, using the CCSDS standards space agencies use:
 > "Verification" below). The flight App has run on a UNO Q with its radio and the AS7265X
 > (2026-10-12), and the ground station on the VENTUNO Q received and decoded its downlink on the
 > bench (2026-10-13; [docs/21_Test_Records.md](docs/21_Test_Records.md) records 2026-10-12-A and
-> 2026-10-13-A). Commanding (the uplink) has not been run on hardware yet. What only hardware
+> 2026-10-13-A). Commanding: commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet. What only hardware
 > can confirm is listed in [docs/20_Known_Limitations.md](docs/20_Known_Limitations.md) with the
 > test that confirms it in [docs/08_Verification_and_Test.md](docs/08_Verification_and_Test.md).
 

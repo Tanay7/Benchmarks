@@ -54,7 +54,7 @@ value for this terrestrial demonstration). Which standards are deliberately not 
 
 | Part | Document (version) | Used for |
 |---|---|---|
-| EBYTE E22-400T33D (default radio) | E22-400T33D V2.1 user manual v1.05 (Chinese edition) | supply 3.3-5.5 V (>= 4.7 V full power), TX 1.0 A typ / 1.2 A max, sensitivity -126 / -128 / -130 dBm at 2.4k, registers REG0-REG3, AUX timing (5.6.2), M0/M1 pull-ups. Its REG1 power table appears copied from the T30D: **VERIFY** codes 1-3 (T-RF-07) |
+| EBYTE E22-400T33D (default radio) | E22-400T33D V2.1 user manual v1.05 (Chinese edition) | supply 3.3-5.5 V (>= 4.7 V full power), TX 1.0 A typ / 1.2 A max, sensitivity -126 / -128 / -130 dBm at 2.4k, registers REG0-REG3, AUX timing (5.6.2), M0/M1 pull-ups, the RSSI octet and noise register (REG1 bit 5, REG3 bit 7: dBm = -(256 - octet), whole dB, no accuracy stated; no receiver-gain setting, a fixed built-in PA+LNA). Its REG1 power table appears copied from the T30D: **VERIFY** codes 1-3 (T-RF-07) |
 | EBYTE E22-400T37S (5 W option) | E22-xxxT37S user manual v1.5 | 37 dBm at every power code, 4.5-15 V supply, -126 dBm typ, abnormal-status log `FF FF FF 01..04`, PA over-temperature (about 120 degC), "very weak" M0/M1 pull-ups |
 | EBYTE E22-400TBH-02 test board | E22/E32-xxxTBH-02 user manual v1.0 (2024-03-06) | header pin-out, M0/M1 and RXD/TXD jumper caps, CH340X USB-UART |
 | EBYTE E22-400M33S (SX126x reference module) | module datasheet not available to the project | TCXO voltage, PA gain (11 dB default), RF-switch wiring are **VERIFY** items |

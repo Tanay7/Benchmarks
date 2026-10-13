@@ -269,7 +269,7 @@ each kind of value uses.
 
 | Reading | Resolution | Source |
 |---|---|---|
-| E22 packet RSSI and noise register | 1 dB | E22 manuals: dBm = -(256 - register); `rxstats.E22_RSSI_RESOLUTION_DB` |
+| E22 packet RSSI and noise register | 1 dB | E22-400T33D manual v1.05 REG1 bit 5 (registers 0x00 noise, 0x01 last packet) and REG3 bit 7 (the appended RSSI octet): one whole octet, dBm = -(256 - octet); the manual states no finer step and no accuracy (V-18). The SX1262's own 0.5 dB register is not passed through. `rxstats.E22_RSSI_RESOLUTION_DB` |
 | SX126x packet RSSI | 0.5 dB | SX1261/2 datasheet GetPacketStatus: RssiPkt / 2; `rxstats.SX126X_RSSI_RESOLUTION_DB` |
 | SX126x packet SNR | 0.25 dB | SnrPkt / 4 |
 | SX126x noise floor | 0.1 dB | median of 8 instantaneous RSSI samples, sent in 0.1 dBm (`rf_noise`) |

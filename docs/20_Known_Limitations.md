@@ -8,7 +8,7 @@ reviewer can see exactly what the automated tests do and do not cover.
 > ([08_Verification_and_Test.md](08_Verification_and_Test.md) section 1). **The flight App has had one
 > bench run on the UNO Q, the spacecraft alone (2026-10-12, [21_Test_Records.md](21_Test_Records.md)
 > record 2026-10-12-A), and on 2026-10-13 the ground station received its downlink on the bench
-> (record 2026-10-13-A). The uplink (commanding) has not yet been run on hardware.** Every item marked *Open* below needs a hardware test or a
+> (record 2026-10-13-A). Commanding: commands sent by hardline were accepted on the board (record 2026-10-13-A); the radio uplink has not been run yet.** Every item marked *Open* below needs a hardware test or a
 > decision. When a test closes an item, record the result in
 > [21_Test_Records.md](21_Test_Records.md), change the item's status here to *Closed* with the
 > date and the measured value, and update the named configuration value if needed.
