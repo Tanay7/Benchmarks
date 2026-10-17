@@ -75,7 +75,7 @@ from .cmdparse import (CommandError, ParsedCommand, SequenceError, help_text, pa
                        parse_sequence, seqload_commands, tc_packet)
 from .datalog import DataLogger
 from .decom import Decommutator
-from .dictionary import (APID_CFDP, APID_CMDVER, APID_EVR, APID_HK, APID_MAG, APID_RF,
+from .dictionary import (APID_ATT, APID_CFDP, APID_CMDVER, APID_EVR, APID_HK, APID_MAG, APID_RF,
                          APID_RFSCAN, APID_SPEC, APID_SPECBURST, APID_TIMECORR, BEACON_LEVELS, CFDP_STATES,
                          CMD_ERRORS, CMD_SOURCE_AD, CMD_SOURCE_BD, CMD_SOURCE_STORED, CMD_SOURCES, CMD_STAGES,
                          FARM_STATES, FDIR_BITS, FDIR_HIBERNATE,
@@ -114,6 +114,8 @@ FRAME_PERIOD_FACTOR = 4.0           # flight kModePeriodX10 SAFE (40) / 10: the 
 MIN_FRAME_PERIOD_S = 1.5            # flight kMinFramePeriodMs
 E22_UART_CADU_S = (CADU_LEN + 1) * 10 / 9600.0   # ground E22 -> USB: one CADU + RSSI octet at 9600 8N1
 STATION_IO_STALE_S = 12.0
+IMU_HISTORY_LEN = 1800              # D-75 / D-76: real-time ATT points of the SCIENCE IMU chart (ImuHistory):
+                                    # 4 h at the TEST / ENCOUNTER ATT period (8 s), 30 h at CRUISE (60 s)
 PANEL_TX_HOLD_S = 1.0                # LED-matrix uplink row: held one status-line period (frontpanel TX_PERIOD_S)
 SDLS_SN_FILE = "sdls_sn.txt"          # <archive_dir>/: last SDLS TC sequence number used (F-64)
 MISMATCH_FRAMES = 3                 # consecutive BAD_SPI / BAD_IV data frames -> service mismatch
@@ -356,6 +358,43 @@ def _hamming32(a: bytes, b: bytes) -> int:
     return bin(int.from_bytes(a, "big") ^ int.from_bytes(b, "big")).count("1")
 
 
+def _r3(v: object) -> float | None:
+    """A chart value rounded to 0.001 (finer than the readings' resolution), None kept."""
+    return round(v, 3) if isinstance(v, float) else None
+
+
+class ImuHistory:
+    """D-75 / D-76: the SCIENCE tab's IMU time chart (/api/science `imu_history`). Per
+    REAL-TIME ATT packet: the ground receive time and tilt_deg, rate_abs_dps (|omega|) and
+    vib_rms_mg exactly as imu_products() gives them - None where it reports n/a, never
+    filled in. Bounded: the newest IMU_HISTORY_LEN points (the oldest dropped first).
+    `join` is True only when the point directly follows the previous one: the next ATT
+    sequence count (mod 16384) in the same pass, so a lost or unreceived packet, a new pass
+    or a spacecraft reboot breaks the line as an n/a value does. Recorder playback (VC2)
+    ATT packets are counted, never added: their receive times are not session times."""
+
+    def __init__(self, maxlen: int = IMU_HISTORY_LEN) -> None:
+        self.points: deque[tuple[float, bool, float | None, float | None, float | None]] = deque(maxlen=maxlen)
+        self.received = 0                                # real-time ATT packets added since the ground started
+        self.playback_excluded = 0                       # recorder playback ATT packets not added
+        self._last: tuple[int, int] | None = None        # (sequence count, pass number) of the newest point
+
+    def add(self, t: float, seq: int, pass_no: int, imu: Mapping[str, Any]) -> None:
+        """One real-time ATT: `imu` = imu_products() of its values."""
+        join = self._last == ((seq - 1) & 0x3FFF, pass_no)
+        self._last = (seq, pass_no)
+        self.received += 1
+        self.points.append((round(t, 3), join, _r3(imu.get("tilt_deg")), _r3(imu.get("rate_abs_dps")),
+                            _r3(imu.get("vib_rms_mg"))))
+
+    def snapshot(self) -> dict[str, Any]:
+        pts = list(self.points)
+        return {"max_points": self.points.maxlen, "received": self.received,
+                "playback_excluded": self.playback_excluded, "t": [p[0] for p in pts],
+                "join": [p[1] for p in pts], "tilt_deg": [p[2] for p in pts],
+                "rate_abs_dps": [p[3] for p in pts], "vib_rms_mg": [p[4] for p in pts]}
+
+
 # =============================================================================
 # Ground station state
 # =============================================================================
@@ -471,6 +510,7 @@ class GroundStation:
         self.apid_stats: dict[int, dict[str, Any]] = {}
         self.evrs: deque[dict[str, Any]] = deque(maxlen=200)
         self.sensor_bus = SensorBusState()          # D-73: instrument buses from the flight's EVRs
+        self.imu_history = ImuHistory()             # D-75 / D-76: SCIENCE tab IMU chart (real-time ATT only)
         self.partition = 0
         self.last_sclk: float | None = None
         self.last_sclk_ert: float | None = None
@@ -933,6 +973,13 @@ class GroundStation:
                         self.anomaly.update(now, f"{name}.{k}", float(v))
         self.archive.packet(now, scet, p.apid, name, p.seq_count, sclk, self.partition, vcid, p.raw,
                             values if p.apid not in (APID_SPECBURST,) else {}, limits)
+        if p.apid == APID_ATT:                           # D-75 / D-76: the SCIENCE tab's IMU chart
+            if realtime:
+                sci = self.cfg["science"]
+                self.imu_history.add(now, p.seq_count, self.rx.passes, imu_products(
+                    values, float(sci["still_rate_dps"]), float(sci["still_vib_mg"])))
+            else:
+                self.imu_history.playback_excluded += 1
         if not realtime:
             return
         if p.apid == APID_HK:
@@ -2450,9 +2497,11 @@ class GroundStation:
             return out
 
     def science_snapshot(self) -> dict[str, Any]:
-        """PB-5.3.8 (/api/science only): the spectral analytics plus [science] and the LED limits."""
+        """PB-5.3.8 (/api/science only): the spectral analytics plus [science] and the LED limits;
+        the SCIENCE tab's IMU history (D-75 / D-76, ImuHistory)."""
         with self.lock:
             sci = self.spectral.snapshot(time.time())
+            sci["imu_history"] = self.imu_history.snapshot()
             sci["cfg"] = dict(self.cfg["science"])
             sci["led_limits"] = {"max_code": {"white": LED_MAX_CODE[0], "IR": LED_MAX_CODE[1], "UV": LED_MAX_CODE[2]},
                                  "allowed_led_cur": list(LED_CUR_ALLOWED)}

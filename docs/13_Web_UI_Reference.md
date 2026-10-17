@@ -157,7 +157,7 @@ Security details (CSP, request limits, CSRF and DNS-rebinding defences) are in
 | Request | When | Used by |
 |---|---|---|
 | `GET /api/state` | every 1 s (the next poll starts 1 s after the previous answer; one request at a time) | every tab and the header |
-| `GET /api/science` | every 1 s while SPECTROMETER or SCIENCE is visible, every 10 s otherwise | SPECTROMETER, SCIENCE (boom radii) |
+| `GET /api/science` | every 1 s while SPECTROMETER or SCIENCE is visible, every 10 s otherwise | SPECTROMETER, SCIENCE (boom radii, IMU history) |
 | `GET /api/files`, `/api/tdm`, `/api/exports` | when the FILES tab is shown and the lists are older than 5 s | FILES |
 | `GET /api/dictionary` | once at start (retried every 5 s until it loads) | enumeration names, command help, builders |
 
@@ -341,11 +341,11 @@ and the fade depth to see how much single readings move.
 ### 1.7 Snapshot keys and the notation in this document
 
 `/api/state` returns one JSON object (`GroundStation.snapshot()`, schema 4) with 38
-top-level keys; `/api/science` returns the spectrometer analytics separately
-(`science_snapshot()`). This document writes a value's location as a dotted path from the
+top-level keys; `/api/science` returns the spectrometer analytics and the IMU history
+separately (`science_snapshot()`). This document writes a value's location as a dotted path from the
 root: `rx.rf.rssi_dbm` is `snapshot["rx"]["rf"]["rssi_dbm"]`. Paths that start with
 `spectral`, `spectral_history`, `spectral_burst`, `spectral_skymap`, `spectral_library`,
-`cfg` or `led_limits` are in `/api/science`. A part in angle brackets is a placeholder for a
+`imu_history`, `cfg` or `led_limits` are in `/api/science`. A part in angle brackets is a placeholder for a
 name that varies: `vc.<vc>.frames` (one entry per virtual channel), `apids.<packet>.count`,
 `tlm.<packet>.values.<field>`, `rx.windows.<window>.<metric>.<stat>`. `[]` after a part
 means "each element of this list": `cfdp.transactions[].progress`.
@@ -393,7 +393,7 @@ means "each element of this list": `cfdp.transactions[].progress`.
 
 `/api/science` top-level keys: `spectral`, `spectral_history`, `spectral_burst`,
 `spectral_skymap`, `spectral_library`, `cfg` (the `[science]` table) and `led_limits`
-([section 8](#8-spectrometer-tab)).
+([section 8](#8-spectrometer-tab)), `imu_history` ([9.5](#95-imu-6-dof-over-the-session)).
 
 ---
 
@@ -2536,8 +2536,9 @@ top; the two charts show `spectral_history.lux` and `spectral_history.cct_k` aga
 
 **What it is for.** The other instruments: the three magnetometers (two RM3100 on the boom,
 the BMM150 inside the Nicla Sense ME), the attitude from the Nicla's BHI260AP fusion and
-from the independent TRIAD solution, the BHI260AP 6-DOF products ([9.4](#94-imu-6-dof)), and
-the environment sensors. Values are the newest
+from the independent TRIAD solution, the BHI260AP 6-DOF products ([9.4](#94-imu-6-dof)) and
+their time history over the session ([9.5](#95-imu-6-dof-over-the-session)), and the
+environment sensors. Values are the newest
 real-time MAG (APID 0x020), ATT (0x021) and ENV (0x023) packets on VC1: keys
 `tlm.MAG.values.<field>`, `tlm.ATT.values.<field>`, `tlm.ENV.values.<field>` (field tables:
 [05_Telemetry_and_Command_Dictionary.md](05_Telemetry_and_Command_Dictionary.md)). Default
@@ -2545,12 +2546,20 @@ cadence ([1.3](#13-how-often-things-change)): MAG 30 s (CRUISE) / 4 s (ENCOUNTER
 ATT 60 / 8 s, ENV 120 / 30 s; off in SAFE.
 
 ```
-+---------------------------------------------------------------+-----------------------------+
-| Magnetometers: outboard / inboard / body, gradient, dual-     | Attitude: fusion vs TRIAD   |
-| sensor separation, sampling, flags, boom radii                | IMU (6-DOF)                 |
-|                                                               | Environment                 |
-+---------------------------------------------------------------+-----------------------------+
++---------------------------------------------------------------------------------------------+
+| Magnetometers: outboard / inboard / body, gradient, dual-sensor separation, sampling,       |
+| flags, boom radii                                                                           |
++----------------------------------------------+----------------------------------------------+
+| Attitude: fusion vs TRIAD                    | IMU (6-DOF)                                  |
++----------------------------------------------+----------------------------------------------+
+| IMU (6-DOF) over the session: tilt / |omega| / vibration RMS strips on one time axis (9.5)  |
++----------------------------------------------+----------------------------------------------+
+| Environment                                  |
++----------------------------------------------+
 ```
+
+(At two columns; a wider window puts more panels side by side, the full-width panels stay full
+width.)
 
 ![SCIENCE tab](img/ui_science.png)
 
@@ -2678,6 +2687,64 @@ q_grv valid and paired, tilt / roll / pitch 100.58 / 106.77 / -50.48°, heading 
 drifts 2 °/h), tilt disagreement 0.00°, linear acceleration 2 mg (the simulated noise),
 9 windows, vibration 24.6 / 45 mg, mean rate -0.27 -5.02 4.36 °/s, \|ω\| 6.65 °/s, spin
 axis -0.041 -0.754 0.655, peak 7.7 °/s.
+
+### 9.5 IMU (6-DOF) over the session
+
+A full-width panel under the IMU (6-DOF) table (D-75 / D-76): three strip charts stacked on
+**one time axis** - tilt, \|ω\| of the mean rate and vibration RMS of every real-time ATT
+packet since the ground started - with **one y axis per quantity** (three strips, never two
+scales on one axis). The x axis is the ground receive time in UTC; its labels are on the
+bottom strip, the three strips cover the same time span. Each strip names its unit and source
+as the table in [9.4](#94-imu-6-dof) does:
+
+| Strip | Key | Unit | Source | Same value as |
+|---|---|---|---|---|
+| Tilt | `imu_history.tilt_deg` | ° | ground: derived on ground from the game rotation vector | `imu.tilt_deg` |
+| \|ω\| of the mean rate | `imu_history.rate_abs_dps` | °/s | ground: derived on ground from the on-board mean rate vector | `imu.rate_abs_dps` |
+| Vibration RMS | `imu_history.vib_rms_mg` | mg | on board: measured on board (1 s windows of 25 Hz samples) | `imu.vib_rms_mg` |
+
+**Data.** `/api/science` key `imu_history` (`ImuHistory` in
+[gds.py](../dssq-groundstation/python/dssq/gds.py)), refreshed with the other science data
+(every second while SCIENCE is visible). For each real-time ATT the GDS stores the receive
+time and the three values that `imu_products()` gives for that packet - the function behind
+the table in 9.4 - rounded to 0.001 (finer than every reading's resolution: rate_mean 0.01 °/s
+per axis, vib_rms 0.1 mg, q_grv Q14):
+
+| Key | Meaning |
+|---|---|
+| `imu_history.t` | ground receive time of each point: the ERT of the frame that carried the ATT, UNIX s, to 1 ms |
+| `imu_history.tilt_deg`, `imu_history.rate_abs_dps`, `imu_history.vib_rms_mg` | the three values, one per point; `null` where `imu_products()` reports n/a (the reasons in `imu.na`: `grv` for the tilt; `stats`, or `spin` when rate_mean is missing, for \|ω\|; `stats` for the vibration) |
+| `imu_history.join` | `true` when the point directly follows the previous one: the next ATT sequence count (mod 16384) in the same pass (`rx.state.passes`); `false` for the first point, after a lost or unreceived ATT, at a new pass and after a spacecraft reboot |
+| `imu_history.max_points` | the bound: 1800 points, the newest kept, the oldest dropped first (`IMU_HISTORY_LEN`): about 4 h at the TEST / ENCOUNTER ATT period of 8 s, 30 h at the CRUISE 60 s ([1.3](#13-how-often-things-change); ATT is off in SAFE) |
+| `imu_history.received` | real-time ATT packets added since the ground started; larger than the number of points once the bound is reached |
+| `imu_history.playback_excluded` | recorder playback ATT packets (VC2) received and not added |
+
+**Gaps.** Nothing is interpolated. A line joins two neighbouring points only when both have a
+value and `join` of the second is true. An n/a value, a lost or unreceived ATT, the first
+ATT of a new pass and a reboot break the line; a value without a drawn neighbour is a dot (a
+line of one point would be invisible). A time without any ATT generated on board (ATT off,
+e.g. a SAFE period inside one pass) does not advance the sequence count, so the line runs
+across it: the hover tooltip gives each point's UTC time.
+
+**Recorder playback is not drawn.** A playback ATT (VC2) arrives when the playback runs, not
+when it was measured: on a session time axis its receive time would place old values at the
+wrong time. It is counted in `imu_history.playback_excluded` and the note above the strips
+says how many; the table in 9.4 also shows real-time ATT only.
+
+**Texts.**
+
+| Where | Text |
+|---|---|
+| note above the strips | "Real-time ATT packets: N (bound 1,800 points), first UTC to last UTC; B break(s) between ATT packets that do not follow each other (lost or unreceived packet, new pass, reboot)"; "the newest N of M" once the bound is reached; "; P recorder playback ATT not drawn (receive times are not session times)" when P > 0 |
+| note and every strip, no point yet | "no 6-DOF data received in this session" |
+| a strip whose quantity has no value in any point | "n/a in all N real-time ATT packets (newest: <reason>)", the reason from `imu.na` when the newest ATT is n/a too |
+| hover tooltip | the point's UTC time, the strip's value ("n/a" for `null`) and the other two quantities of the same ATT |
+
+Example (E22 sim, `MODE TEST` 40 s after the start, 100 s in all): 11 points from 08:00:44
+to 08:02:04 UTC, 4.8 to 9.6 s apart (the TEST ATT period is 8 s), no break; tilt 117.258,
+136.374, 121.172 ... 25.846°, \|ω\| 1.872, 8.163, 9.31 ... 6.089 °/s, vibration RMS 23.4,
+25.7, 24.0 ... 23.4 mg (the newest point equals the 9.4 table: tilt 25.85°, \|ω\| 6.09 °/s,
+23.4 mg).
 
 ---
 
@@ -3180,7 +3247,7 @@ configured). Request limits and the security headers: [17_Security_Model.md](17_
 |---|---|
 | GET `/` | the dashboard page |
 | GET `/api/state` | the snapshot (this document) |
-| GET `/api/science` | `spectral`, `spectral_history`, `spectral_burst`, `spectral_skymap`, `spectral_library`, `cfg`, `led_limits` ([8](#8-spectrometer-tab)) |
+| GET `/api/science` | `spectral`, `spectral_history`, `spectral_burst`, `spectral_skymap`, `spectral_library`, `cfg`, `led_limits` ([8](#8-spectrometer-tab)), `imu_history` ([9.5](#95-imu-6-dof-over-the-session)) |
 | GET `/api/dictionary` | commands, directives, ground directives, packets and fields, enumerations, spectrometer constants |
 | GET `/metrics` | Prometheus text format 0.0.4 (below) |
 | GET `/api/xtce` | XTCE mission database (`vgq1.xtce.xml`) |
@@ -3352,5 +3419,6 @@ document.
 | `cmd_stages`, `cmd_errors`, `cmd_sources` | code -> name | [7.9](#79-other-packets-cmdver-timecorr-rfscan) |
 
 `/api/science`: `spectral`, `spectral_history`, `spectral_burst`, `spectral_skymap`,
-`spectral_library`, `cfg` (`r_outboard_m`, `r_inboard_m`, `field_ut`, `still_rate_dps`, `still_vib_mg`), `led_limits`
+`spectral_library`, `imu_history` (max_points, received, playback_excluded, t, join, tilt_deg,
+rate_abs_dps, vib_rms_mg: [9.5](#95-imu-6-dof-over-the-session)), `cfg` (`r_outboard_m`, `r_inboard_m`, `field_ut`, `still_rate_dps`, `still_vib_mg`), `led_limits`
 (`max_code`, `allowed_led_cur`) ([8](#8-spectrometer-tab), [9](#9-science-tab)).
