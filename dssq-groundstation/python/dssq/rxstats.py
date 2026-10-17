@@ -38,6 +38,17 @@ rf.rssi_invalid) and kept out of every window, histogram, series, margin, path l
 estimate and TDM record; rf.rssi_state says which. The E22 ambient-noise register is the same
 kind of octet: such a noise reading is counted in rf.noise_rejected and not used.
 
+Received power in watts (D-76): the "rssi" and "noise" windows (POWER_METRICS) also carry
+mean_mw, the linear mean of the per-reading powers, (1/n) sum 10^(x_i / 10) mW, over the same
+accepted readings as their dB statistics (an overload or invalid reading is in neither). It is
+not 10^(mean / 10): the dB mean is the mean of the logarithms, i.e. the geometric mean of the
+power, which is lower whenever the power fluctuates (-100 and -110 dBm: linear mean 5.5e-11 mW,
+10^(-105 / 10) = 3.2e-11 mW). min, max and last are readings and convert to watts directly;
+p10 / p50 / p90 are interpolated in dB between two neighbouring readings, so their watt value
+(the page converts it) lies between those readings' powers. SEM, std and fade_depth exist in
+dB only. Every watt value follows the calibrated dBm reading ([radio] rssi_cal_offset_db): it
+is as accurate as the radio's RSSI and no more.
+
 Margin at the noise floor (D-76): the RSSI the radios report is the power in the receiver
 bandwidth, signal plus noise, and LoRa decodes below the noise, so near the sensitivity
 limit RSSI - sensitivity measures the noise, not the signal (margin_assessment(); R = RSSI,
@@ -106,6 +117,7 @@ FER_CONFIDENCE = 0.95               # exact (Clopper-Pearson) bounds of every FE
 MARGIN_STATES = ("SIGNAL", "NEAR_NOISE", "NOISE_FLOOR", "NOISE_UNKNOWN")
 WINDOWS = (("1m", 60.0), ("10m", 600.0), ("pass", None))
 METRICS = ("rssi", "noise", "snr_est", "snr_meas", "freq_err", "iat", "rs", "asm")
+POWER_METRICS = ("rssi", "noise")   # received powers in dBm: their windows also carry mean_mw (D-76)
 SERIES_LEN = 300
 EVENT_LOG_LEN = 20
 FREQ_STATE_SAMPLES = 3              # freq_offset_state = median |error| of the last 3 packets
@@ -127,6 +139,20 @@ def at_resolution(v: float | None, step: float) -> str | None:
         return None
     q = math.floor(v / step + 0.5) * step + 0.0        # half up, as the dashboard's Math.round; never "-0"
     return f"{q:.0f}" if step >= 1.0 else f"{q:.1f}"
+
+
+def linear_mean_mw(dbm: list[float]) -> float | None:
+    """The linear mean of received powers given in dBm, in mW: (1/n) sum 10^(x_i / 10) (D-76,
+    module docstring). It is not 10^(mean(x) / 10), the geometric mean, which is lower whenever
+    the readings differ. None for no reading, or a sum beyond the float range (no radio here
+    reports such a power)."""
+    if not dbm:
+        return None
+    try:
+        total = math.fsum([10.0 ** (x / 10.0) for x in dbm])        # link.dbm_to_mw, inlined (snapshot path)
+    except OverflowError:
+        return None
+    return total / len(dbm) if math.isfinite(total) else None
 
 
 def fspl_db(distance_m: float, freq_hz: float) -> float | None:
@@ -296,12 +322,14 @@ def fer_block(lost: int, received: int, confidence: float = FER_CONFIDENCE) -> d
 
 class Window:
     """Sample store with summary statistics. horizon_s = None: a pass window (no time
-    trimming, capped at maxlen, `truncated` reported)."""
+    trimming, capped at maxlen, `truncated` reported). power = the samples are received
+    powers in dBm: stats() adds mean_mw, their linear mean (module docstring, D-76)."""
 
-    def __init__(self, horizon_s: float | None, maxlen: int):
+    def __init__(self, horizon_s: float | None, maxlen: int, power: bool = False):
         self.h = horizon_s
         self.d: deque[tuple[float, float]] = deque(maxlen=maxlen)
         self.discarded = 0
+        self.power = power
 
     def add(self, t: float, v: float | None) -> None:
         if v is None or isinstance(v, bool) or not math.isfinite(v):
@@ -357,6 +385,8 @@ class Window:
                     "sem": None if sd is None else sd / math.sqrt(n),   # standard error of the mean
                     "p10": pct(0.10), "p50": pct(0.50), "p90": pct(0.90), "last": v[-1],
                     "fade_depth": pct(0.90) - pct(0.10)})
+        if self.power:
+            out["mean_mw"] = linear_mean_mw(v)
         return out
 
     def brief(self, now: float | None = None) -> dict[str, Any]:
@@ -405,7 +435,8 @@ class ReceiverStats:
         self.tx_loss_db = float(sc["tx_line_loss_db"])
         self.distance_km = float(sc["distance_km"])
         self.t0 = time.time()
-        self.w = {name: {m: Window(h, TIME_WINDOW_MAX if h is not None else PASS_WINDOW_MAX) for m in METRICS}
+        self.w = {name: {m: Window(h, TIME_WINDOW_MAX if h is not None else PASS_WINDOW_MAX, m in POWER_METRICS)
+                         for m in METRICS}
                   for name, h in WINDOWS}
         self.rssi_hist = Hist(-150.0, -20.0, 5.0)
         self.snr_hist = Hist(-30.0, 60.0, 2.0)

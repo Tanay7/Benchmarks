@@ -169,11 +169,15 @@ input[type=number]{width:90px}
 <!-- =============================== 2 RECEIVER =============================== -->
 <section data-tab="RECEIVER" class="hidden">
   <div class="grid">
-    <div class="panel"><h3>RF now <small>every receiver scalar, unit and resolution; "est." = derived with a stated assumption</small></h3><div class="tw"><table id="rx-now"></table></div></div>
+    <div class="panel"><h3>RF now <small>every receiver scalar, unit and resolution; "est." = derived with a stated assumption</small></h3>
+      <div class="sub">Watts: P = 10^((dBm &#8722; 30)/10) of the calibrated reading (RSSI calibration offset): as accurate as the radio's RSSI and no more</div>
+      <div class="tw"><table id="rx-now"></table></div></div>
     <div class="panel"><h3>Link budget <small>design (free space, configured distance) vs measured; downlink and uplink</small></h3>
       <div class="sub">FSPL = 20&#183;log10(4&#960;&#183;d&#183;f/c) = 32.44778 + 20&#183;log10(d/km) + 20&#183;log10(f/MHz) dB (exact constant, c = 299 792 458 m/s)</div>
       <div class="tw"><table id="rx-budget"></table></div></div>
-    <div class="panel wide"><h3>Receiver statistics <small>3 windows &#215; 8 metrics &#215; 11 statistics; received power at the readings' resolution (D-70), other quantities to 4 decimals; &#177; = standard error of the mean; absolute RSSI accuracy is set by [radio] rssi_cal_offset_db (T-RF-02)</small></h3><div class="tw"><table id="rx-stats"></table></div></div>
+    <div class="panel wide"><h3>Receiver statistics <small>3 windows &#215; 8 metrics &#215; 11 statistics; received power at the readings' resolution (D-70), other quantities to 4 decimals; &#177; = standard error of the mean; absolute RSSI accuracy is set by [radio] rssi_cal_offset_db (T-RF-02); packet RSSI and noise floor also in watts</small></h3>
+      <div class="sub">Watts: P = 10^((dBm &#8722; 30)/10) of the calibrated readings (RSSI calibration offset): as accurate as the radio's RSSI and no more</div>
+      <div class="tw"><table id="rx-stats"></table></div></div>
     <div class="panel"><h3>Packet RSSI and noise floor <small>dBm, last 300 frames</small></h3><canvas id="rx-pwr"></canvas></div>
     <div class="panel"><h3>SNR and margin <small>dB, last 300 frames</small></h3><canvas id="rx-snr"></canvas></div>
     <div class="panel"><h3>Frequency error <small>raw LoRa estimate per packet (SX126x), Hz, with the FERR_L WARN (50 %) / ALARM (80 %) levels</small></h3><canvas id="rx-ferr"></canvas></div>
@@ -429,6 +433,22 @@ function fres(v, kind, u) {
   return u ? s + " " + u : s;
 }
 function pmres(st, kind, u) { return st && st.n ? fres(st.mean, kind, u) + " (n=" + st.n + ")" : NA; }
+// Received power in watts with a real exponent (D-76), "1.3 × 10⁻¹⁵ W": P[W] = 10^((dBm − 30) / 10).
+// The significant figures follow the reading's resolution (rStep, as fres): 2 for 1 dB and 0.5 dB
+// steps (E22 RSSI and noise, SX126x RSSI), 3 for 0.1 dB steps (SX126x noise floor). A watt value
+// follows the calibrated dBm reading (rssi_cal_offset_db): as accurate as the radio's RSSI, no more.
+const SUPERSCRIPT = {"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻"};
+function dbmW(dbm) { return num(dbm) ? Math.pow(10, (dbm - 30) / 10) : null; }
+function fwatt(w, kind) {
+  if (!num(w) || !(w > 0)) return NA;
+  const [m, e] = w.toExponential(rStep(kind) >= 0.5 ? 1 : 2).split("e");
+  return m + " × 10" + String(Number(e)).replace(/[-0-9]/g, c => SUPERSCRIPT[c]) + " W";
+}
+// Why a reading has no watt value (D-76): an overload or an invalid reading is not a power.
+function powerNa(state) {
+  return state === "OVERLOAD" ? "n/a (overload: too strong to measure)" : state === "INVALID" ? "n/a (invalid reading: no received power)"
+    : state ? NA : "n/a (no reception yet)";
+}
 // ---- D-76: what the receiver can and cannot measure ----
 // The operator text of an RSSI overload (= rxstats.OVERLOAD_TEXT; tests/test_web.py checks it).
 const OVERLOAD_TEXT = "received signal too strong to measure: increase distance or add attenuation (receiver damage limit +10 dBm)";
@@ -1286,11 +1306,13 @@ const RF_KEYS = [
   ["model", "Station radio model"], ["freq_mhz", "Frequency", "MHz", 6], ["freq_hz", "Frequency", "Hz", 1],
   ["air_rate_code", "Air-rate code", "", 0], ["rate_label", "Air rate"], ["air_rate_bps", "Air data rate", "bit/s", 2],
   ["rssi_state", "RSSI reading", "", 0, "rstate"],
-  ["rssi_dbm", "Packet RSSI, last (calibrated)", "dBm", "R", "res"], ["rssi_raw_dbm", "Packet RSSI, last (raw reading)", "dBm", "R", "raw"],
+  // each received power in dBm is followed by its watt value (D-76): "pw" = rf value in mW, "pwd" = the dBm value converted
+  ["rssi_dbm", "Packet RSSI, last (calibrated)", "dBm", "R", "res"], ["rssi_mw", "Packet RSSI, last (calibrated), in watts", "W", "R", "pw"],
+  ["rssi_raw_dbm", "Packet RSSI, last (raw reading)", "dBm", "R", "raw"],
   ["rssi_overloads", "Overload readings (too strong to measure)", "", 0, "over"], ["rssi_overload_last_t", "Last overload reading", "", 0, "t"],
   ["rssi_invalid", "Invalid readings (below −160 dBm)", "", 0],
   ["rssi_resolution_db", "RSSI resolution", "dB", 2], ["rssi_cal_offset_db", "RSSI calibration offset (T-RF-02)", "dB", 4],
-  ["rssi_mw", "Received power, linear", "W", 0, "pw"], ["noise_dbm", "Noise floor (calibrated, latest reading)", "dBm", "D"],
+  ["noise_dbm", "Noise floor (calibrated, latest reading)", "dBm", "D"], ["noise_dbm", "Noise floor (calibrated, latest reading), in watts", "W", "D", "pwd"],
   ["noise_source", "Noise source"], ["noise_age_s", "Noise reading age", "s", 1], ["noise_rejected", "Noise readings rejected (end of range)", "", 0],
   ["snr_est_db", "SNR est. (RSSI − noise, same pass)", "dB", "D"], ["pr_est_dbm", "Signal power est. (noise removed)", "dBm", "D"],
   ["n0_est_dbm_hz", "N₀ est.", "dBm/Hz", "D"], ["cn0_est_dbhz", "C/N₀ est.", "dB-Hz", "D"], ["cn0_source", "C/N₀ basis"],
@@ -1310,12 +1332,26 @@ const STAT_METRICS = [["rssi", "Packet RSSI", "dBm", "R"], ["noise", "Noise floo
 // On the E22 path (F-P0-3, F-P2-1): SX126x-only windows are not shown; RS / ASM are UART integrity
 const STAT_SX_ONLY = new Set(["snr_meas", "freq_err"]);
 const STAT_E22_NOTE = {rs: " — E22: UART / framing integrity only, not the radio channel", asm: " — E22: UART / framing integrity only, not the radio channel"};
+// Received powers (D-76): every window row is followed by its row in watts. Its mean is the linear
+// mean of the per-reading powers (rx.windows.<window>.<metric>.mean_mw, computed by the GDS over the
+// same accepted readings), never 10^(mean dBm); min, p10, p50, p90, max and last are the dBm values
+// converted (the conversion is monotonic); σ, SEM and the fade depth exist in dB only.
+const STAT_POWER = new Set(["rssi", "noise"]);
+const STAT_W_NOTE = " — rows \"in watts\": mean = linear mean (mean of W), not 10^(mean dBm); min, percentiles, max and last converted from dBm; σ, SEM and fade in dB only";
+const W_DB_ONLY = new Set(["sem", "std", "fade_depth"]);
+function wattRow(st, wl, kind) {
+  const label = wl + ", in watts";
+  if (!st.n) return [label, fint(0), "n/a (no reading in this window)"];
+  return [label, ...STATS.map(s => s === "n" ? fint(st.n) : s === "mean" ? V(num(st.mean_mw) ? fwatt(st.mean_mw / 1000, kind) : NA, "", "linear mean (mean of W)")
+    : W_DB_ONLY.has(s) ? "n/a (dB only)" : fwatt(dbmW(st[s]), kind))];
+}
 const RSTATE_CLS = {OK: "ok", OVERLOAD: "bad", INVALID: "warn"};
 const MSTATE_TEXT = {SIGNAL: "SIGNAL: RSSI ≥ 10 dB above the noise, the RSSI is the signal", NEAR_NOISE: "NEAR NOISE: 3-10 dB above the noise, the noise is removed (est.)",
   NOISE_FLOOR: "NOISE FLOOR: < 3 dB above the noise, margin not measurable (upper bound only)", NOISE_UNKNOWN: "NOT CHECKED: no noise reading in this pass"};
 function rfCell(rf, k, unit, d, kind) {
   const v = rf[k];
-  if (kind === "pw") return num(v) ? (v / 1000).toExponential(1) + " W" : NA;          // 2 significant digits of a 1 dB reading (D-70)
+  if (kind === "pw") return num(v) ? fwatt(v / 1000, d === "R" ? "rssi" : "db") : powerNa(rf.rssi_state);     // mW -> W (D-76)
+  if (kind === "pwd") return num(v) ? fwatt(dbmW(v), d === "R" ? "rssi" : "db") : "n/a (no noise reading)";
   if (kind === "sci" || kind === "sxsci") return fsci(v);
   if (kind === "state" || kind === "sxstate") return V(v || NA, v === "ALARM" ? "bad" : v === "WARN" ? "warn" : v === "OK" ? "ok" : "");
   if (kind === "rstate") return V(v === "OVERLOAD" ? "OVERLOAD: " + OVERLOAD_TEXT : v === "INVALID" ? "INVALID (below −160 dBm: no received power)" : v || NA, RSTATE_CLS[v] || "", v === "OVERLOAD" ? OVERLOAD_TEXT : "");
@@ -1364,13 +1400,15 @@ function renderReceiver() {
   const srows = [];
   for (const [k, label, unit, d] of STAT_METRICS) {
     if (!sx && STAT_SX_ONLY.has(k)) continue;
-    srows.push({section: label + " (" + unit + ")" + (!sx && STAT_E22_NOTE[k] ? STAT_E22_NOTE[k] : "")});
+    const pw = STAT_POWER.has(k);
+    srows.push({section: label + " (" + unit + ")" + (pw ? STAT_W_NOTE : "") + (!sx && STAT_E22_NOTE[k] ? STAT_E22_NOTE[k] : "")});
     for (const [w, wl] of WINDOWS) {
       const st = stat(w, k);
       const r = [wl + (st.truncated ? " (truncated)" : "")];
       // Received-power rows: no SEM, which lies below the readings' resolution (D-70).
       for (const s of STATS) r.push(s === "n" ? fint(st.n || 0) : !st.n ? NA : d === "R" || d === "D" ? (s === "sem" ? NA : fres(st[s], d === "R" ? "rssi" : "db")) : fx(st[s], d));
       srows.push(r);
+      if (pw) srows.push(wattRow(st, wl, d === "R" ? "rssi" : "db"));
     }
   }
   table("rx-stats", ["metric / window", ...STAT_HEAD], srows);

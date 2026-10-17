@@ -4,6 +4,8 @@ and cannot measure, and how the GDS reports it.
 * the exact (Clopper-Pearson) FER bounds and the pure-Python incomplete beta function behind
   them, against closed forms, published values and the binomial tails they invert;
 * RSSI readings: an E22 octet at the end of its range is an OVERLOAD, never a power;
+* the received power in watts: the window mean_mw is the linear mean of the accepted readings,
+  not 10^(mean dBm);
 * the noise-floor rule of the margin (SIGNAL / NEAR_NOISE / NOISE_FLOOR / NOISE_UNKNOWN) and
   the worst-case sensitivity it is coloured against;
 * frame loss without the AOS counter jump (it was counted modulo 256 across passes), the APID
@@ -181,6 +183,51 @@ def test_overload_and_invalid_readings_stay_out_of_every_statistic():
     assert r.overloads_recent(T0 + 1 + rxs.OVERLOAD_RECENT_S + 1) == 0
     r.on_noise_octet(-256, T0 + 5)
     assert r.noise_rejected == 1 and r.noise_dbm == -118.0
+
+
+def test_linear_mean_of_the_received_power_is_not_the_db_mean():
+    """D-76, received power in watts: the window mean in watts is the mean of the per-reading
+    powers, not 10^(mean dBm), the geometric mean. -100 and -110 dBm (1e-13 W and 1e-14 W):
+    linear mean (1e-13 + 1e-14) / 2 = 5.5e-14 W; 10^((-105 - 30) / 10) = 3.2e-14 W."""
+    mean_mw = rxs.linear_mean_mw([-100.0, -110.0])
+    assert mean_mw == pytest.approx(5.5e-11, rel=1e-12)                             # mW
+    assert round(mean_mw / 1000, 15) == 5.5e-14                                     # W
+    assert round(10 ** ((-105.0 - 30) / 10), 15) == 3.2e-14                         # 10^(mean dBm): lower
+    assert rxs.linear_mean_mw([-113.0, -113.0]) == pytest.approx(10 ** -11.3)       # no fluctuation: equal
+    for v in ([-90.0, -120.0, -101.5], [-117.4, -117.5, -117.3], [-60.0]):          # AM >= GM, equal for one
+        assert rxs.linear_mean_mw(v) >= 10 ** (math.fsum(v) / len(v) / 10) * (1 - 1e-12)
+    # sentinels: no reading, and a sum beyond the float range, are no number
+    assert rxs.linear_mean_mw([]) is None
+    assert rxs.linear_mean_mw([4000.0]) is None and rxs.linear_mean_mw([3080.0, 3080.0]) is None
+    w = rxs.Window(None, 10, power=True)
+    assert w.stats() == {"n": 0, "truncated": False}                                 # empty: no mean_mw
+    w.add(T0, -100.0)
+    w.add(T0 + 1, -110.0)
+    st = w.stats()
+    assert st["mean"] == -105.0 and st["mean_mw"] == pytest.approx(5.5e-11, rel=1e-12)
+    assert "mean_mw" not in rxs.Window(None, 10).stats() | rxs.Window(60.0, 10).stats()
+
+
+def test_linear_mean_uses_only_the_accepted_readings_of_every_window():
+    """mean_mw is computed over the same readings as the dB statistics: calibrated, and no
+    overload (E22 octet 0x00 / 0xFF) or invalid (< -160 dBm) reading; only rssi and noise
+    carry it."""
+    r = _rx(rssi_cal_offset_db=-3.0)
+    for i, raw in enumerate((-256, -97, -1, -200, -107)):                           # two overloads, one invalid
+        r.on_reception(T0 + i, raw)
+    r.on_noise_octet(-256, T0 + 5)                                                    # rejected noise octet
+    r.on_noise_octet(-115, T0 + 6)                                                    # -118 dBm calibrated
+    snap = r.snapshot(T0 + 7)
+    assert (r.rssi_overloads, r.rssi_invalid, r.noise_rejected) == (2, 1, 1)
+    for w in ("1m", "10m", "pass"):
+        rssi, noise = snap["windows"][w]["rssi"], snap["windows"][w]["noise"]
+        assert (rssi["n"], rssi["mean"], rssi["min"], rssi["max"]) == (2, -105.0, -110.0, -100.0)
+        assert rssi["mean_mw"] == pytest.approx(5.5e-11, rel=1e-12)
+        assert noise["n"] == 1 and noise["mean_mw"] == pytest.approx(10 ** -11.8, rel=1e-12)
+        assert [m for m, st in snap["windows"][w].items() if "mean_mw" in st] == list(rxs.POWER_METRICS)
+    assert snap["rf"]["rssi_mw"] == pytest.approx(10 ** -11.0)                       # the newest: -110 dBm
+    # the windows age out like the dB statistics: an empty 1-min window has no mean_mw
+    assert "mean_mw" not in r.snapshot(T0 + 200)["windows"]["1m"]["rssi"]
 
 
 def test_rate_and_link_manager_windows_follow_the_frame_period():
