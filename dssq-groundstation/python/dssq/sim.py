@@ -34,8 +34,21 @@ Built only from the ground's reference code - no second implementation of any pr
   * MAG: a constant field [science] field_ut (50 uT when unset) seen through a KNOWN hard-iron
     offset and soft-iron matrix while the simulated attitude tumbles, so the MAGCAL fit can be
     compared with the truth (MAG_OFFSET_UT, MAG_SOFT_IRON).
+  * ATT v4 (D-75), physically consistent with the tumble (_rot): the accelerometer reads the
+    specific force R^T (0, 0, -1) g (NED world: "up"), the gyroscope the BODY rates of the
+    ZYX Euler kinematics (_body_rates), the BMM150 (corrected by the BHI260 BSX) R^T B_world;
+    q_fus / q_triad from the same rotation; q_grv = the game rotation vector, q_fus turned
+    about the world vertical by a reference offset that drifts at GRV_DRIFT_DPH (IMU_F_PAIRED:
+    one ARU rebuild); the page-2 window statistics (vibration, mean and peak rates) computed
+    like the ARU from 25 Hz samples of the true motion plus white noise of about 2 mg rms
+    (three axes) and 0.07 deg/s per axis, aggregated like the flight's ImuStats. At boot the
+    sensor-bus EVRs of the recommended layout (D-73): Nicla Sense ME on A4/A5, RM3100s and
+    AS7265X on the Qwiic bus, then the BOOT EVR (flight init_sensors() order).
   * Radio, E22 byte-stream mode: the v2 ground E22 emulator (read / write / rcu_set_mode,
-    [CADU][RSSI] units, CONFIG-mode registers, C0 C1 C2 C3 noise query).
+    [CADU][RSSI] units, CONFIG-mode registers, C0 C1 C2 C3 noise query). An E22 delivers only
+    packets whose LoRa CRC passed: a corrupted reception is a LOST packet (the margin-dependent
+    loss below), never a CADU with octet errors (D-76) - Reed-Solomon corrections therefore
+    occur only in packet mode.
     Packet mode (SX126x): a link.RadioBackend - packets() returns RxPacket with RSSI (0.5 dB
     steps), SNR (0.25 dB) and a frequency error = static offset + slow Doppler ramp - the
     correction applied through rf_foff(hz) (returns 1); with probability crc_fail_prob a
@@ -91,7 +104,7 @@ CALLSIGN = "N0CALL"                                     # flight VGQ_CALLSIGN de
 IDLE_TEXT = f"DE {CALLSIGN} VGQ-1 ".encode("ascii")
 MODE_NAMES = ("BOOT", "SAFE", "CRUISE", "ENCOUNTER", "TEST")
 BEACON_NOMINAL, BEACON_INTERESTING, BEACON_IMPORTANT, BEACON_URGENT = 0, 1, 2, 3
-SENSORS_ALL = 0x03FF                                    # b0..b9 healthy; b10 ME_GRV clear: no 6-DOF part (ATT v4)
+SENSORS_ALL = 0x07FF                                    # b0..b10 healthy (b10 ME_GRV: game rotation vector valid)
 RS_RESCUE_ERRORS = (4, 12)                              # symbol errors on a CRC-failed CADU (<= 16)
 NOISE_FLOOR_NF_DB = link.SX126X_NF_DB
 DEFAULT_FIELD_UT = 50.0
@@ -100,7 +113,20 @@ MAG_OFFSET_UT = {0: (12.0, -7.5, 4.0), 1: (-3.0, 9.0, -6.0)}
 MAG_SOFT_IRON = {0: ((1.06, 0.03, -0.02), (0.03, 0.95, 0.04), (-0.02, 0.04, 1.02)),
                  1: ((0.97, -0.02, 0.01), (-0.02, 1.04, 0.02), (0.01, 0.02, 0.99))}
 MAG_FIELD_DIR = (0.40, 0.10, 0.911)
-TUMBLE_RAD_S = (0.11, 0.073, 0.051)                     # incommensurate body rates (full sphere)
+TUMBLE_RAD_S = (0.11, 0.073, 0.051)                     # ZYX Euler-angle rates yaw, pitch, roll (full sphere)
+# ATT v4 / ARU page 2 model (D-75). Noise per axis from the BHI260AP datasheet (Tables 117 / 119,
+# ODR 200 Hz; the 25 Hz values are not specified): 1.2 mg rms -> ~2.1 mg rms over three axes.
+GRV_YAW0_DEG = 25.0                                     # game-rotation reference at boot (arbitrary)
+GRV_DRIFT_DPH = 2.0                                     # its drift about the vertical, deg/h
+ACC_NOISE_MG = 1.2
+GYRO_NOISE_DPS = 0.07
+BMM150_NOISE_UT = 0.3
+ARU_WINDOW_HZ = 25                                      # samples per 1.000 s window
+IMU_FLAGS_SIM = 0x47                                    # GRV | STATS | PAIRED | GRV_PRESENT
+BOOT_BUS_EVRS = ((0x060B, "instrument acquired: Nicla Sense ME on A4/A5"),
+                 (0x060B, "instrument acquired: RM3100 outboard on Qwiic"),
+                 (0x060B, "instrument acquired: RM3100 inboard on Qwiic"),
+                 (0x0706, "AS7265X HW 40/41 FW 12.0.0 devices NIR+VIS+UV on Qwiic"))
 SPEC_TEMPLATE_UW = [max(0.05, 40.0 * math.exp(-((nm - 560.0) / 220.0) ** 2)) for nm in spectral.WAVELENGTHS_NM]
 
 
@@ -120,6 +146,40 @@ def _rot(t: float) -> tuple[tuple[float, float, float], ...]:
     return ((cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
             (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
             (-sp, cp * sr, cp * cr))
+
+
+def _body_rates(t: float) -> tuple[float, float, float]:
+    """Body angular rates (rad/s, body axes) of the _rot tumble: the ZYX Euler-angle rates
+    (yaw' , pitch', roll') = TUMBLE_RAD_S turned into p = roll' - yaw' sin(pitch),
+    q = pitch' cos(roll) + yaw' cos(pitch) sin(roll), r = -pitch' sin(roll) + yaw' cos(pitch) cos(roll)."""
+    dyaw, dpitch, droll = TUMBLE_RAD_S
+    pitch, roll = dpitch * t, droll * t
+    return (droll - dyaw * math.sin(pitch),
+            dpitch * math.cos(roll) + dyaw * math.cos(pitch) * math.sin(roll),
+            -dpitch * math.sin(roll) + dyaw * math.cos(pitch) * math.cos(roll))
+
+
+def _rot_quat(r: tuple[tuple[float, float, float], ...]) -> tuple[float, float, float, float]:
+    """Unit quaternion (scalar first) of a rotation matrix, branch-safe (Shepperd)."""
+    tr = r[0][0] + r[1][1] + r[2][2]
+    if tr > 0:
+        s = math.sqrt(tr + 1.0) * 2
+        q = (0.25 * s, (r[2][1] - r[1][2]) / s, (r[0][2] - r[2][0]) / s, (r[1][0] - r[0][1]) / s)
+    elif r[0][0] > r[1][1] and r[0][0] > r[2][2]:
+        s = math.sqrt(1.0 + r[0][0] - r[1][1] - r[2][2]) * 2
+        q = ((r[2][1] - r[1][2]) / s, 0.25 * s, (r[0][1] + r[1][0]) / s, (r[0][2] + r[2][0]) / s)
+    elif r[1][1] > r[2][2]:
+        s = math.sqrt(1.0 + r[1][1] - r[0][0] - r[2][2]) * 2
+        q = ((r[0][2] - r[2][0]) / s, (r[0][1] + r[1][0]) / s, 0.25 * s, (r[1][2] + r[2][1]) / s)
+    else:
+        s = math.sqrt(1.0 + r[2][2] - r[0][0] - r[1][1]) * 2
+        q = ((r[1][0] - r[0][1]) / s, (r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, 0.25 * s)
+    return q if q[0] >= 0 else (-q[0], -q[1], -q[2], -q[3])
+
+
+def _round_half_away(s: int, n: int) -> int:
+    """s / n rounded half away from zero in integers (the flight's ImuStats mean)."""
+    return (s + n // 2) // n if s >= 0 else -((-s + n // 2) // n)
 
 
 def _mtv(m: tuple[tuple[float, float, float], ...], v: tuple[float, ...]) -> tuple[float, float, float]:
@@ -254,9 +314,14 @@ class SimSpacecraft(link.RadioBackend):
                  framing: str = "TM", crc_fail_prob: float = 0.0, static_offset_hz: float = 0.0,
                  doppler_rate_hz_s: float = 0.0, burst_rate_hz: float = 5.0):
         self.rng = random.Random(seed)
+        # The 6-DOF sample noise has its own generator, so the IMU model does not shift the
+        # channel's random sequence (loss, fading) of a seeded run.
+        self.imu_rng = random.Random(None if seed is None else seed * 7919 + 75)
         self.clock = clock
         self.base_loss = loss
-        self.max_errors = max_errors
+        # max_errors: accepted for existing callers (--sim-errors) and ignored since the E22
+        # stopped receiving octet errors (D-76, module docstring); packet mode uses RS_RESCUE_ERRORS.
+        del max_errors
         self.rssi_mean = rssi_mean
         self.fading_db = fading_db
         self.crc_fail_prob = crc_fail_prob
@@ -297,8 +362,7 @@ class SimSpacecraft(link.RadioBackend):
         self.dl = SimDownlink(self.framing, self.sec)
         self.farm = Farm1Model()
         self._reset_state(clock())
-        self.evr_q.append((1, 0x0001, f"BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio={self.model.name} "
-                                      f"{self.framing} (SIMULATOR)"))
+        self._boot_evrs(f"BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio={self.model.name} {self.framing} (SIMULATOR)")
 
     def _reset_state(self, now: float) -> None:
         self.t0 = now
@@ -358,6 +422,7 @@ class SimSpacecraft(link.RadioBackend):
         self.burst: dict[str, Any] | None = None
         self.mag_bist = 0
         self.magcal_state = 0
+        self.imu_win_end = 0                 # SCLK second up to which the ARU windows were aggregated
         # beacon (flight BeaconMonitor, simplified to the inputs the simulator has)
         self.acc = {"evr_max": 0, "science": False, "seq_complete": False}
         self.beacon = BEACON_URGENT                               # boot SAFE = safe_by_fdir
@@ -390,6 +455,13 @@ class SimSpacecraft(link.RadioBackend):
     def _ground_contact(self) -> None:
         self.acc = {"evr_max": 0, "science": False, "seq_complete": False}
         self.beacon = self._beacon_level()
+
+    def _boot_evrs(self, boot_text: str) -> None:
+        """The flight's boot reports in its order: init_sensors() names the bus of every
+        instrument (D-73, recommended layout), then the BOOT EVR."""
+        for eid, text in BOOT_BUS_EVRS:
+            self.evr_q.append((1, eid, text))
+        self.evr_q.append((1, 0x0001, boot_text))
 
     def _evr(self, sev: int, eid: int, text: str) -> None:
         self.evr_q.append((sev, eid, text))
@@ -641,8 +713,8 @@ class SimSpacecraft(link.RadioBackend):
             return
         b = bytearray(cadu)
         if not self.packet_mode:
-            for _ in range(self.rng.randint(0, self.max_errors)):      # residual symbol errors
-                b[self.rng.randrange(4, len(b))] ^= self.rng.randrange(1, 256)
+            # The E22 drops a packet whose LoRa CRC failed (no octet errors reach the ground,
+            # D-76): a corrupted reception is the loss above, never an erroneous CADU.
             rssi_i = max(-127, min(-1, round(rssi)))
             self.last_rx_rssi = rssi_i
             # The ground E22 then sends the CADU + RSSI octet over its own 9600-baud UART (8N1):
@@ -863,7 +935,7 @@ class SimSpacecraft(link.RadioBackend):
         self.dl = SimDownlink(self.framing, self.sec)
         if self.sec is not None:
             self.sec.set_epoch(part)
-        self.evr_q.append((1, 0x0001, f"BOOT VGQ-1 FSW 3.0 rst=2 SOFTWARE radio={self.model.name} (SIMULATOR)"))
+        self._boot_evrs(f"BOOT VGQ-1 FSW 3.0 rst=2 SOFTWARE radio={self.model.name} (SIMULATOR)")
 
     # ------------------------------------------------------------- CFDP
     def _cfdp_put(self, source: int, max_kib: int, now: float, sclk: int) -> int:
@@ -1102,8 +1174,7 @@ class SimSpacecraft(link.RadioBackend):
 
     def mag_truth(self, unit: int, t: float) -> tuple[float, float, float]:
         """Noise-free raw RM3100 vector of a unit at SCLK t (uT): S_inv R^T B_world + offset."""
-        bw = tuple(self.field_ut * c / math.sqrt(sum(x * x for x in MAG_FIELD_DIR)) for c in MAG_FIELD_DIR)
-        body = _mtv(_rot(t), bw)
+        body = _mtv(_rot(t), self._field_world())
         raw = _mv(MAG_SOFT_IRON[unit], body)
         off = MAG_OFFSET_UT[unit]
         return raw[0] + off[0], raw[1] + off[1], raw[2] + off[2]
@@ -1121,35 +1192,91 @@ class SimSpacecraft(link.RadioBackend):
             for axis, val in zip("xyz", raw, strict=True):
                 v[f"{prefix}_b_{axis}"] = round(val + g(0, 0.02), 3)
             v[f"{prefix}_rms"] = 0.02
-        body = _mtv(_rot(t), tuple(self.field_ut * c / math.sqrt(sum(x * x for x in MAG_FIELD_DIR))
-                                   for c in MAG_FIELD_DIR))
+        body = _mtv(_rot(t), self._field_world())
         for axis, val in zip("xyz", body, strict=True):
             v[f"body_b_{axis}"] = round(val + g(0, 0.3), 3)
         v["body_rms"] = 0.3
         self._emit_values(APID_MAG, v, 1, now)
 
+    def _field_world(self) -> tuple[float, float, float]:
+        n = math.sqrt(sum(x * x for x in MAG_FIELD_DIR))
+        return (self.field_ut * MAG_FIELD_DIR[0] / n, self.field_ut * MAG_FIELD_DIR[1] / n,
+                self.field_ut * MAG_FIELD_DIR[2] / n)
+
+    def _imu_window(self, t0: float) -> tuple[int, int, list[int], int]:
+        """One ARU page-2 window [t0, t0 + 1 s) of 25 Hz samples of the true motion plus white
+        noise, reduced like the ARU (D-75, two passes): vib_rms (0.1 mg) = sqrt of the sum of
+        the per-axis variances, vib_peak (1 mg) = max |a_i - a_mean|, rate_mean (0.01 deg/s),
+        rate_peak (0.1 deg/s) = max |omega_i|."""
+        g = self.imu_rng.gauss
+        acc: list[tuple[float, float, float]] = []
+        rate_sum = [0.0, 0.0, 0.0]
+        rate_peak = 0.0
+        for i in range(ARU_WINDOW_HZ):
+            t = t0 + (i + 0.5) / ARU_WINDOW_HZ
+            up = _mtv(_rot(t), (0.0, 0.0, -1.0))           # specific force at rest: "up" (NED world)
+            acc.append((1000.0 * up[0] + g(0, ACC_NOISE_MG), 1000.0 * up[1] + g(0, ACC_NOISE_MG),
+                        1000.0 * up[2] + g(0, ACC_NOISE_MG)))
+            w = [math.degrees(c) + g(0, GYRO_NOISE_DPS) for c in _body_rates(t)]
+            for k in range(3):
+                rate_sum[k] += w[k]
+            rate_peak = max(rate_peak, math.sqrt(sum(c * c for c in w)))
+        n = len(acc)
+        mean = [sum(a[k] for a in acc) / n for k in range(3)]
+        var = sum(sum((a[k] - mean[k]) ** 2 for a in acc) / n for k in range(3))
+        peak = max(math.sqrt(sum((a[k] - mean[k]) ** 2 for k in range(3))) for a in acc)
+        return (round(10 * math.sqrt(var)), round(peak), [round(100 * c / n) for c in rate_sum],
+                round(10 * rate_peak))
+
+    def _imu_stats(self, t: float) -> dict[str, Any]:
+        """The ATT v4 window statistics of the period since the previous ATT: the completed
+        1 s windows (SCLK whole seconds), aggregated like the flight's ImuStats (RMS of the
+        windows' vib_rms, maximum peaks, mean of the window rate means). At most the newest
+        255 windows are simulated (imu_nwin saturates at 255)."""
+        end = int(t)
+        first = max(self.imu_win_end, end - 255)
+        self.imu_win_end = end
+        wins = [self._imu_window(float(k)) for k in range(first, end)]
+        if not wins:
+            return {"imu_nwin": 0}
+        n = len(wins)
+        return {"imu_nwin": n, "vib_rms": round(math.sqrt(sum(w[0] ** 2 for w in wins) / n)) / 10,
+                "vib_peak": max(w[1] for w in wins),
+                **{f"rate_mean_{a}": _round_half_away(sum(w[2][k] for w in wins), n) / 100
+                   for k, a in enumerate("xyz")},
+                "rate_peak": max(w[3] for w in wins) / 10}
+
     def _att(self, now: float) -> None:
         t = self._sclk(now)
         r = _rot(t)
-        w = math.sqrt(max(1e-12, 1.0 + r[0][0] + r[1][1] + r[2][2])) / 2.0
-        q = (w, (r[2][1] - r[1][2]) / (4 * w), (r[0][2] - r[2][0]) / (4 * w), (r[1][0] - r[0][1]) / (4 * w))
-        v: dict[str, Any] = {"flags": 0x1F, "acc_x": 0.0, "acc_y": 0.0, "acc_z": 1.0,
-                             "gyro_x": round(math.degrees(TUMBLE_RAD_S[2]), 1),
-                             "gyro_y": round(math.degrees(TUMBLE_RAD_S[1]), 1),
-                             "gyro_z": round(math.degrees(TUMBLE_RAD_S[0]), 1),
-                             "mag_x": 19.5, "mag_y": 0.5, "mag_z": 44.0, "q_fus_acc": 0.035,
-                             # ATT v4 (D-75): the BHI260AP 6-DOF part is not simulated yet - sent
-                             # as the flight sends it without ARU page 2 (sentinels, no flags).
-                             "imu_flags": 0, "imu_nwin": 0}
+        g = self.imu_rng.gauss
+        # Page 0, one sample each (flight gen_att): accelerometer = specific force, gyroscope =
+        # body rates, BMM150 = the world field in body axes (corrected by the BHI260 BSX).
+        up = _mtv(r, (0.0, 0.0, -1.0))
+        rates = _body_rates(t)
+        field = _mtv(r, self._field_world())
+        v: dict[str, Any] = {"flags": 0x1F, "q_fus_acc": 0.035, "imu_flags": IMU_FLAGS_SIM}
+        for k, axis in enumerate("xyz"):
+            v[f"acc_{axis}"] = round(up[k] + g(0, ACC_NOISE_MG / 1000), 3)
+            v[f"gyro_{axis}"] = round(math.degrees(rates[k]) + g(0, GYRO_NOISE_DPS), 1)
+            v[f"mag_{axis}"] = round(field[k] + g(0, BMM150_NOISE_UT), 1)
+        v.update(self._imu_stats(t))
         # q = body -> NED (the simulator's world is NED: MAG_FIELD_DIR points down). The flight
         # fields differ in convention: q_fus = BHI260 device -> ENU (Android world), q_triad =
         # TRIAD NED -> body (attitude.h triad_ned). ENU <-> NED is a 180 deg turn about (1,1,0).
+        # q_grv = the game rotation vector: device -> a Z-up world whose horizontal reference
+        # is turned by GRV_YAW0_DEG + GRV_DRIFT_DPH x t about the vertical (q_fus (x) conj(q_grv)
+        # = that turn, the ground's 9-DOF vs 6-DOF heading offset).
+        q = _rot_quat(r)
         h = math.sqrt(0.5)
         q_fus = _qmul((0.0, h, h, 0.0), q)
         q_triad = (q[0], -q[1], -q[2], -q[3])
+        half = -math.radians(GRV_YAW0_DEG + GRV_DRIFT_DPH * t / 3600.0) / 2
+        q_grv = _qmul((math.cos(half), 0.0, 0.0, math.sin(half)), q_fus)
         for i, axis in enumerate("wxyz"):
             v[f"q_fus_{axis}"] = round(q_fus[i] * 16384) / 16384
             v[f"q_triad_{axis}"] = round(q_triad[i] * 16384) / 16384
+            v[f"q_grv_{axis}"] = round(q_grv[i] * 16384) / 16384
         self._emit_values(APID_ATT, v, 1, now)
 
     def _spec(self, now: float) -> None:

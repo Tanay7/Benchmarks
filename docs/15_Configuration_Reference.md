@@ -363,6 +363,8 @@ often (SPECTRAL WARN `... DISAGREE`). The last five are ground-only plausibility
 | `r_outboard_m` | 1.0 | > 0 | m | Boom distance of the outboard RM3100 from the bus centre (SCIENCE tab: spacecraft field and ambient field estimates, 1/r^3 model) |
 | `r_inboard_m` | 0.5 | > 0 | m | Boom distance of the inboard RM3100 |
 | `field_ut` | **absent** (no default on purpose) | 1..800 | uT | Site total magnetic field (World Magnetic Model) for the MAGCAL fit. Without it the MAGCAL fit is disabled (INFO event at start) |
+| `still_rate_dps` | 0.5 | > 0, <= 2000 | deg/s | BHI260AP 6-DOF motion state (D-75, SCIENCE tab IMU (6-DOF), docs/13 9.4): an ATT period is "stationary" when its peak \|rate\| (ATT `rate_peak`) is below this and its peak vibration below `still_vib_mg`. About 3 sigma of the three-axis gyro noise from the datasheet at ODR 200 Hz (0.07 deg/s per axis); the noise at the ARU's 25 Hz is not specified: VERIFY T-SC-14 |
+| `still_vib_mg` | 10.0 | > 0, <= 16000 | mg | The vibration threshold of the same test (ATT `vib_peak`, the largest deviation of one sample from its window mean); about 3.5 sigma of the three-axis accelerometer noise (1.2 mg rms per axis at ODR 200 Hz): VERIFY T-SC-14 |
 
 ### 4.11 `[tdm]`
 
@@ -419,7 +421,7 @@ often (SPECTRAL WARN `... DISAGREE`). The last five are ground-only plausibility
 | `require_two_person_for_hazardous` | false | bool | - | true: a hazardous command also needs a second operator's AUTH in the web dashboard |
 | `auth_token` | `""` | printable ASCII without blanks, <= 256 | - | When set, AUTH also needs header `X-DSSQ-Auth` (the second operator's secret) |
 
-Key count: 92 keys (90 in the shipped file plus the optional `[science] field_ut` and
+Key count: 94 keys (92 in the shipped file plus the optional `[science] field_ut` and
 `[linkmgr] min_rate`) and two open tables (`[radio.sensitivity_measured]`,
 `[spectral.classifier]` with 15 possible keys).
 
@@ -454,7 +456,7 @@ is configured at build time like the flight sketch (edit, then Run in App Lab).
 | `--config FILE` | `python -m dssq.gds` (host) | `config/station.toml` next to `dssq/`, or `<APP_DATA>/station.toml` with `--app-data` | Configuration file |
 | `--app-data DIR` | host (`dssq.gds`, also `dssq.cltu`) | unset (the installed service passes `<App>/data`) | Use a ground App's data folder exactly as the App does: `DIR/station.toml` (copied from the packaged default on first use; `--config` overrides it), archive, `sdls_key.hex`, `http_token`, App Lab path rules (§1) |
 | `--port DEV` | host | `[radio] port` | Override the E22 serial port |
-| `--sim`, `--sim-loss P`, `--sim-errors N` | host | off, 0.05, 3 | Software spacecraft; simulated packet-loss probability; maximum symbol errors per CADU. With `--sim` (with or without an archive, also with `--app-data`) the SDLS TC counter and TM replay state live in memory: the real `sdls_sn.txt` and `sdls_tm_replay.txt` are never read or written, so the simulator cannot end or disturb a hold of the real counter (`gds.py` `keep_security_state`) |
+| `--sim`, `--sim-loss P`, `--sim-errors N` | host | off, 0.05, 3 | Software spacecraft; simulated packet-loss probability; `--sim-errors` has no effect (kept for existing scripts): an E22 delivers only packets whose CRC passed, so the simulator turns a corrupted reception into a lost packet and sends no octet errors (D-76); Reed-Solomon corrections occur only in the SX126x (packet-mode) simulation. With `--sim` (with or without an archive, also with `--app-data`) the SDLS TC counter and TM replay state live in memory: the real `sdls_sn.txt` and `sdls_tm_replay.txt` are never read or written, so the simulator cannot end or disturb a hold of the real counter (`gds.py` `keep_security_state`) |
 | `--no-archive` | host | archive on | Run without writing an archive (CSV export then refused). The SDLS security counters are not archive data and are still read and written in `<archive_dir>`: the TC sequence-number file `sdls_sn.txt` (+ `.lock`) and, with TM AE, the TM replay state `sdls_tm_replay.txt`; a missing `sdls_sn.txt` holds the uplink as with an archive ([17_Security_Model.md](17_Security_Model.md) section 7.6). Only the simulator (`--sim`, with or without `--no-archive`) keeps them in memory |
 | `-v` | host | off | Debug logging |
 | `--data DIR` | spacecraft EGSE (`vgq1-spacecraft/python/main.py`) | `<App>/data` | EGSE data directory |

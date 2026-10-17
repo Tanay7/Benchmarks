@@ -130,7 +130,9 @@ def test_v3_telemetry_beacon_and_sdls_ae_both_ways(world):
     s = gs.snapshot()
     assert s["schema"] == 3 and s["version"] == "3.0.0" and s["sync"]["state"] == "LOCK"
     assert s["rx"]["frames"]["ok"] > 15 and s["rx"]["decoder"]["uncorrectable"] == 0
-    assert s["rx"]["decoder"]["symbols_corrected"] > 0                            # RS exercised
+    # The E22 delivers only packets whose CRC passed: no octet errors, no RS corrections (D-76; the
+    # RS path is exercised in the packet-mode world below)
+    assert s["rx"]["decoder"]["symbols_corrected"] == 0
     sd = s["link"]["sdls"]
     assert (sd["tc_service"], sd["tm_service"], sd["key_loaded"], sd["tc_sn_state"]) == ("AE", "AE", True, "OK")
     assert sd["tm_frames_ok"] >= 3 and sd["tm_auth_fail"] == 0 and sd["tm_replay"] == 0
@@ -596,6 +598,7 @@ def test_packet_mode_afc_doppler_rs_rescue_and_no_noise_query(monkeypatch, tmp_p
     assert dop["source"] == "afc estimate" and abs(dop["doppler_hz"] - (6000 + 0.5 * 450)) < 600
     dec = s["rx"]["decoder"]
     assert dec["rs_rescued"] > 0 and dec["rs_rescue_failed"] == 0 and dec["uncorrectable"] == 0
+    assert dec["symbols_corrected"] > 0                                         # RS exercised (CRC-failed packets)
     assert s["sync"]["state"] == "PACKET" and s["rx"]["frames"]["ok"] > 100
     assert not any(c[:4] == bytes([0xC0, 0xC1, 0xC2, 0xC3]) for c in w.writes)   # no E22 noise query
     assert s["rx"]["rf"]["freq_offset_state"] == "OK"

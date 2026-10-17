@@ -88,6 +88,7 @@ from .magcal import MagCalCollector, MagCalResult, clear_args, magcal_command
 from .radio.e22 import NOISE_QUERY
 from .radioctl import RadioManager
 from .rxstats import E22_RSSI_RESOLUTION_DB, SX126X_RSSI_RESOLUTION_DB, ReceiverStats, Window, at_resolution
+from .sensors import NOT_SEPARATED_REASON, SensorBusState, imu_products
 from .spectral import LED_CUR_ALLOWED, LED_MAX_CODE, SpectralState
 
 log = logging.getLogger("dssq")
@@ -455,6 +456,7 @@ class GroundStation:
         self.tlm: dict[str, dict[str, Any]] = {}
         self.apid_stats: dict[int, dict[str, Any]] = {}
         self.evrs: deque[dict[str, Any]] = deque(maxlen=200)
+        self.sensor_bus = SensorBusState()          # D-73: instrument buses from the flight's EVRs
         self.partition = 0
         self.last_sclk: float | None = None
         self.last_sclk_ert: float | None = None
@@ -899,6 +901,7 @@ class GroundStation:
         self.event(EVR_LEVEL.get(str(values["severity"]), "ERROR"), "S/C EVR",
                    f"[{values['event_id']:#06x}] {values['text']}{tag}", now)
         self.spectral.on_evr(values["event_id"], str(values["severity"]), values["text"], scet or now)
+        self.sensor_bus.on_evr(values["event_id"], str(values["text"]), now, playback=vcid == 2)
 
     def _on_hk(self, v: dict[str, Any], now: float, protected: bool, scet: float | None = None) -> None:
         part = _int_or_none(v.get("sclk_partition"))
@@ -2030,6 +2033,8 @@ class GroundStation:
             yellow.append("FDIR " + ",".join(decode_bits(other, FDIR_BITS)))
         if hk.get("reset_cause") == RESET_BROWNOUT:
             yellow.append("spacecraft reset cause BROWNOUT (check the radio supply)")
+        if self.sensor_bus.separated(_int_or_none(hk.get("sensor_health"))) is False:
+            yellow.append(NOT_SEPARATED_REASON)        # D-73 separation rule (flight WARN 0x060D)
         recent = sum(1 for t in self._sdls_tm_rejects if now - t < RECENT_WINDOW_S)
         if recent:
             yellow.append(f"{recent} SDLS TM rejects in the last 60 s")
@@ -2258,6 +2263,10 @@ class GroundStation:
                     for a, s in sorted(self.apid_stats.items())},
                 "tlm": self.tlm,
                 "decoded": self._decoded(),
+                # D-75 / D-73: 6-DOF ground products of the newest ATT, instrument buses (dssq/sensors.py)
+                "imu": imu_products(self.tlm.get("ATT", {}).get("values"), float(self.cfg["science"]["still_rate_dps"]),
+                                    float(self.cfg["science"]["still_vib_mg"])),
+                "sensor_bus": self.sensor_bus.snapshot(_int_or_none(hk.get("sensor_health"))),
                 "time": {"partition": self.partition, "last_sclk": self.last_sclk,
                          "scet_of_last_sclk": self.corr.scet(self.last_sclk) if self.last_sclk is not None else None,
                          # PB-5.1 "nothing is invented": a drift needs two samples, a residual
@@ -2714,7 +2723,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", help="override [radio] port (E22 models)")
     ap.add_argument("--sim", action="store_true", help="use the software spacecraft simulator")
     ap.add_argument("--sim-loss", type=float, default=0.05, help="simulated packet loss probability")
-    ap.add_argument("--sim-errors", type=int, default=3, help="max simulated symbol errors per CADU")
+    ap.add_argument("--sim-errors", type=int, default=3,
+                    help="no effect: the simulated E22 sends no octet errors (D-76); kept for existing scripts")
     ap.add_argument("--no-archive", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)

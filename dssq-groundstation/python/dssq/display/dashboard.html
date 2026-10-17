@@ -224,7 +224,8 @@ input[type=number]{width:90px}
     <div class="panel"><h3>Housekeeping <small>APID 0x010, every field decoded; limits coloured</small></h3><div class="tw"><table id="sc-hk"></table></div></div>
     <div class="panel"><h3>Telecom <small>APID 0x011, every field</small></h3><div class="tw"><table id="sc-rf"></table></div></div>
     <div class="panel"><h3>Fault protection <small>HK fdir_flags</small></h3><div class="bits" id="sc-fdir"></div>
-      <h3 style="margin-top:10px">Sensors <small>HK sensor_health</small></h3><div class="bits" id="sc-sens"></div></div>
+      <h3 style="margin-top:10px">Sensors <small>HK sensor_health</small></h3><div class="bits" id="sc-sens"></div>
+      <h3 style="margin-top:10px">Sensor buses <small>from the flight's bus EVRs 0x060B / 0x060D / 0x060E / 0x0606 / 0x0706 (D-73)</small></h3><div class="tw"><table id="sc-bus"></table></div></div>
     <div class="panel"><h3>Beacon <small>Deep Space 1 style urgency level from HK (history of changes)</small></h3><canvas id="sc-beacon" class="short"></canvas><div class="tw"><table id="sc-beacon-tab"></table></div></div>
     <div class="panel"><h3>Onboard state <small>sequence, MAG BIST, MAGCAL, CFDP</small></h3><div class="tw"><table id="sc-state"></table></div></div>
     <div class="panel"><h3>Other packets <small>CMDVER, TIMECORR, RFSCAN</small></h3><div class="tw"><table id="sc-other"></table></div></div>
@@ -272,6 +273,7 @@ input[type=number]{width:90px}
   <div class="grid">
     <div class="panel wide"><h3>Magnetometers <small>RM3100 outboard / inboard (boom) and BMM150 body; dual-sensor separation of the spacecraft field assumes a 1/r&#179; dipole (est.)</small></h3><div class="tw"><table id="si-mag"></table></div></div>
     <div class="panel"><h3>Attitude <small>BHI260 fusion vs TRIAD, both converted to body&#8594;NED; Euler ZYX (yaw, pitch, roll)</small></h3><div class="tw"><table id="si-att"></table></div></div>
+    <div class="panel"><h3>IMU (6-DOF) <small>BHI260AP game rotation vector and 1 s window statistics (ATT v4); source: on board = measured on the spacecraft, ground = derived by the GDS</small></h3><div class="tw"><table id="si-imu"></table></div></div>
     <div class="panel"><h3>Environment <small>Nicla Sense ME: BMP390 pressure, BME688 T / RH / gas, BSEC</small></h3><div class="tw"><table id="si-env"></table></div></div>
   </div>
 </section>
@@ -1545,6 +1547,24 @@ function tlmTable(id, pname) {
   rows.push({section: "packet"}, ["ERT / SCET", iso(p.ert), iso(p.scet), "", ""], ["SCLK / seq / VC", fx(p.sclk, 4), "seq " + p.seq + " VC" + p.vcid, "", ""]);
   table(id, ["field", "value", "decoded", "unit", "limit"], rows);
 }
+// D-73: the bus each instrument answered on, from the flight's EVRs (gds sensor_bus).
+function renderSensorBus() {
+  const sbus = S.sensor_bus || {}, ins = sbus.instruments || {};
+  const rows = ["nicla", "rm3100_ob", "rm3100_ib", "as7265x"].map(k => {
+    const e = ins[k] || {};
+    const bus = nil(e.bus) ? V("unknown (no report)", "dim") : V(e.bus + (e.wrong_bus ? " (not the recommended bus)" : ""), e.wrong_bus ? "warn" : "", e.warning || undefined);
+    const st = e.state === "lost" ? V("LOST" + (e.event_id ? " (EVR " + hex(e.event_id, 4) + " " + tod(e.t) + ")" : ""), "bad")
+      : e.state === "acquired" ? V("acquired (EVR " + hex(e.event_id, 4) + " " + tod(e.t) + (e.playback ? ", playback" : "") + ")" + (e.hk_ok === false ? ", HK MISSING" : ""), e.hk_ok === false ? "warn" : "ok")
+      : V(e.hk_ok === true ? "HK OK, no bus report" : e.hk_ok === false ? "HK MISSING, no bus report" : NA, "dim");
+    return [e.name || k, bus, e.recommended || "any (no preferred bus)", st];
+  });
+  const sep = sbus.separated;
+  rows.push({section: "separation rule (Nicla Sense ME and RM3100 on different buses)"},
+    ["Separated", V(sbus.separation || NA, sep === false ? "warn" : sep === true ? "ok" : "dim"), "", ""],
+    ["Lost instruments", (sbus.lost || []).join(", ") || "none", "", ""],
+    ["Last \"not separated\" WARN", sbus.last_not_separated ? tod(sbus.last_not_separated.t) + " " + sbus.last_not_separated.text : "none", "", ""]);
+  table("sc-bus", ["instrument", "bus", "recommended", "state"], rows);
+}
 function renderSpacecraft() {
   tlmTable("sc-hk", "HK");
   tlmTable("sc-rf", "RF");
@@ -1552,7 +1572,11 @@ function renderSpacecraft() {
   const fd = DICT ? DICT.enums.FDIR_BITS || [] : [];
   fill("sc-fdir", fd.length ? fd.map((n, i) => { const on = num(hk.fdir_flags) && (hk.fdir_flags >> i) & 1; return h("div", {cls: "bit" + (on ? " on" : ""), text: "b" + i + " " + n + (on ? " SET" : "")}); }) : h("div", {cls: "dim", text: "waiting for the dictionary"}));
   const sb = DICT ? DICT.enums.SENSOR_BITS || [] : [];
-  fill("sc-sens", sb.length && num(hk.sensor_health) ? sb.map((n, i) => { const ok = (hk.sensor_health >> i) & 1; return h("div", {cls: "bit " + (ok ? "okb" : "missing"), text: "b" + i + " " + n + (ok ? " OK" : " MISSING")}); }) : h("div", {cls: "dim", text: "no HK yet"}));
+  // Instrument bits (NICLA_ME, AS7265X, RM3100_OB, RM3100_IB) say MISSING; the ME_* bits are the
+  // validity of one Nicla output (ME_GRV: the BHI260AP 6-DOF game rotation vector, D-75).
+  fill("sc-sens", sb.length && num(hk.sensor_health) ? sb.map((n, i) => { const ok = (hk.sensor_health >> i) & 1, me = n.startsWith("ME_");
+    return h("div", {cls: "bit " + (ok ? "okb" : me ? "on" : "missing"), text: "b" + i + " " + n + (ok ? " OK" : me ? " not valid" : " MISSING")}); }) : h("div", {cls: "dim", text: "no HK yet"}));
+  renderSensorBus();
   const b = S.beacon || {}, hist = (b.history || []).slice();
   if (hist.length && num(b.level)) hist.push([S.utc, b.level]);
   lineChart("sc-beacon", {x: hist.map(p => p[0]), xTime: true, yMin: 0, yMax: 3, series: [{name: "", v: hist.map(p => p[1]), color: COL.s4, step: true, dots: true}],
@@ -1807,6 +1831,42 @@ function rmCalLabel() {
   if (ob == null || ib == null) return "RM3100 (boom; MAGCAL state unknown, no HK yet)";
   return "RM3100 (boom; MAGCAL outboard " + (ob ? "on" : "off") + ", inboard " + (ib ? "on" : "off") + ")";
 }
+// D-75: the 6-DOF block of the GDS (S.imu, dssq/sensors.py). Every value that cannot be
+// produced shows "n/a (<reason>)" with the GDS's reason; the source column says whether the
+// value was measured on the spacecraft or derived by the ground.
+function naR(reason) { return "n/a (" + (reason || "not available") + ")"; }
+function vec3(v, d) { return Array.isArray(v) ? v.map(c => fx(num(c) && Math.abs(c) < 0.5 * Math.pow(10, -d) ? 0 : c, d)).join(" ") : NA; }
+function renderImu() {
+  const m = S.imu || {}, na = m.na || {}, att = (S.tlm || {}).ATT;
+  const OB = N(badge("on board", "info")), GR = N(badge("ground", "dim"));
+  if (!m.available) { table("si-imu", ["", "value", "source"], [["6-DOF part of ATT", naR(na.all), ""]]); return; }
+  const g = na.grv, mot = m.motion;
+  const sat = [m.gap ? "windows or samples missed" : "", m.acc_sat ? "accelerometer near full scale" : "", m.gyro_sat ? "gyroscope near full scale" : ""].filter(Boolean);
+  const grvHk = ((S.decoded || {}).sensors_ok || []).includes("ME_GRV") ? "valid" : ((S.decoded || {}).sensors_missing || []).includes("ME_GRV") ? "not valid" : NA;
+  table("si-imu", ["", "value", "source"], [
+    {section: "game rotation vector (accelerometer + gyroscope, no magnetometer)"},
+    ["Present in the BHI260AP firmware / valid", fyn(m.grv_present) + " / " + fyn(m.grv_valid) + " (HK ME_GRV " + grvHk + ")", OB],
+    ["Quaternion w x y z (device→GRV world, as sent)", m.q_grv ? vec3(m.q_grv, 4) : naR(g), OB],
+    ["Accuracy estimate", naR(na.grv_accuracy), OB],
+    ["Up vector in body axes (x y z)", m.up ? vec3(m.up, 4) : naR(g), GR],
+    ["Gravity reading (g, x y z)", m.gravity_g ? vec3(m.gravity_g, 3) : naR(g), GR],
+    ["Tilt / roll / pitch (body +Z up = level)", num(m.tilt_deg) ? [m.tilt_deg, m.roll_deg, m.pitch_deg].map(v => fx(v, 2)).join(" / ") + " °" : naR(g), GR],
+    ["Relative heading (reference arbitrary, drifts)", num(m.heading_rel_deg) ? fx(m.heading_rel_deg, 2) + " ° (not a compass heading)" : naR(g), GR],
+    {section: "9-DOF vs 6-DOF (both from one ARU rebuild)"},
+    ["Heading offset (rotation vector − game rotation vector)", num(m.heading_offset_deg) ? fsign(m.heading_offset_deg, 2, "°") : naR(na.pair), GR],
+    ["Tilt disagreement", num(m.tilt_disagreement_deg) ? fu(m.tilt_disagreement_deg, 2, "°") : naR(na.pair), GR],
+    ["Linear acceleration est. (acc − gravity, one sample; mg x y z)", m.lin_acc_mg ? vec3(m.lin_acc_mg, 0) + "  |a| " + fx(m.lin_acc_abs_mg, 0) + " mg (zero-g offset ±" + fx(m.acc_offset_mg, 0) + " mg, sensitivity ±" + fx(m.acc_sens_err_pct, 0) + " %: not a spacecraft acceleration)" : naR(na.lin_acc), GR],
+    {section: "window statistics (1 s windows of 25 Hz samples over the ATT period)"},
+    ["Windows aggregated", num(m.nwin) ? fx(m.nwin, 0) + (sat.length ? " (" + sat.join(", ") + ")" : "") : NA, OB],
+    ["Vibration RMS / peak (≤ " + fx(m.bandwidth_hz, 1) + " Hz)", num(m.vib_rms_mg) ? fx(m.vib_rms_mg, 1) + " / " + fx(m.vib_peak_mg, 0) + " mg (noise floor est. " + fx(m.vib_floor_mg, 1) + " mg)" : naR(na.stats), OB],
+    ["Mean rate (°/s, x y z)", m.rate_mean_dps ? vec3(m.rate_mean_dps, 2) : naR(na.stats), OB],
+    ["|ω| of the mean rate", num(m.rate_abs_dps) ? fu(m.rate_abs_dps, 2, "°/s") + " (noise floor est. " + fx(m.rate_floor_dps, 2) + " °/s)" : naR(na.stats), GR],
+    ["Spin axis (unit vector, body x y z)", m.spin_axis ? vec3(m.spin_axis, 3) : naR(na.spin), GR],
+    ["Peak |rate|", num(m.rate_peak_dps) ? fu(m.rate_peak_dps, 1, "°/s") : naR(na.stats), OB],
+    ["Motion state", V(mot === "unknown" ? "unknown (" + (na.motion || "no window") + ")" : mot + " (stationary: peak rate < " + fx(m.still_rate_dps, 2) + " °/s and peak vibration < " + fx(m.still_vib_mg, 1) + " mg, [science], VERIFY T-SC-14)", mot === "unknown" ? "dim" : ""), GR],
+    ["IMU flags", N((m.flags || []).map(b => badge(b, b === "GAP" || b.endsWith("_SAT") ? "warn" : "dim"))), OB],
+    ["Packet time", att ? iso(att.ert) : NA, ""]]);
+}
 function renderScience() {
   const T = S.tlm || {}, m = (T.MAG || {}).values, a = (T.ATT || {}).values, e = (T.ENV || {}).values;
   const cfg = (SCI && SCI.cfg) || {};
@@ -1817,7 +1877,7 @@ function renderScience() {
     const scf = ["x", "y", "z"].map(ax => k && k !== 1 && num(m["ib_b_" + ax]) && num(m["ob_b_" + ax]) ? (m["ib_b_" + ax] - m["ob_b_" + ax]) / (k - 1) : null);
     const amb = ["x", "y", "z"].map((ax, i) => scf[i] === null ? null : m["ob_b_" + ax] - scf[i]);
     const vecRow = (label, p) => [label, fx(m[p + "_b_x"], 3), fx(m[p + "_b_y"], 3), fx(m[p + "_b_z"], 3), fx(mag(p), 3), fx(m[p + "_rms"], 3)];
-    table("si-mag", ["µT", "Bx", "By", "Bz", "|B|", "RMS"], [vecRow("RM3100 outboard (boom)", "ob"), vecRow("RM3100 inboard", "ib"), vecRow("BMM150 body (Nicla Sense ME)", "body"),
+    table("si-mag", ["µT", "Bx", "By", "Bz", "|B|", "RMS"], [vecRow("RM3100 outboard (boom)", "ob"), vecRow("RM3100 inboard", "ib"), vecRow("BMM150 body (Nicla Sense ME), corrected by the BHI260 (BSX)", "body"),
       ["Gradient inboard − outboard", ...["x", "y", "z"].map(ax => num(m["ib_b_" + ax]) && num(m["ob_b_" + ax]) ? fx(m["ib_b_" + ax] - m["ob_b_" + ax], 3) : NA), "", ""],
       ["S/C field at outboard (est., 1/r³)", ...scf.map(v => fx(v, 3)), scf.every(num) ? fx(Math.hypot(...scf), 3) : NA, ""],
       ["Ambient field (est., S/C field removed)", ...amb.map(v => fx(v, 3)), amb.every(num) ? fx(Math.hypot(...amb), 3) : NA, ""],
@@ -1837,11 +1897,12 @@ function renderScience() {
       ["Valid", fyn(fb.includes("QUAT")), fyn(fb.includes("TRIAD"))], ["Fusion accuracy estimate", fu(a.q_fus_acc, 3, "rad") + (num(a.q_fus_acc) ? " (" + fx(a.q_fus_acc * 180 / Math.PI, 2) + "°)" : ""), NA],
       ["Fusion vs TRIAD angle (both body→NED)", diff, ""], ["TRIAD magnetometer", NA, fb.includes("TRIAD_RM3100") ? rmCalLabel() : "BMM150 (body)"],
       ["BMM150 scale", fb.includes("MAG_SCALE") ? "read from the BHI260" : "firmware fallback 1/16 µT/LSB", ""],
-      ["Acceleration (g)", [a.acc_x, a.acc_y, a.acc_z].map(v => fx(v, 3)).join(" ") + (num(a.acc_x) ? "  |a| " + fx(Math.hypot(a.acc_x, a.acc_y, a.acc_z), 3) : ""), ""],
-      ["Rate (°/s)", [a.gyro_x, a.gyro_y, a.gyro_z].map(v => fx(v, 1)).join(" "), ""],
-      ["BMM150 field (µT)", [a.mag_x, a.mag_y, a.mag_z].map(v => fx(v, 1)).join(" ") + (num(a.mag_x) ? "  |B| " + fx(Math.hypot(a.mag_x, a.mag_y, a.mag_z), 1) : ""), ""],
+      ["Acceleration (g, one sample)", [a.acc_x, a.acc_y, a.acc_z].map(v => fx(v, 3)).join(" ") + (num(a.acc_x) ? "  |a| " + fx(Math.hypot(a.acc_x, a.acc_y, a.acc_z), 3) : ""), ""],
+      ["Rate (°/s, one sample)", [a.gyro_x, a.gyro_y, a.gyro_z].map(v => fx(v, 1)).join(" "), ""],
+      ["BMM150 field (µT), corrected by the BHI260 (BSX)", [a.mag_x, a.mag_y, a.mag_z].map(v => fx(v, 1)).join(" ") + (num(a.mag_x) ? "  |B| " + fx(Math.hypot(a.mag_x, a.mag_y, a.mag_z), 1) : ""), ""],
       ["Flags", N(fb.map(b => badge(b))), ""], ["Packet time", iso(T.ATT.ert), ""]]);
   } else table("si-att", null, [["no ATT packet yet", ""]]);
+  renderImu();
   if (e) {
     const fb = bits("ENV_FLAG_BITS", e.flags), bsec = fb.includes("BSEC");
     table("si-env", null, [["Pressure (BMP390)", fu(e.p, 2, "hPa")], ["Temperature (BME688)", fu(e.t, 2, "°C")], ["Relative humidity", fu(e.rh, 0, "%") + " (sensor delivers whole %RH)"],

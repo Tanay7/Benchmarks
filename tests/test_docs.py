@@ -47,7 +47,7 @@ KEY_BY_KEY_BLOCKS = (
     "sequence", "sequence.file", "sequence.onboard", "sequence.uplink", "station_io", "sync", "tdm", "time",
     "spectral", "spectral.boresight", "spectral.counters", "spectral.exposure", "spectral.features",
     "spectral.indices", "spectral.onboard", "spectral.radiometry", "spectral.reflectance", "spectral_burst",
-    "spectral_library", "led_limits")
+    "spectral_library", "led_limits", "imu", "sensor_bus", "sensor_bus.instruments")
 PATH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[\])?(?:\.(?:<[a-z_]+>|[A-Za-z0-9_-]+)(?:\[\])?)+$")
 
 
