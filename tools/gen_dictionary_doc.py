@@ -185,6 +185,7 @@ def document() -> list[str]:
                f"0x{dd.SENSOR_INSTRUMENT_MASK:04X})", dd.SENSOR_BITS),
         *_bits("MAG.flags", dd.MAG_FLAG_BITS),
         *_bits("ATT.flags", dd.ATT_FLAG_BITS),
+        *_bits("ATT.imu_flags (ATT v4, BHI260AP 6-DOF)", dd.IMU_FLAG_BITS),
         *_bits("ENV.flags", dd.ENV_FLAG_BITS),
         *_bits("RF.flags (rf_flags)", dd.RF_FLAG_BITS),
         "### HK.mag_bist", "",

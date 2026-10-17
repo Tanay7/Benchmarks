@@ -204,7 +204,7 @@ enum PeriodicIdx : uint8_t { PER_HK = 0, PER_RF, PER_TIMECORR, PER_MAG, PER_ATT,
 extern const uint16_t kModeCadence[5][kNumPeriodic];  // s, 0 = off - the v2 kCadence table moved
                                                       // unchanged from flight.cpp
 extern const uint8_t  kModePeriodX10[5];              // v2 kPeriodX10 {40, 40, 25, 20, 20}, moved
-extern const uint16_t kPeriodicPktLen[kNumPeriodic];  // whole Space Packets: 90, 61, 22, 58, 49, 141, 36
+extern const uint16_t kPeriodicPktLen[kNumPeriodic];  // whole Space Packets: 90, 61, 22, 58, 71, 141, 36
 static const uint16_t kPeriodicLoadPermille = 750;
 static const uint16_t kLinkUsePermille = 950;         // periodic + routine EVRs together
 static const uint16_t kEvrNominalOctets = 80;         // 12 + 3 + ~65 text

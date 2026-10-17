@@ -94,4 +94,139 @@ float MagStats::rms_fluct() const {   // population standard deviation of |B|
   return v > 0.0f ? sqrtf(v) : 0.0f;
 }
 
+// =============================================================================
+// BHI260AP 6-DOF: ARU page 2 and its aggregation (D-75)
+// =============================================================================
+uint8_t aru_crc8(const uint8_t* d, size_t n) {
+  uint8_t c = 0;
+  for (size_t i = 0; i < n; ++i) {
+    c ^= d[i];
+    for (int b = 0; b < 8; ++b) c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x07) : (uint8_t)(c << 1);
+  }
+  return c;
+}
+
+namespace {
+
+inline uint16_t be_u16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); }
+// Two's complement without an implementation-defined narrowing conversion.
+inline int16_t be_i16(const uint8_t* p) {
+  const uint16_t u = be_u16(p);
+  return u < 0x8000u ? (int16_t)u : (int16_t)((int32_t)u - 65536);
+}
+const uint16_t kNaU16v = 0xFFFF;    // tlm_packets.h kNaU16 / kNaI16 (this module does not include it)
+const int16_t kNaI16v = 0x7FFF;
+
+// floor(sqrt(x)), integer only (bit-by-bit method; no floating point, no libm).
+uint32_t isqrt32(uint32_t x) {
+  uint32_t r = 0, bit = 1u << 30;
+  while (bit > x) bit >>= 2;
+  while (bit) {
+    if (x >= r + bit) {
+      x -= r + bit;
+      r = (r >> 1) + bit;
+    } else {
+      r >>= 1;
+    }
+    bit >>= 2;
+  }
+  return r;
+}
+
+// sqrt(num / den) rounded to the nearest integer (half up), for num / den < 2^32, den > 0.
+uint32_t rms_round(uint64_t num, uint64_t den) {
+  const uint64_t q = num / den, rem = num % den;
+  const uint32_t k = isqrt32((uint32_t)q);                       // floor(sqrt(num / den))
+  // Round up when num / den >= (k + 1/2)^2 = k^2 + k + 1/4.
+  const uint64_t t = (uint64_t)k * k + k;
+  return (q > t || (q == t && 4u * rem >= den)) ? k + 1u : k;
+}
+
+}  // namespace
+
+bool aru_decode_imu(const uint8_t* page, AruImu& out) {
+  if (page == nullptr || page[0] != kAruMagicImu || aru_crc8(page, kAruPageLen - 1) != page[kAruPageLen - 1])
+    return false;
+  AruImu m;
+  m.seq = page[1];
+  m.flags = page[2];
+  for (uint8_t i = 0; i < 4; ++i) m.q_grv[i] = be_i16(page + 3 + 2 * i);
+  // A rotation quaternion has unit norm (x 16384 on the wire): outside 0.81..1.21 it is not
+  // an attitude and its flag is withdrawn. The integer form is exact: 16384^2 = 2^28.
+  int64_t n2 = 0;
+  for (uint8_t i = 0; i < 4; ++i) n2 += (int64_t)m.q_grv[i] * m.q_grv[i];
+  const int64_t one = (int64_t)16384 * 16384;
+  if (!(n2 * 100 > one * 81 && n2 * 100 < one * 121)) m.flags &= (uint8_t)~ARU_IMU_GRV;
+  m.win_seq = page[11];
+  m.n = page[12];
+  for (uint8_t i = 0; i < 3; ++i) {
+    m.acc_mean_mg[i] = be_i16(page + 13 + 2 * i);
+    m.rate_mean_cdps[i] = be_i16(page + 23 + 2 * i);
+  }
+  m.vib_rms_dmg = be_u16(page + 19);
+  m.vib_peak_mg = be_u16(page + 21);
+  m.rate_peak_ddps = be_u16(page + 29);
+  out = m;
+  return true;
+}
+
+void ImuStats::reset() {
+  n_ = 0;
+  vib2_ = 0;
+  vib_peak_ = rate_peak_ = 0;
+  rate_sum_[0] = rate_sum_[1] = rate_sum_[2] = 0;
+  gap_ = acc_sat_ = gyro_sat_ = false;
+}
+
+bool ImuStats::add(const AruImu& m) {
+  if (seen_ && m.win_seq == last_win_) return false;          // the same window again
+  // win_seq 0 with nothing counted is the ARU before its first window: nothing to add yet.
+  if (m.win_seq == 0 && m.n == 0 && !(m.flags & (ARU_IMU_STATS | ARU_IMU_MISSED))) {
+    seen_ = true;
+    last_win_ = 0;
+    return false;
+  }
+  // Windows that completed between two readings went by unread (modulo 256: a counter
+  // that moved backwards - an ARU restart - also shows as a gap).
+  if (seen_ && (uint8_t)(m.win_seq - last_win_) != 1u) gap_ = true;
+  seen_ = true;
+  last_win_ = m.win_seq;
+  if (m.flags & ARU_IMU_MISSED) gap_ = true;
+  if (m.flags & ARU_IMU_ACC_SAT) acc_sat_ = true;
+  if (m.flags & ARU_IMU_GYRO_SAT) gyro_sat_ = true;
+  if (!(m.flags & ARU_IMU_STATS)) return true;                 // counted as seen, no statistics
+  if (n_ < 0xFFFFFFFFu) ++n_;
+  vib2_ += (uint64_t)m.vib_rms_dmg * m.vib_rms_dmg;
+  if (m.vib_peak_mg > vib_peak_) vib_peak_ = m.vib_peak_mg;
+  if (m.rate_peak_ddps > rate_peak_) rate_peak_ = m.rate_peak_ddps;
+  for (uint8_t i = 0; i < 3; ++i) rate_sum_[i] += m.rate_mean_cdps[i];
+  return true;
+}
+
+uint16_t ImuStats::vib_rms_dmg() const {
+  if (n_ == 0) return kNaU16v;
+  const uint32_t r = rms_round(vib2_, n_);                       // every term <= 65535^2: mean < 2^32
+  return r >= 65534u ? (uint16_t)65534u : (uint16_t)r;
+}
+
+uint16_t ImuStats::vib_peak_mg() const {
+  if (n_ == 0) return kNaU16v;
+  return vib_peak_ >= kNaU16v ? (uint16_t)(kNaU16v - 1u) : vib_peak_;
+}
+
+int16_t ImuStats::rate_mean_cdps(uint8_t axis) const {
+  if (n_ == 0 || axis > 2) return kNaI16v;
+  // Rounded half away from zero (the flight's lroundf), clamped clear of the sentinel.
+  const int64_t s = rate_sum_[axis], n = (int64_t)n_;
+  int64_t q = (s >= 0 ? s + n / 2 : s - n / 2) / n;
+  if (q > 32766) q = 32766;
+  if (q < -32767) q = -32767;
+  return (int16_t)q;
+}
+
+uint16_t ImuStats::rate_peak_ddps() const {
+  if (n_ == 0) return kNaU16v;
+  return rate_peak_ >= kNaU16v ? (uint16_t)(kNaU16v - 1u) : rate_peak_;
+}
+
 }  // namespace vgq

@@ -237,10 +237,29 @@ AttPacket att_known(uint8_t flags) {
   AttPacket a{};
   a.flags = flags; a.acc_mg[2] = 1000; a.gyro_ddps[0] = -15; a.mag_dT[1] = 255;
   a.q_fus[0] = 16384; a.q_fus_acc_mrad = 52; a.q_triad[1] = -8192;
+  // ATT v4 (D-75): the BHI260AP 6-DOF part.
+  a.imu_flags = IMU_F_GRV | IMU_F_STATS | IMU_F_PAIRED | IMU_F_GAP | IMU_F_GRV_PRESENT;   // 0x67
+  a.q_grv[0] = 8192; a.q_grv[3] = -14189;            // (0.5, 0, 0, -0.866...)
+  a.imu_nwin = 8; a.vib_rms_dmg = 123; a.vib_peak_mg = 45;
+  a.rate_mean_cdps[0] = -150; a.rate_mean_cdps[2] = 2500; a.rate_peak_ddps = 312;
   return a;
 }
 const char* const kAttExpect =
-    "acc_z=1.0,gyro_x=-1.5,mag_y=25.5,q_fus_w=1.0,q_fus_acc=0.052,q_triad_x=-0.5";
+    "acc_z=1.0,gyro_x=-1.5,mag_y=25.5,q_fus_w=1.0,q_fus_acc=0.052,q_triad_x=-0.5,imu_flags=103,q_grv_w=0.5,"
+    "q_grv_x=0.0,q_grv_z=-0.86602783203125,imu_nwin=8,vib_rms=12.3,vib_peak=45,rate_mean_x=-1.5,rate_mean_y=0.0,"
+    "rate_mean_z=25.0,rate_peak=31.2";
+// ATT with the 6-DOF part not available (an ARU without page 2, or no window in the period).
+AttPacket att_no_imu() {
+  AttPacket a = att_known(ATT_F_QUAT);
+  a.imu_flags = 0; a.imu_nwin = 0;
+  for (int i = 0; i < 4; ++i) a.q_grv[i] = kNaI16;
+  for (int i = 0; i < 3; ++i) a.rate_mean_cdps[i] = kNaI16;
+  a.vib_rms_dmg = a.vib_peak_mg = a.rate_peak_ddps = kNaU16;
+  return a;
+}
+const char* const kAttNoImuExpect =
+    "flags=1,imu_flags=0,q_grv_w=None,q_grv_z=None,imu_nwin=0,vib_rms=None,vib_peak=None,rate_mean_x=None,"
+    "rate_mean_z=None,rate_peak=None";
 
 // SPEC v3.1 of a synthetic SURVEY result run through the onboard processor.
 SpecV31 spec_known() {
@@ -865,11 +884,23 @@ HOST_TEST(packet_layouts_v3) {
             get_u16(b + 7) == 4500 && get_u16(b + 9) == 77 && get_u16(b + 11) == 80 && get_u32(b + 13) == 600 &&
             get_u16(b + 17) == 125 && get_u32(b + 19) == 150000 && b[23] == 3,
         "ENV: 24 octets at PB-1.11 offsets");
-  CHECK(pack_mag(mag_known(0x3F), b) == kMagLen && pack_att(att_known(0x7F), b) == kAttLen &&
-            pack_timecorr(TimeCorrPacket{1, 2, 3, 4, 5}, b) == kTimeCorrLen &&
+  CHECK(pack_mag(mag_known(0x3F), b) == kMagLen && pack_timecorr(TimeCorrPacket{1, 2, 3, 4, 5}, b) == kTimeCorrLen &&
             pack_cmdver(CmdVerPacket{0, 1, STAGE_EXECUTED, 0, 9, CMD_SRC_STORED}, b) == kCmdVerLen && b[0] == 0 &&
             b[2] == 0x82,
-        "MAG 46, ATT 37, TIMECORR 10, CMDVER 8 (stored sequence: stage octet 0x82 = source 2 | EXECUTED)");
+        "MAG 46, TIMECORR 10, CMDVER 8 (stored sequence: stage octet 0x82 = source 2 | EXECUTED)");
+  // ATT v4 (D-75): offsets 0..36 as v3, the 6-DOF part from 37; every field a distinct value.
+  AttPacket a = att_known(0x7F);
+  a.q_triad[3] = (int16_t)0x2324;
+  a.imu_flags = 0x25; a.q_grv[0] = 0x2627; a.q_grv[1] = 0x2829; a.q_grv[2] = 0x2A2B; a.q_grv[3] = 0x2C2D;
+  a.imu_nwin = 0x2E; a.vib_rms_dmg = 0x2F30; a.vib_peak_mg = 0x3132;
+  a.rate_mean_cdps[0] = 0x3334; a.rate_mean_cdps[1] = 0x3536; a.rate_mean_cdps[2] = 0x3738; a.rate_peak_ddps = 0x393A;
+  const size_t an = pack_att(a, b);
+  bool aok = an == 59 && an == kAttLen && b[0] == 0x7F && get_u16(b + 27) == 52 && get_u16(b + 35) == 0x2324;
+  for (uint8_t i = 0; i < 22 && aok; ++i) aok = b[37 + i] == (uint8_t)(0x25 + i);   // offsets 37..58
+  CHECK(aok, "ATT v4: 59 octets, v3 fields at 0..36, imu_flags 37, q_grv 38, imu_nwin 46, vib_rms 47, "
+             "vib_peak 49, rate_mean 51, rate_peak 57");
+  CHECK(kSpPriHdrLen + kSpSecHdrLen + kAttLen == 71 && kPeriodicPktLen[PER_ATT] == 71,
+        "ATT v4 whole packet 71 octets in the downlink load planner");
   // I1 / C02: the command source is carried in the stage octet (bits 7..6), so every N(S)
   // stays a plain N(S); 254 and 255 were once the stored / bypass sentinels.
   bool cmdver_ok = true;
@@ -922,6 +953,7 @@ HOST_TEST(tlm_vectors) {
   std::string aexp = kAttExpect;
   kv(aexp, "flags", num(0x7F));
   line("ATT", APID_ATT, pack_att(att_known(0x7F), pl), aexp);
+  line("ATT", APID_ATT, pack_att(att_no_imu(), pl), kAttNoImuExpect);
   const EnvPacket env = env_known();
   line("ENV", APID_ENV, pack_env(env, pl), env_expect(env));
   EnvPacket env_na{};
@@ -949,7 +981,8 @@ HOST_TEST(tlm_vectors) {
   line("TIMECORR", APID_TIMECORR, pack_timecorr(TimeCorrPacket{17, 4000, 1234, 2, 950}, pl),
        "ref_mcfc=17,sclk_coarse=4000,sclk_fine=1234,air_rate_code=2,ref_airtime_ms=950");
   std::fclose(f);
-  CHECK(true, "wrote tlm_vectors.txt (HK 78, RF 49 incl. n/a, MAG, ATT, ENV 24 incl. n/a, CMDVER, RFSCAN, TIMECORR)");
+  CHECK(true, "wrote tlm_vectors.txt (HK 78, RF 49 incl. n/a, MAG, ATT v4 59 incl. n/a, ENV 24 incl. n/a, CMDVER, "
+              "RFSCAN, TIMECORR)");
 }
 
 HOST_TEST(tc_header_and_user_data) {
@@ -1667,8 +1700,10 @@ HOST_TEST(downlink_load) {
          " cases" + (bad ? " (first failure: " + first + ")" : std::string())).c_str());
   CHECK(e22_stretched == 0, "load plan: every E22 case without PA over-temperature keeps the v2 cadence (stretch 100)");
   std::printf("      E22 with PA over-temperature: largest stretch x%u.%02u\n", e22_hot_max / 100u, e22_hot_max % 100u);
-  CHECK(e22_hot_max == 186,
-        "load plan: the T37S over-temperature back-off stretches E22 cases by at most x1.86 (PB-3.3)");
+  // TEST, USLP + AE, 2.4 kbit/s, frame period doubled: 44.74 octets/s offered against
+  // 0.75 x 153 / 5.068 s = 22.64 -> x1.98 (x1.86 with the 37-octet ATT before ATT v4, D-75).
+  CHECK(e22_hot_max == 198,
+        "load plan: the T37S over-temperature back-off stretches E22 cases by at most x1.98 (PB-3.3)");
   const uint32_t busy1 = radio_airtime_ms(3, 1, kCaduLen);
   const LoadPlan p1 = plan_downlink_load(kModeCadence[MODE_SAFE], frame_period_ms(busy1, MODE_SAFE, false, 0), 153);
   std::printf("      SX126x profile 1 SAFE, USLP + AE: busy %lu ms, stretch %u, EVR %lu milli/s, capacity %lu B/min\n",

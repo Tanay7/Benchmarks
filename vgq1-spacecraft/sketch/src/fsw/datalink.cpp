@@ -288,13 +288,14 @@ const uint16_t kPeriodicPktLen[kNumPeriodic] = {
     (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kRfLen),        // 61
     (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kTimeCorrLen),  // 22
     (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kMagLen),       // 58
-    (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kAttLen),       // 49
+    (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kAttLen),       // 71 (ATT v4, D-75)
     (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kSpecV31Len),   // 141
     (uint16_t)(kSpPriHdrLen + kSpSecHdrLen + kEnvLen),       // 36
 };
 static_assert(kSpPriHdrLen + kSpSecHdrLen + kHkLen == 90 && kSpPriHdrLen + kSpSecHdrLen + kRfLen == 61 &&
+              kSpPriHdrLen + kSpSecHdrLen + kAttLen == 71 &&
               kSpPriHdrLen + kSpSecHdrLen + kSpecV31Len == 141 && kSpPriHdrLen + kSpSecHdrLen + kEnvLen == 36,
-              "periodic packet lengths (PB-3.3)");
+              "periodic packet lengths (PB-3.3; ATT v4 = 59 octets of user data, D-75)");
 
 uint32_t frame_period_ms(uint32_t busy_ms, uint8_t mode, bool pa_overtemp, uint16_t cmd_period_ms) {
   const uint8_t m = mode <= MODE_TEST ? mode : (uint8_t)MODE_SAFE;

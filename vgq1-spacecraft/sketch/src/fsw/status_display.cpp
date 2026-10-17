@@ -12,7 +12,7 @@ namespace {
 Arduino_LED_Matrix g_matrix;
 const uint8_t kCols = 13;
 const uint8_t kRows = 8;
-const uint8_t kSensorBits = 10;          // HK sensor_health b0..b9 (tlm_packets.h SensorBit)
+const uint8_t kSensorBits = 11;          // HK sensor_health b0..b10 (tlm_packets.h SensorBit)
 const uint8_t kBeaconCol = 5;            // row 7, columns 5..7
 const uint8_t kBeaconUrgent = 3;
 

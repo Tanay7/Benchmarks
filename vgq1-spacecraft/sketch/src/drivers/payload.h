@@ -1,12 +1,15 @@
 // =============================================================================
-//  Nicla Sense ME attitude reference unit (ARU) link - I2C target 0x2A on the
-//  sensor bus (Wire2, UNO Q header A4/A5; the Nicla's J2 I2C pins, 3.3 V).
+//  Nicla Sense ME attitude reference unit (ARU) link - I2C target 0x2A, preferably on
+//  the NICLA bus (Wire2, UNO Q header A4/A5, 3.3 V; D-73). The Nicla is wired through its
+//  ESLOV connector J5, whose SDA/SCL are the same nRF52 `Wire` bus as its J2 header I2C
+//  pins (D-74); the INT line is not used - the pages are polled.
 //
-//  The Nicla runs the custom firmware nicla_sense_me_aru (repository root) and exposes two
+//  The Nicla runs the custom firmware nicla_sense_me_aru (repository root) and exposes three
 //  fixed 32-octet pages: the host writes ONE octet (page number) and reads 32.
-//  Page 0 = motion (magic 0xA7), page 1 = environment (magic 0xA8); big-endian;
-//  octet 31 = CRC-8 (poly 0x07, init 0x00) over octets 0..30. The layout is
-//  documented at the top of nicla_sense_me_aru.ino.
+//  Page 0 = motion (magic 0xA7), page 1 = environment (magic 0xA8), page 2 = IMU 6-DOF
+//  (magic 0xA9, D-75); big-endian; octet 31 = CRC-8 (poly 0x07, init 0x00) over octets
+//  0..30. The layout is documented at the top of nicla_sense_me_aru.ino; page 2 is decoded
+//  by fsw/attitude.h aru_decode_imu() (host-tested).
 //
 //  The AS7265X spectrometer has its own driver (as7265x.h); the RM3100
 //  magnetometers are in sensors.h.
@@ -14,6 +17,7 @@
 #pragma once
 #include <Arduino.h>
 #include "i2c_bus.h"
+#include "../fsw/attitude.h"   // AruImu, aru_crc8, aru_decode_imu (pure, host-tested)
 
 namespace vgq {
 
@@ -38,12 +42,16 @@ struct AruReading {
 class NiclaAru {
  public:
   static const uint8_t kAddr = 0x2A;
-  static const size_t kPageLen = 32;
-  bool begin(I2cBus& bus);
+  static const size_t kPageLen = kAruPageLen;
+  bool begin(I2cBus& bus);                   // probe 0x2A on this bus (the driver stays on it)
   bool read_motion(AruReading& r);           // page 0; false also when the sequence froze
   bool read_env(AruReading& r);              // page 1
+  // Page 2 (magic 0xA9, D-75). False for a bus error, a bad CRC or an ARU whose firmware
+  // has no page 2 (the v3 firmware answers with page 0). Does not touch the stall counter
+  // of read_motion(); the caller pairs it with page 0 by AruImu::seq.
+  bool read_imu(AruImu& m);
   bool ok() const { return ok_; }
-  static uint8_t crc8(const uint8_t* d, size_t n);   // poly 0x07, init 0x00
+  static uint8_t crc8(const uint8_t* d, size_t n) { return aru_crc8(d, n); }   // poly 0x07, init 0x00
 
  private:
   bool page(uint8_t n, uint8_t magic, uint8_t* b);

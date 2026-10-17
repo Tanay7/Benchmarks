@@ -5,15 +5,6 @@ namespace vgq {
 // =============================================================================
 // Nicla Sense ME attitude reference unit (custom firmware, I2C target 0x2A)
 // =============================================================================
-uint8_t NiclaAru::crc8(const uint8_t* d, size_t n) {
-  uint8_t c = 0;
-  for (size_t i = 0; i < n; ++i) {
-    c ^= d[i];
-    for (int b = 0; b < 8; ++b) c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x07) : (uint8_t)(c << 1);
-  }
-  return c;
-}
-
 bool NiclaAru::begin(I2cBus& bus) {
   bus_ = &bus;
   ok_ = bus.probe(kAddr);
@@ -76,6 +67,11 @@ bool NiclaAru::read_env(AruReading& r) {
   r.gas_ohm = be_u32(b + 21);
   r.bsec_accuracy = b[25];
   return true;
+}
+
+bool NiclaAru::read_imu(AruImu& m) {
+  uint8_t b[kPageLen];
+  return page(2, kAruMagicImu, b) && aru_decode_imu(b, m);   // magic, CRC, quaternion norm gate
 }
 
 }  // namespace vgq

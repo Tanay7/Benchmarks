@@ -5,7 +5,8 @@
 //  Table 5-1): POLL 0x00, CMM 0x01, CCX/CCY/CCZ 0x04..0x09, MX/MY/MZ 0x24..0x2C
 //  (24-bit two's complement), BIST 0x33, STATUS 0x34 (bit 7 = DRDY), REVID 0x36
 //  (= 0x22). Gain = 0.3671 * cycle_count + 1.5 LSB/uT.
-//  I2C address 0x20 + (SA1 << 1 | SA0): outboard 0x20, optional inboard 0x23.
+//  I2C address 0x20 + (SA1 << 1 | SA0): outboard 0x20, optional inboard 0x23, on the MAG
+//  bus (Wire1, the Qwiic socket) alone, preferably (D-73; the executive also probes A4/A5).
 //
 //  Two-phase single-shot measurement: start() writes POLL and returns at once;
 //  collect() reads the result when DRDY is set. The flight loop starts every
@@ -47,6 +48,10 @@ class Rm3100 {
   // (bus untouched) between start() and collect(). Call only in a PA-off window
   // with every AS7265X lamp off. The normal measurement path is unchanged.
   MagBistResult run_bist();
+  // The executive declares the unit lost (kRm3100LossSamples failed samples in a row,
+  // fsw/sensor_bus.h): ok() turns false and nothing is pending, so the re-probe path runs
+  // begin() again. No bus access.
+  void mark_lost() { ok_ = pending_ = false; }
   bool ok() const { return ok_; }
   uint8_t addr() const { return addr_; }
   uint16_t cycle_count() const { return cc_; }

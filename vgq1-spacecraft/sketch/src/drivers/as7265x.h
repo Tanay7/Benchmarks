@@ -1,7 +1,8 @@
 // =============================================================================
 //  AS7265X 18-channel spectrometer driver (ams AS72651 + AS72652 + AS72653, SparkFun
-//  "Triad" board), I2C address 0x49 on the sensor bus (Wire2, header pins A4/A5) or on
-//  the UNO Q Qwiic connector (Wire1), whichever it answers on. Own implementation of the datasheet's virtual-register protocol
+//  "Triad" board), I2C address 0x49 on the NICLA bus (Wire2, header pins A4/A5, the
+//  recommended bus, D-73) or on the MAG bus (Wire1, the UNO Q Qwiic socket), whichever it
+//  answers on (A4/A5 first). Own implementation of the datasheet's virtual-register protocol
 //  (ams AS7265x datasheet v1-04, "I2C Virtual Register Write/Read Access",
 //  Figures 24-51); no vendor library.
 //
@@ -126,7 +127,7 @@ class As7265x {
   // isConnected(): the chip may still be loading its firmware) and runs identification +
   // configuration to completion (lamps and indicator off, one-shot mode). int_pin: MCU pin
   // wired to the board's INT, -1 = not wired (DATA_RDY is then polled over I2C). alt_bus:
-  // a second bus the board may be plugged into instead (the UNO Q Qwiic connector); every
+  // a second bus the board may be plugged into instead (the MAG bus, the Qwiic socket); every
   // probe tries the bus in use first, then the other one, and the driver stays on the bus
   // that answered. Blocking but bounded: the boot probe (kSpecBootWaitMs plus one probe per
   // bus) then at most kBeginMaxPolls passes of poll() + 5 ms, which covers one soft reset

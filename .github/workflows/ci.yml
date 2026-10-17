@@ -32,6 +32,11 @@
 #                   flight sketch again on arduino:zephyr 0.90.0, the newest core before
 #                   1.0.0 (Zephyr SDK 0.16.8 toolchain), which older App Lab installations
 #                   still use.
+#    nicla-build    The Nicla Sense ME attitude reference unit firmware
+#                   (nicla_sense_me_aru, pages 0-2) for arduino:mbed_nicla:nicla_sense with
+#                   pinned versions of the core, Arduino_BHY2 and ArduinoBLE (which
+#                   Arduino_BHY2 includes without declaring it); every warning on and none
+#                   allowed in the sketch itself.
 #
 #  Actions are pinned to full commit hashes (version in the comment).
 # =============================================================================
@@ -330,3 +335,42 @@ jobs:
           baseline unoq unoq-legacy
           llext flight-legacy unoq-legacy
           llext flight-legacy-sx126x unoq-legacy
+
+  nicla-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NICLA_CORE: "arduino:mbed_nicla@4.4.1"
+      NICLA_LIBS: "Arduino_BHY2@1.0.8 ArduinoBLE@1.3.7"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02  # v2.0.0
+        with:
+          version: "1.5.1"
+
+      # Arduino_BHY2 1.0.8 is the version the firmware is written against (its sensor
+      # object limit, Fresh<> flag access and parsers); it carries the BHI260AP firmware.
+      - name: Install the Nicla core and libraries (pinned)
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install "$NICLA_CORE"
+          # shellcheck disable=SC2086  # two library specs, split on purpose
+          arduino-cli lib install $NICLA_LIBS
+          arduino-cli core list
+          arduino-cli lib list
+
+      # Warnings in the libraries' own headers (Arduino_BHY2 SensorClass.h has a bool function
+      # without a return) are not ours; any warning located in the sketch fails the job.
+      - name: Nicla Sense ME ARU firmware (arduino:mbed_nicla:nicla_sense)
+        run: |
+          out="$RUNNER_TEMP/build-nicla" log="$RUNNER_TEMP/build-nicla.log"
+          if ! arduino-cli compile --fqbn arduino:mbed_nicla:nicla_sense --warnings all -v --build-path "$out" \
+               nicla_sense_me_aru >"$log" 2>&1; then
+            cat "$log"; exit 1
+          fi
+          grep -E "^(Sketch uses|Global variables|Using library)" "$log"
+          grep -q "Using library Arduino_BHY2 at version 1.0.8" "$log"
+          ours="$(grep -E ': warning: ' "$log" | grep -E "^($out/sketch/|$PWD/nicla_sense_me_aru/)" || true)"
+          if [[ -n "$ours" ]]; then
+            echo "$ours"; echo "::error::compiler warnings in nicla_sense_me_aru"; exit 1
+          fi
