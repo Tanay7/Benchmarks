@@ -21,6 +21,11 @@ Receiver sensitivity per (model, rate code); every value carries its SOURCE:
                publishes neither the sensitivity nor the LoRa parameters behind them
   "computed"   LoRa profiles absent from Table 3-8:
                S = -174 dBm/Hz + 10 log10(BW) + NF + SNRmin(SF)
+Worst-case sensitivity (sensitivity_worst(), D-76): the least sensitive module the
+manufacturer allows - the "min" column of the same EBYTE tables, T33D -126 dBm (manual
+v1.05 2.2), T37S -125 dBm (manual v1.5 2.2), at 2.4 kbit/s, scaled like the typical value
+above 2.4k; a T-RF-03 measurement of the unit itself takes precedence. The project's
+SX126x table holds typical values only, so the SX126x has no worst case here (None).
 
 E22 link-quality quantities (rxstats.py): RSSI and the ambient-noise register are
 MEASURED; SNR_est = RSSI - noise, C/N0, Eb/N0 and margin are ESTIMATES and are
@@ -66,6 +71,9 @@ E22_RATE_LABELS = {0: "2.4k", 1: "2.4k", 2: "2.4k", 3: "4.8k", 4: "9.6k", 5: "19
                    6: "38.4k", 7: "62.5k"}
 E22_MIN_EFFECTIVE_RATE_CODE = 2        # 0 and 1 are aliases of 2
 E22_SENS_2K4_DBM = {E22_T33D: -128.0, E22_T37S: -126.0}
+# The manuals' "min" sensitivity at 2.4 kbit/s (T33D -126 / -128 / -130, T37S -125 / -126 /
+# -127 dBm, min / typ / max): the worst case a module of the series may show (D-76).
+E22_SENS_2K4_WORST_DBM = {E22_T33D: -126.0, E22_T37S: -125.0}
 # T33D REG1[1:0]. Code 0 = 33 dBm is consistent with the factory default
 # (C0 00 00 62 00 17, "33dbm") and "max transmit power 33 dBm"; the v1.05 manual's
 # REG1 table itself was copied from the T30D (30/27/24/21 dBm), so codes 1..3 are the
@@ -413,6 +421,27 @@ def sensitivity(model: str | RadioModel, code: int,
     return round(s + 10 * math.log10(bps / 2400.0), 1), SOURCE_ESTIMATED
 
 
+def sensitivity_worst(model: str | RadioModel, code: int,
+                      measured: Mapping[str, object] | Mapping[tuple[str, int], float] | None = None,
+                      ) -> tuple[float | None, str | None]:
+    """(worst-case sensitivity in dBm, source) - module docstring, D-76: a T-RF-03
+    measurement of the unit itself, else the E22 manual's "min" at 2.4 kbit/s ("datasheet"),
+    scaled 10 log10(Rb / 2400) above 2.4k ("estimated"); (None, None) for the SX126x, whose
+    sensitivity table here holds typical values only."""
+    m = get_model(model)
+    _int_in(code, 0, 7, "rate code")
+    s, src = sensitivity(m, code, measured)
+    if src == SOURCE_MEASURED:
+        return s, src
+    if m.packet_mode:
+        return None, None
+    w = E22_SENS_2K4_WORST_DBM[m.name]
+    bps = E22_AIR_RATE_BPS[code]
+    if bps == 2400:
+        return w, SOURCE_DATASHEET
+    return round(w + 10 * math.log10(bps / 2400.0), 1), SOURCE_ESTIMATED
+
+
 # --------------------------------------------------------- station settings
 @dataclass(frozen=True)
 class RadioSettings:
@@ -463,6 +492,10 @@ class RadioSettings:
         return sensitivity(self.model, self.rate_code, self.measured, self.rx_boost)
 
     @property
+    def sensitivity_worst(self) -> tuple[float | None, str | None]:
+        return sensitivity_worst(self.model, self.rate_code, self.measured)
+
+    @property
     def freq_offset_limit_hz(self) -> float | None:
         if not self.model.packet_mode:
             return None
@@ -476,6 +509,7 @@ def describe(radio: Mapping[str, object] | RadioSettings) -> dict:
     m = s.model
     prof = SX126X_PROFILES[s.rate_code] if m.packet_mode else None
     sens, src = s.sensitivity
+    worst, worst_src = s.sensitivity_worst
     air, air_src = airtime_s(m, s.rate_code)
     return {
         "model": m.name, "model_id": m.model_id, "model_auto": s.model_auto, "interface": m.interface,
@@ -491,6 +525,7 @@ def describe(radio: Mapping[str, object] | RadioSettings) -> dict:
         "cad": s.cad if m.packet_mode else None,
         "lbt": None if m.packet_mode else s.lbt,
         "sensitivity_dbm": sens, "sensitivity_source": src,
+        "sensitivity_worst_dbm": worst, "sensitivity_worst_source": worst_src,
         "airtime_s": round(air, 6), "airtime_source": air_src,
         "freq_offset_limit_hz": s.freq_offset_limit_hz, "freq_offset_cal_hz": s.freq_offset_cal_hz,
         "has_fault_log": m.has_fault_log, "has_noise_register": m.has_noise_register,

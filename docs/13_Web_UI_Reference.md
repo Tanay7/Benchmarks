@@ -1,8 +1,8 @@
 # 13 - Ground Station Web UI Reference
 
 This is the operator's reference for the DSS-Q1 web dashboard: the page the ground data
-system (GDS) serves on the Arduino VENTUNO Q for the VGQ-1 mission. It explains every tab,
-every panel and every number on it: what the number means, which snapshot key carries it,
+system (GDS) serves on the ground Arduino UNO Q 4 GB (ABX00173) for the VGQ-1 mission. It
+explains every tab, every panel and every number on it: what the number means, which snapshot key carries it,
 where it comes from (a radio reading, a telemetry field, a counter or a formula), how often
 it changes, what values to expect from this hardware, and what to do when a value looks
 wrong.
@@ -340,7 +340,7 @@ and the fade depth to see how much single readings move.
 
 ### 1.7 Snapshot keys and the notation in this document
 
-`/api/state` returns one JSON object (`GroundStation.snapshot()`, schema 3) with 37
+`/api/state` returns one JSON object (`GroundStation.snapshot()`, schema 4) with 38
 top-level keys; `/api/science` returns the spectrometer analytics separately
 (`science_snapshot()`). This document writes a value's location as a dotted path from the
 root: `rx.rf.rssi_dbm` is `snapshot["rx"]["rf"]["rssi_dbm"]`. Paths that start with
@@ -352,7 +352,7 @@ means "each element of this list": `cfdp.transactions[].progress`.
 
 | Top-level key | What it holds | Section |
 |---|---|---|
-| `schema` | snapshot schema version (3) | [13.7](#137-gds-health-panel) |
+| `schema` | snapshot schema version (4) | [13.7](#137-gds-health-panel) |
 | `version` | GDS software version (`dssq.__version__`, 3.0.0) | [13.7](#137-gds-health-panel) |
 | `utc` | station time when the snapshot was built (UNIX s) | [2](#2-header-bar-and-beacon-banner) |
 | `station` | station name, `[station] name` | [2](#2-header-bar-and-beacon-banner) |
@@ -377,7 +377,7 @@ means "each element of this list": `cfdp.transactions[].progress`.
 | `tdm` | CCSDS Tracking Data Message recorder | [12.4](#124-tracking-data-messages-and-xtce) |
 | `sequence` | stored-sequence state, checked file, uplink | [11](#11-sequences-tab) |
 | `magcal` | magnetometer calibration collectors and fits | [10](#10-magcal-tab) |
-| `health` | GDS stage errors, archive write errors | [14](#14-health-events-and-logs) |
+| `health` | GDS stage errors, refused TDM records, archive write errors | [14](#14-health-events-and-logs) |
 | `logger` | receiver data logger: rows, space, retention | [12.5](#125-receiver-data-logger) |
 | `linkmgr` | adaptive link manager | [4.16](#416-link-manager-and-pass-events) |
 | `pending_confirm` | commands waiting for CONFIRM / AUTH | [13.2](#132-pending-confirmations) |
@@ -385,6 +385,7 @@ means "each element of this list": `cfdp.transactions[].progress`.
 | `events` | the last 80 ground events | [14](#14-health-events-and-logs) |
 | `anomalies` | the last 20 statistical outliers | [7.11](#711-anomaly-detector) |
 | `console` | the last 30 console lines | [13.4](#134-console) |
+| `station_clock` | station clock synchronisation state from the kernel (D-76) | [13.7](#137-gds-health-panel) |
 | `station_io` | station I/O MCU (CardKB, annunciators) | [13.8](#138-station-io-panel) |
 | `cmd_stages` | names of the CMDVER stages (for the page) | [7.9](#79-other-packets-cmdver-timecorr-rfscan) |
 | `cmd_errors` | names of the command error codes | [7.9](#79-other-packets-cmdver-timecorr-rfscan) |
@@ -407,8 +408,8 @@ by `renderHeader()` from `/api/state`.
 | BEACON URGENT since ... (only when the beacon level is 1..3)                               |
 +------------------------------------------------------------------------------------------+
 | DSS-Q1 GROUND STATION  S/C VGQ-1  [AOS] [LOCK] [ALARM NONE]  MODE CRUISE  UTC ...          |
-| RSSI-1m ...  SNR ...  MARGIN ...  FER ...  FRAMES ...  SCLK ...  COP-1 ...  SDLS TM ...    |
-| FRAMING ...                                              GDS 3.0.0 applab   [TOKEN]       |
+| CLOCK ...  RSSI ...  SNR ...  MARGIN ...  FER 10m ...  FRAMES ...  SCLK ...  COP-1 ...     |
+| SDLS TM ...  FRAMING ...                                 GDS 3.0.0 applab   [TOKEN]       |
 +------------------------------------------------------------------------------------------+
 | OVERVIEW  RECEIVER  LINK & SECURITY  FRAMES & PACKETS  SPACECRAFT  ...  COMMANDING         |
 | [pending confirmation strip: #id text, CONFIRM, 2nd-OP AUTH, CANCEL]                       |
@@ -420,15 +421,16 @@ by `renderHeader()` from `/api/state`.
 | DSS-Q1 GROUND STATION | `station` | text + " GROUND STATION" | station name from `[station] name` |
 | S/C VGQ-1 | `spacecraft` | text | spacecraft name from `[spacecraft] name` |
 | AOS / LOS pill | `rx.state.los`, `rx.state.hibernating` | green **AOS** (tooltip: pass duration); red **LOS** (tooltip: time since the last frame); amber **LOS (hibernating)** | AOS = frames are arriving. LOS = no valid frame for longer than the LOS timeout ([4.18](#418-receiver-state)). LOS while the spacecraft hibernates is expected and shown amber. Unexpected LOS: [section 17](#17-reading-the-receiver-tab-during-a-range-test) and docs/14 "LOS" |
-| SYNC pill | `sync.state` | green LOCK or PACKET, amber FLYWHEEL, red SEARCH | frame synchronizer state ([4.9](#49-frame-synchronizer)); PACKET is the SX126x (one CADU per LoRa packet, no byte-stream search) |
+| SYNC pill | `sync.state` | green LOCK or PACKET, amber FLYWHEEL, red SEARCH; grey SEARCH during LOS (expected then, not an alarm) | frame synchronizer state ([4.9](#49-frame-synchronizer)); PACKET is the SX126x (one CADU per LoRa packet, no byte-stream search) |
 | ALARM pill | `alarm`, tooltip `alarm_reasons` | green NONE, amber YELLOW, red RED | the station alarm ([section 15](#15-alarm-logic)); hover to read every reason |
 | MODE | `decoded.mode` | text | the **spacecraft** flight-software mode from HK `fsw_mode`: BOOT, SAFE, CRUISE, ENCOUNTER, TEST. (The GDS run mode is at the right end.) |
 | UTC | `utc` | ISO 8601 | the station clock when the snapshot was built; check it against a reference clock: SCET, TDM and latency depend on it (NTP) |
-| RSSI | `rx.rf.rssi_dbm` | "-111 dBm", at the readings' resolution (1.5); **—** during LOS | the newest frame's calibrated packet RSSI as the radio reported it (D-70; the window means are on the RECEIVER tab) ([1.6](#16-the-statistics-windows-explained)) |
-| SNR | `rx.rf.packet.snr_db`, else `rx.rf.snr_est_db` | SX126x: measured SNR, 2 decimals, "dB"; E22: "dB est." (RSSI - noise), whole dB; **—** during LOS | the newest frame's signal-to-noise ratio; during LOS the last value is history, not the link, so it is hidden here (the RECEIVER tab keeps it with its time) |
-| MARGIN | `rx.rf.margin_est_db` | dB at the readings' resolution (1.5); **—** during LOS | newest RSSI minus the receiver sensitivity ([4.2](#42-rf-now)) |
-| FER | `rx.frames.fer` | scientific | frame error rate since the GDS started ([4.11](#411-frames)) |
-| FRAMES | `rx.frames.ok`, `rx.frames.lost` | "344 / lost 15" | frames received and frames missing (master-channel counter gaps) |
+| CLOCK | `station_clock.synced` (tooltip: `station_clock.state`, `station_clock.reason`, `station_clock.maxerror_us`, `station_clock.esterror_us`) | green "synced", amber "NOT SYNCED", grey "unknown" | whether the kernel considers the station clock synchronised (D-76, [13.7](#137-gds-health-panel)): NOT SYNCED = the kernel reports TIME_ERROR or STA_UNSYNC (no NTP / chrony / timesyncd discipline, e.g. a board booted without a network); TDM records are refused then ([12.4](#124-tracking-data-messages-and-xtce)). Unknown: the query was refused or is not available (never guessed) |
+| RSSI | `rx.rf.rssi_dbm`, `rx.rf.rssi_state` | "-111 dBm", at the readings' resolution (1.5); red **OVERLOAD** (tooltip: the warning text) when the newest reading is an overload; **—** during LOS | the newest frame's calibrated packet RSSI as the radio reported it (D-70; the window means are on the RECEIVER tab) ([1.6](#16-the-statistics-windows-explained)). OVERLOAD: the RSSI octet stood at the top of its scale, the signal is too strong to measure ([4.2](#42-rf-now), "RSSI reading") |
+| SNR | `rx.rf.packet.snr_db`, else `rx.rf.snr_est_db` | SX126x: measured SNR, 2 decimals, "dB"; E22: "dB est." (RSSI - noise of the same pass), whole dB; **—** during LOS | the newest frame's signal-to-noise ratio; during LOS the last value is history, not the link, so it is hidden here (the RECEIVER tab keeps it with its time) |
+| MARGIN | `rx.rf.margin_worst_est_db` (else `rx.rf.margin_est_db`), `rx.rf.margin_state`; SX126x: `rx.rf.snr_margin_db` | "16 dB": the margin against the **worst-case** sensitivity where the datasheet gives one (E22), coloured red < 3, amber 3-6, green >= 6 dB; "≤ 8 dB" amber at the noise floor (an upper bound, never green); amber at most while the RSSI is not yet checked against a noise reading; "n/a" (red) on an overload; SX126x: "12.25 dB SNR" (measured SNR margin, F-P2-2); **—** during LOS; the tooltip names the basis and the typical-sensitivity margin | the link margin after the noise-floor rule of D-76 ([4.2](#42-rf-now), "Link margin") |
+| FER 10m | `rx.frames.fer_10m_ci` | "0/178 ≤ 1.67 %" (no frame lost: the one-sided 95 % upper bound) or "1.69 % (3/178)"; colour green / amber > 1 % / red > 10 %; the tooltip holds both the one-sided upper bound and the two-sided 95 % interval | frame error rate over the last 10 minutes of reception (in pass: frames not received while out of view are not lost), with its exact Clopper-Pearson bounds ([4.11](#411-frames)) |
+| FRAMES | `rx.frames.ok`, `rx.frames.lost` | "344 / lost 15" | frames received and frames lost inside the passes (master-channel counter gaps; the counter jump at AOS is `rx.frames.aos_gap_frames`, not lost) |
 | SCLK | `time.partition`, `time.sclk_estimate_s` | "1/1224" | spacecraft clock: partition (boot counter) / estimated SCLK seconds now ([5.8](#58-time-correlation)) |
 | COP-1 | `cop.vs`, `cop.nr`, `cop.lockout`, `cop.uplink_blocked`, `cop.suspended`, `cop.outstanding` | "V(S)=4 N(R)=4 OK out=1" | uplink protocol state: next frame number to send, the spacecraft's next expected number, and LOCKOUT / BLOCKED / SUSPENDED / OK ([5.5](#55-cop-1-fop)) |
 | SDLS TM | `link.sdls.spacecraft_tm_state`, `link.sdls.tm_service` | "PROTECTED (AE)" | downlink security: the spacecraft's TM state from HK and the ground's TM service ([5.2](#52-sdls)) |
@@ -465,8 +467,9 @@ green, the other tabs can wait.
 
 ```
 +--------+--------+--------+--------+--------+--------+--------+--------+
-| Signal | RSSI   | SNR    | Margin | Frames | Thru-  | RS     | S/C    |   (tiles wrap
-| AOS    | 1-min  | est.   | est.   |        | put    | decoder| mode   |    to the width
+| Signal | RSSI   | SNR    | Margin | Frames | Thru-  | Frames | S/C    |   (tiles wrap
+| AOS    |        | est.   | est.   |        | put    | lost / | mode   |    to the width
+|        |        |        |        |        |        | RS dec.|        |
 +--------+--------+--------+--------+--------+--------+--------+--------+    of the window)
 | Bus    | SDLS   | Uplink | CFDP   |
 | temp   | TM     |        | onboard|
@@ -484,24 +487,25 @@ green, the other tabs can wait.
 | Tile | Big value (key) | Small line | Colour | Meaning; if abnormal |
 |---|---|---|---|---|
 | Signal | AOS / LOS (`rx.state.los`) | "pass 4m 11s" (`rx.state.pass_duration_s`) or "since frame 2m 5s" (`rx.state.since_last_frame_s`) | green AOS, red LOS | are frames arriving; LOS: [17](#17-reading-the-receiver-tab-during-a-range-test) step 1 |
-| RSSI | `rx.rf.rssi_dbm`, at the readings' resolution; **—** during LOS | "dBm, newest frame"; tooltip: its resolution | - | signal strength, averaged ([4.2](#42-rf-now)) |
-| SNR est. | `rx.rf.snr_est_db`, at the readings' resolution; **—** during LOS | "dB, newest frame", plus "meas x.xx" with an SX126x (`rx.rf.packet.snr_db`) | - | RSSI minus noise floor, averaged |
-| Margin est. | `rx.rf.margin_est_db`, at the readings' resolution | "dB vs <sensitivity> dBm (<source>)"; during LOS "LOS · last x dB, t ago" | red < 3 dB, amber 3-6 dB, green >= 6 dB | how far above the decode threshold the newest frame was; below 3 dB frames start to drop |
-| Frames | `rx.frames.ok` | "lost n · FER x" | - | frames received, lost, frame error rate |
-| Throughput | `rx.frames.info_rate_bps`, 1 dp | "bit/s info · n frames/min" | - | useful telemetry bits per second over the last 60 s ([4.11](#411-frames)) |
-| RS decoder | `rx.decoder.symbols_corrected` | "sym corrected · uncorrectable n" | amber when any codeblock was uncorrectable | how hard the error correction works ([4.10](#410-decoder)) |
+| RSSI | `rx.rf.rssi_dbm`, at the readings' resolution; **—** during LOS; **OVERLOAD** (red) when `rx.rf.rssi_state` is OVERLOAD | "dBm, newest frame"; tooltip: its resolution. Overload: "too strong to measure: add attenuation / distance", tooltip the full warning | red on an overload | the newest frame's received power, not a mean ([4.2](#42-rf-now)) |
+| SNR est. (E22) / SNR (SX126x) | E22: `rx.rf.snr_est_db`; SX126x: the measured `rx.rf.packet.snr_db` (F-P2-2); **—** during LOS | E22: "dB, newest frame (RSSI − noise of the same pass)"; SX126x: "dB measured (SnrPkt/4) · est. x" | - | the newest frame's signal-to-noise ratio |
+| Margin est. (E22) / SNR margin (SX126x) | E22: `rx.rf.margin_worst_est_db` (worst-case sensitivity), "≤ x" (`rx.rf.margin_worst_max_db`) at the noise floor, "n/a" on an overload; SX126x: `rx.rf.snr_margin_db` when there is one | "dB vs worst case -126.0 dBm · typ. x dB"; at the noise floor "dB: not measurable (at the noise floor)"; SX126x "dB SNR margin (measured − required x dB)"; during LOS "LOS · last x dB, t ago"; tooltip `rx.rf.margin_basis` | red < 3 dB, amber 3-6 dB, green >= 6 dB; amber at most at the noise floor and while the RSSI is not checked against a noise reading (`rx.rf.margin_state` NOISE_UNKNOWN); red "n/a" on an overload | how far above the decode threshold the newest frame was, as far as the RSSI can tell (D-76, [4.2](#42-rf-now) "Link margin"); below 3 dB frames start to drop |
+| Frames | `rx.frames.ok` | "lost n in passes · FER 0/344 ≤ 0.87 %" (`rx.frames.lost`, `rx.frames.fer_ci`); tooltip: both bounds and `rx.frames.aos_gap_frames` | - | frames received and lost since the GDS started, with the FER's exact bounds ([4.11](#411-frames)) |
+| Throughput | `rx.frames.info_rate_bps`, 1 dp | "bit/s info · n frames/min (60 s)" (`rx.frames.rate_window_s`) | - | useful telemetry bits per second over the rate window max(60 s, 5 frame periods) ([4.11](#411-frames)) |
+| Frames lost (10 min) (E22) | `rx.frames.fer_10m_ci` (`lost`, `received`) | "0 / 178"; the bounds "FER ≤ 1.67 % (95 %, one-sided) · two-sided 95 % [0, 2.05 %]" | green; amber above 1 %, red above 10 % | the E22 replacement of the RS tile (F-P0-3): the E22 discards CRC-failed packets inside the module, so RS corrections say nothing about the channel there |
+| RS decoder (SX126x) | `rx.decoder.symbols_corrected` | "sym corrected · uncorrectable n · rescued n" (`rx.decoder.rs_rescued`) | amber when any codeblock was uncorrectable | how hard the error correction works on CRC-failed LoRa packets ([4.10](#410-decoder)) |
 | S/C mode | `decoded.mode` | "beacon <name> · FDIR <number of active flags>" | - | spacecraft mode, beacon level and active fault-protection flags |
 | Bus temperature | `tlm.HK.values.bus_temp`, 2 dp | "°C (Nicla Sense ME BME688)" | amber on a YELLOW or RED limit | spacecraft bus temperature ([7.3](#73-housekeeping-hk-all-43-fields)) |
 | SDLS TM | `link.sdls.spacecraft_tm_state` | "frames ok n · fail n" (`link.sdls.tm_frames_ok`, `link.sdls.tm_auth_fail`) | - | downlink security state ([5.2](#52-sdls)) |
 | Uplink | "n out / n q" (`cop.outstanding`, `cop.queued`) | "V(S) n · FOP OK / LOCKOUT / BLOCKED" | red on LOCKOUT or BLOCKED | commands in flight and waiting ([5.5](#55-cop-1-fop)) |
-| CFDP onboard | `cfdp.onboard.state_name` | "seq n · progress %" | - | the spacecraft's file sender ([12.1](#121-cfdp-transactions)) |
+| CFDP onboard | `cfdp.onboard.state_name` | "seq n · progress %"; "seq none" when HK `cfdp_seq` is 0 (= none) | - | the spacecraft's file sender ([12.1](#121-cfdp-transactions)) |
 
 ### 3.2 Charts
 
 | Chart | Series (keys) | Window | Notes |
 |---|---|---|---|
-| Received power | RSSI (`rx.series.rssi`), noise floor (`rx.series.noise`), against `rx.series.t` | the last 300 frames | dBm; a frame's RSSI is drawn only when it belongs to that frame; the noise line holds the latest reading |
-| Signal-to-noise | SNR est. (`rx.series.snr_est`), SNR measured (`rx.series.snr_meas`, SX126x), margin est. (`rx.series.margin`) | the last 300 frames | dB; dashed red line at 0 dB. Hover any chart to read the values of one frame |
+| Received power | RSSI (`rx.series.rssi`), noise floor (`rx.series.noise`), against `rx.series.t` | the last 300 frames | dBm; a frame's RSSI is drawn only when it belongs to that frame and is a received power (an overload or invalid reading leaves a gap); the noise line holds the noise reading of the same pass (a gap without one) |
+| Signal-to-noise | SNR est. (`rx.series.snr_est`), SNR measured (`rx.series.snr_meas`, SX126x), margin est. (`rx.series.margin`) | the last 300 frames | dB; dashed red line at 0 dB. The margin series is the margin against the worst-case sensitivity where the datasheet gives one ("margin est. (worst case)"), after the noise-floor rule: no point where the margin is not measurable. Hover any chart to read the values of one frame |
 
 ### 3.3 Spacecraft summary
 
@@ -549,7 +553,12 @@ Two radio families behave differently here:
 * **E22 UART modules** (E22-400T33D default, E22-400T37S): the module reports a whole-dB
   RSSI per packet and, on request, a whole-dB ambient-noise register. It does not report
   SNR or frequency error, so SNR, C/N0 and Eb/N0 are **estimates** from RSSI minus noise,
-  and every frequency-error, AFC and Doppler field shows "—".
+  and the SNR, frequency-error, AFC and Doppler rows are replaced by one "n/a (E22 UART
+  module: ... SX126x option only)" line (F-P2-1). The module delivers only packets whose
+  LoRa CRC passed and reports no CRC verdict, so on this path the Reed-Solomon corrections,
+  the ASM bit errors, SER, pre-FEC BER and CER cannot measure the radio channel: the page
+  labels the counters "UART / framing integrity" and shows SER / BER / CER as "n/a on the
+  E22 path" (F-P0-3, D-76).
 * **SX126x** (SPI, RadioLib; reference module E22-400M33S): the station MCU reports for
   every packet the RSSI (0.5 dB steps), the measured SNR (0.25 dB) and the LoRa
   frequency-error estimate, and measures the noise floor as the median of 8 instantaneous
@@ -611,8 +620,8 @@ checks in [4.6](#46-radio-configuration).
 
 | | |
 |---|---|
-| Shown as | "Packet RSSI, last (calibrated)" and "Packet RSSI, last (raw)", each followed by "(resolution x dB)" |
-| Keys | `rx.rf.rssi_dbm` (calibrated), `rx.rf.rssi_raw_dbm` (raw); the same value is `rx.rf.packet.rssi_dbm` |
+| Shown as | "Packet RSSI, last (calibrated)" and "Packet RSSI, last (raw reading)", each followed by "(resolution x dB)"; the raw row of an overload reads "octet at the top of its scale (reads -256 dBm): not a power" |
+| Keys | `rx.rf.rssi_dbm` (calibrated; null unless the reading is a received power, `rx.rf.rssi_state` OK), `rx.rf.rssi_raw_dbm` (the reading as the radio reported it); the same value is `rx.rf.packet.rssi_dbm` |
 | Unit, display | dBm at the resolution: whole dB (E22), 0.5 dB steps (SX126x) |
 | Source | E22: the RSSI octet the module appends to each received packet (REG3 bit 7, `[radio] rssi_byte = true`), dBm = -(256 - octet) (`framesync._emit`). SX126x: RssiPkt / 2 from GetPacketStatus, sent by the station MCU in 0.1 dBm in `rf_rx` |
 | Formula | RSSI_cal = RSSI_raw + C, with C = `[radio] rssi_cal_offset_db` (shown below) |
@@ -623,7 +632,18 @@ checks in [4.6](#46-radio-configuration).
 | Related | noise floor, SNR est., link margin est., RSSI distribution, link budget "= Received power" |
 | Example | E22 at 2.4k: raw -113 dBm, offset 0.0 dB, so -113.0000 dBm; SX126x profile 1: -126.0000 dBm |
 
-#### RSSI resolution and calibration offset
+#### RSSI reading: overload and invalid readings (D-76)
+
+| | |
+|---|---|
+| Shown as | "RSSI reading", "Overload readings (too strong to measure)", "Last overload reading", "Invalid readings (below −160 dBm)" |
+| Keys | `rx.rf.rssi_state` ("OK", "OVERLOAD", "INVALID"; null before the first reception), `rx.rf.rssi_overloads`, `rx.rf.rssi_overload_last_t`, `rx.rf.rssi_invalid` |
+| Unit, display | state text (OK green, OVERLOAD red with the warning text, INVALID amber); counts; ISO time and age, "never" |
+| Source | `rxstats.classify_rssi()` on the raw reading: an E22 RSSI octet at either end of its range - 0x00 (reads -256 dBm) and 0xFF (reads -1 dBm), which alternated on the 2026-10-13 bench run with the two radios side by side (docs/20 V-70, L-45) - is an OVERLOAD: the received signal is too strong to measure (the top of the scale), not a power of -256 dBm, and nothing says how far above the scale it is. A reading below -160 dBm (`MEASURED_RANGE_DBM` in link.py) or not a number is INVALID |
+| Effect | neither is a received power: `rx.rf.rssi_dbm` is null and the reading enters no window, histogram, series, margin, path loss, SNR estimate or TDM record (the TDM record of that frame carries no power). The E22 noise register is the same kind of octet: such a noise reply counts in `rx.rf.noise_rejected` and is not used |
+| Warning | event (source RX, WARN, at most once a minute), console line and a YELLOW alarm reason "receiver overload (n in 10 min): received signal too strong to measure: increase distance or add attenuation (receiver damage limit +10 dBm)" for 10 minutes after the last overload ([15](#15-alarm-logic)); header and OVERVIEW show **OVERLOAD**; the LED matrix blinks the RSSI rows. The +10 dBm is the module's maximum receiver input (T37S manual v1.5 2.1); an overload does not say the input exceeded it |
+| If abnormal | increase the distance between the antennas or add an attenuator in the station feed until the state is OK |
+| Example | octets 0x00, 0xFF: state OVERLOAD, 2 overload readings, raw -1 dBm |
 
 | | |
 |---|---|
@@ -645,18 +665,18 @@ checks in [4.6](#46-radio-configuration).
 |---|---|
 | Shown as | "Received power, linear" |
 | Key | `rx.rf.rssi_mw` (milliwatts in the snapshot) |
-| Unit, display | the page multiplies by 1e9 and shows picowatts with 5 significant digits |
+| Unit, display | watts in scientific notation with 2 significant digits: a 1 dB reading carries no more (D-70, F-P2-3) |
 | Formula | P[mW] = 10^(RSSI_cal / 10) |
 | Updates | every reception |
 | Meaning | the same reading on a linear scale: useful to see that -110 dBm is ten times the power of -120 dBm |
-| Example | -113 dBm = 5.0119e-12 mW, shown as "0.0050119 pW"; the screenshot's -108 dBm is "0.015849 pW" |
+| Example | -113 dBm = 5.0119e-12 mW, shown as "5.0e-15 W"; -108 dBm is "1.6e-14 W" |
 
 #### Noise floor, noise source, noise reading age
 
 | | |
 |---|---|
-| Shown as | "Noise floor (calibrated)", "Noise source", "Noise reading age" |
-| Keys | `rx.rf.noise_dbm`, `rx.rf.noise_source`, `rx.rf.noise_age_s` |
+| Shown as | "Noise floor (calibrated, latest reading)", "Noise source", "Noise reading age", "Noise readings rejected (end of range)" |
+| Keys | `rx.rf.noise_dbm`, `rx.rf.noise_source`, `rx.rf.noise_age_s`, `rx.rf.noise_rejected` (E22 noise octets at the end of their range or below -160 dBm: counted as a reply, not used) |
 | Unit, display | dBm at the resolution (whole dB with the E22, 0.1 dB with the SX126x); text; s 1 decimal |
 | Source | E22: the ambient-noise register, read with the query C0 C1 C2 C3 (reply C1 00 02 <noise> <last RSSI>), dBm = -(256 - octet); needs `[radio] rssi_noise = true`. SX126x: the station MCU's `rf_noise` RPC, the median of 8 instantaneous RSSI samples (GetRssiInst) in 0.1 dBm. Source text: "E22 noise register" or "SX126x GetRssiInst median of 8" |
 | Formula | noise_cal = noise_raw + C (the same calibration offset as the RSSI) |
@@ -671,10 +691,10 @@ checks in [4.6](#46-radio-configuration).
 
 | | |
 |---|---|
-| Shown as | "SNR est. (RSSI − noise)" |
+| Shown as | "SNR est. (RSSI − noise, same pass)" |
 | Key | `rx.rf.snr_est_db` |
 | Unit, display | dB at the readings' resolution (1.5) |
-| Formula | SNR_est = RSSI_cal - noise_cal, shown only when the noise reading belongs to the same pass as the RSSI: their times differ by no more than the LOS timeout (90 s before the first housekeeping tick); otherwise "—" (an RSSI minus a noise reading taken hours later was never an SNR) |
+| Formula | SNR_est = RSSI_cal - noise_cal, only when the noise reading belongs to the same pass as the RSSI: their times differ by no more than the LOS timeout (90 s before the first housekeeping tick); otherwise "—" (an RSSI minus a noise reading taken hours later was never an SNR). The same pairing rule (`ReceiverStats.noise_for()`, F-P1-5) applies to the windows, the series, the SNR histogram and the design SNR |
 | Updates | every reception (with the newest noise reading) |
 | This hardware | E22: the only SNR there is. LoRa demodulates below the noise, so SNR est. goes negative near the limit: at the datasheet sensitivity of -128 dBm with a floor near -118 dBm it would read about -10 dB. SX126x: compare with the measured SNR, which is the better number |
 | Meaning | how far the packet stood above the noise the receiver hears between packets |
@@ -689,7 +709,7 @@ checks in [4.6](#46-radio-configuration).
 | Shown as | "Signal power est. (noise removed)" |
 | Key | `rx.rf.pr_est_dbm` |
 | Unit, display | dBm at the readings' resolution (1.5) |
-| Formula | P_r = 10 log10(10^(RSSI_cal/10) - 10^(noise_cal/10)): the RSSI includes the noise power in the bandwidth, so the noise is subtracted on a linear scale. "—" when RSSI <= noise (the difference is not positive) or a value is missing |
+| Formula | P_r = 10 log10(10^(RSSI_cal/10) - 10^(noise_cal/10)) with the noise reading of the same pass: the RSSI includes the noise power in the bandwidth, so the noise is subtracted on a linear scale. "—" when RSSI <= noise (the difference is not positive) or a value is missing. The margin uses it when the RSSI is 3-10 dB above the noise (NEAR_NOISE, below) |
 | Updates | every reception |
 | This hardware | equals RSSI within 0.1 dB when the RSSI is 15 dB or more above the noise; undefined for LoRa packets received below the noise floor |
 | Meaning | the carrier power alone; the E22 C/N0 est. is built on it |
@@ -743,31 +763,33 @@ checks in [4.6](#46-radio-configuration).
 
 | | |
 |---|---|
-| Shown as | "Sensitivity" (with a source badge) and "Sensitivity source" |
-| Keys | `rx.rf.sensitivity_dbm`, `rx.rf.sensitivity_source` |
-| Unit, display | dBm, 4 decimals; text and badge |
+| Shown as | "Sensitivity, typical" (with a source badge), "Sensitivity source", "Sensitivity, worst case (datasheet min)" (with a source badge), "Worst-case sensitivity source" |
+| Keys | `rx.rf.sensitivity_dbm`, `rx.rf.sensitivity_source`; `rx.rf.sensitivity_worst_dbm`, `rx.rf.sensitivity_worst_source` (null for the SX126x) |
+| Unit, display | dBm, 1 decimal; text and badge |
+| Worst case (D-76) | `link.sensitivity_worst()`: the EBYTE manuals' "min" column at 2.4 kbit/s - the least sensitive module of the series - E22-400T33D -126 dBm (manual v1.05 2.2: -126 / -128 / -130 min / typ / max), E22-400T37S -125 dBm (manual v1.5 2.2: -125 / -126 / -127), scaled 10 log10(Rb / 2400) above 2.4 kbit/s like the typical value ("estimated"); a T-RF-03 measurement takes precedence over both. The project's SX126x table holds typical values only, so the SX126x has no worst case (null). The margins are coloured against the worst case |
 | Source | `link.sensitivity()` for the station model and rate code. In order of precedence: **measured**: `[radio.sensitivity_measured] "<MODEL>:<code>" = dBm` from test T-RF-03; **datasheet**: E22-400T33D -128 dBm, E22-400T37S -126 dBm at 2.4 kbit/s (codes 0-2), SX126x where Semtech DS rev 2.2 Table 3-8 lists the profile (SF12/125 kHz -137 dBm, SF7/125 kHz -124 dBm); **estimated**: E22 above 2.4 kbit/s, S = S(2.4k) + 10 log10(Rb / 2400), rounded to 0.1 dB; **computed**: SX126x S = -174 + 10 log10(B) + NF + SNRmin(SF), NF = 6 dB (assumed, boosted gain), rounded to 0.1 dB |
 | Updates | configuration only (rate code, model) |
 | This hardware | E22-400T33D: -128.0 (codes 0-2), -125.0, -122.0, -119.0, -116.0, -113.8 dBm (codes 3-7); E22-400T37S 2 dB less sensitive (-126.0 ... -111.8 dBm); SX126x profiles 0-7: -143.1, -140.0, -137.0, -134.5, -132.0, -129.5, -127.0, -124.0 dBm |
 | Meaning | the weakest signal the receiver decodes (the reference for the margin). Only "measured" values are facts about your hardware; the rest are the manufacturer's or the formula's |
 | If abnormal | frames failing well above the shown sensitivity: the real sensitivity is worse (interference, a poor module, a wrong noise figure); run T-RF-03 and enter the result |
 | Related | link margin est., link manager, the link budget |
-| Example | -128.0000 dBm, "datasheet" (E22-400T33D, code 2); -140.0000 dBm, "computed" (SX126x profile 1); the screenshot: -113.8000 dBm, "estimated" (E22 code 7) |
+| Example | -128.0 dBm, "datasheet" (E22-400T33D, code 2; worst case -126.0 "datasheet"); -140.0 dBm, "computed" (SX126x profile 1; no worst case); E22 code 7: -113.8 "estimated" (worst case -111.8 "estimated") |
 
-#### Link margin est. (RSSI - sensitivity)
+#### Link margin est. and the noise-floor rule (D-76)
 
 | | |
 |---|---|
-| Shown as | "Link margin est. (RSSI − sensitivity)"; also the header MARGIN, the OVERVIEW tile and the link budget "= Link margin" (measured) |
-| Key | `rx.rf.margin_est_db` |
-| Unit, display | dB at the readings' resolution (1.5) |
-| Formula | M = RSSI_cal - S |
+| Shown as | "Margin state (noise-floor rule, D-76)", "Margin basis", "Link margin est. vs worst case" (coloured), "Link margin est. vs typical", and at the noise floor "Margin upper bound vs worst case (noise floor)" / "vs typical"; also the header MARGIN, the OVERVIEW tile, the two-way panel and the link budget "= Link margin" (measured) |
+| Keys | `rx.rf.margin_state`, `rx.rf.margin_basis`, `rx.rf.margin_worst_est_db`, `rx.rf.margin_est_db`, `rx.rf.margin_worst_max_db`, `rx.rf.margin_max_db` |
+| Unit, display | dB at the readings' resolution (1.5); the upper bounds as "≤ x dB" |
+| Why a rule | the RSSI the radios report is the power in the receiver bandwidth, signal plus noise, and LoRa decodes below the noise. Near the sensitivity limit RSSI - S therefore measures the noise, not the signal: it would stay near noise - S (about +8 dB with a -118 dBm floor and the worst-case -126 dBm) and look healthy while frames are lost (R4 U1). Which RSSI the E22 octet is (total in-band power or a despread signal estimate) is not stated in either manual: VERIFY on the bench (attenuate through the sensitivity limit and record RSSI, noise and frame loss) |
+| Formula | with R = RSSI_cal and N = the noise reading of the same pass (`rxstats.margin_assessment()`): **SIGNAL** R - N >= 10 dB: the noise adds at most 10 log10(10/9) = 0.46 dB, below the E22's 1 dB step, so M = R - S. **NEAR_NOISE** 3 <= R - N < 10 dB: the noise is removed, M = P_r - S with the signal power est. P_r. **NOISE_FLOOR** R - N < 3 dB: the signal is below the noise, M is not measurable (null); only the upper bound N - S is given (`margin_max_db`, `margin_worst_max_db`), shown "≤ x" in amber, never green. **NOISE_UNKNOWN**: no noise reading in this pass, M = R - S not checked against the noise floor: at most amber. An overload or invalid reading gives no margin at all (state null) |
 | Updates | every reception |
-| This hardware | colour bands (dashboard.html): green >= 6 dB, amber 3 to 6 dB, red < 3 dB. The link manager aims for `[linkmgr] target_margin_db` = 6 dB on the 10th-percentile margin of the last 10 minutes ([4.16](#416-link-manager-and-pass-events)) |
-| Meaning | how many dB the signal could lose before reaching the decode threshold. Because one reading includes fading, the robust number is the 10-minute p10 of RSSI minus the sensitivity (what the link manager uses) |
-| If abnormal | below 3 dB: expect lost frames; slow down (LINKRATE to a lower code), improve antennas, height or feeders, or accept the losses. Negative but frames still arrive: the shown sensitivity is pessimistic (or the RSSI calibration is off) |
-| Related | packet RSSI, sensitivity, FER, link manager, range at sensitivity |
-| Example | E22: -113 - (-128) = 15.0000 dB; SX126x: -126 - (-140) = 14.0000 dB |
+| This hardware | colour bands, against the worst-case sensitivity (E22) or the typical one (SX126x, no worst case): green >= 6 dB, amber 3 to 6 dB, red < 3 dB. The link manager aims for `[linkmgr] target_margin_db` = 6 dB on the 10th-percentile margin of its window ([4.16](#416-link-manager-and-pass-events)) |
+| Meaning | how many dB the signal could lose before reaching the decode threshold of the least sensitive module of the series. Because one reading includes fading, the robust number is the p10 of RSSI minus the sensitivity (what the link manager uses) |
+| If abnormal | below 3 dB: expect lost frames; slow down (LINKRATE to a lower code), improve antennas, height or feeders, or accept the losses. NOISE_FLOOR: the RSSI cannot tell the margin; judge the link by the FER and its bounds ([4.11](#411-frames)). Negative but frames still arrive: the shown sensitivity is pessimistic (or the RSSI calibration is off) |
+| Related | packet RSSI, noise floor, signal power est., sensitivity, FER, link manager, range at sensitivity |
+| Example | E22, R = -113, N = -119 (6 dB above: NEAR_NOISE): P_r = -114.3 dBm, M = 11.7 dB vs the worst case -126 dBm (13.7 dB vs typical); R = -100, N = -118: SIGNAL, 26 dB / 28 dB; R = -116, N = -118: NOISE_FLOOR, "≤ 8 dB" (≤ 10 dB vs typical) |
 
 #### Required SNR and SNR margin (SX126x)
 
@@ -818,9 +840,9 @@ checks in [4.6](#46-radio-configuration).
 | Shown as | Key | Unit, display | Meaning |
 |---|---|---|---|
 | RSSI | `rx.rf.packet.rssi_dbm` | dBm at the resolution (1.5) | the newest reception's calibrated RSSI |
-| SNR (SnrPkt/4) | `rx.rf.packet.snr_db` | dB, 2 decimals | SX126x measured SNR (0.25 dB steps); "—" for the E22 |
+| SNR (SnrPkt/4) | `rx.rf.packet.snr_db` | dB, 2 decimals | SX126x measured SNR (0.25 dB steps); not shown on the E22 (the "n/a" line) |
 | Frequency error (raw) | `rx.rf.packet.freq_err_hz` | Hz, 1 decimal | SX126x LoRa frequency-error estimate, before calibration and AFC sign (`rf_rx` freq_err_hz) |
-| CRC | `rx.rf.packet.crc_ok` | ok / FAILED (amber) | the LoRa payload CRC (E22 receptions are "ok") |
+| CRC | `rx.rf.packet.crc_ok` | ok / FAILED (amber); E22: "n/a (the E22 discards CRC-failed LoRa packets inside the module: no CRC report, docs/20 L-20)" | the LoRa payload CRC verdict of the SX126x; null for the E22, which reports none (F-P0-2) |
 | Time | `rx.rf.packet.t` | ISO 8601 | when the reception reached the GDS (ERT) |
 | SNR window 10 min | `rx.rf.snr_db` (`mean`, `sem`, `min`, `max`, `n`) | "mean ± SEM dB [min, max] n=" | the measured SNR of the last 10 minutes |
 | Frequency error window 10 min | `rx.rf.freq_err_hz` (`mean`, `sem`, `min`, `max`, `n`) | "mean ± SEM Hz [min, max] n=" | the raw frequency error of the last 10 minutes |
@@ -842,14 +864,14 @@ a sample.
 
 | Metric (as shown) | Metric key | Unit, decimals | A sample is added | This hardware; how to read it |
 |---|---|---|---|---|
-| Packet RSSI (dBm) | `rssi` | dBm, 4 | every reception (calibrated) | the link level. p10 = the level held 90 % of the time; fade depth = p90 - p10 |
+| Packet RSSI (dBm) | `rssi` | dBm, 4 | every reception that is a received power (calibrated; an overload or invalid reading adds none, D-76) | the link level. p10 = the level held 90 % of the time; fade depth = p90 - p10 |
 | Noise floor (dBm) | `noise` | dBm, 4 | every noise reading (at most one per 20 s) | should be flat; σ above about 1 dB or steps mean changing interference |
-| SNR est. (RSSI − noise) (dB) | `snr_est` | dB, 4 | every reception, paired with the newest noise reading of any age | see the SNR est. card; the first frames of a pass can pair with the previous pass's last noise reading |
-| SNR measured (SX126x) (dB) | `snr_meas` | dB, 4 | every SX126x packet | compare the mean with the required SNR of the profile |
-| Frequency error (Hz) | `freq_err` | Hz, 1 | every SX126x packet (raw) | with AFC: the residual after the correction; σ = frequency jitter |
+| SNR est. (RSSI − noise) (dB) | `snr_est` | dB, 4 | every reception with a noise reading of the same pass (F-P1-5) | see the SNR est. card; a reception without one adds no sample |
+| SNR measured (SX126x) (dB) | `snr_meas` | dB, 4 | every SX126x packet | compare the mean with the required SNR of the profile; not shown on the E22 (F-P2-1) |
+| Frequency error (Hz) | `freq_err` | Hz, 1 | every SX126x packet (raw) | with AFC: the residual after the correction; σ = frequency jitter; not shown on the E22 |
 | Frame inter-arrival (s) | `iat` | s, 4 | every frame after the first of a pass: time since the previous frame | p50 = the spacecraft frame period ([1.3](#13-how-often-things-change)); max or p90 above it = gaps (lost frames, an RF survey, a hibernation beacon) |
-| RS symbols corrected / codeblock (sym) | `rs` | symbols, 4 | every correctable codeblock: 0..16 | 0 at good SNR; a mean rising toward 16 means the decoder is near its limit (E = 16 per codeword) |
-| ASM bit errors / frame (bit) | `asm` | bits, 4 | every codeblock: 0..4 | bit errors in the 32-bit sync marker, which RS does not protect; accepted up to 2 while searching and 4 in lock |
+| RS symbols corrected / codeblock (sym) | `rs` | symbols, 4 | every correctable codeblock: 0..16 | SX126x: 0 at good SNR; a mean rising toward 16 means the decoder is near its limit (E = 16 per codeword). E22: labelled "UART / framing integrity only, not the radio channel" - the module discards CRC-failed LoRa packets, so RS sees only errors on the module's UART (F-P0-3) |
+| ASM bit errors / frame (bit) | `asm` | bits, 4 | every codeblock: 0..4 | bit errors in the 32-bit sync marker, which RS does not protect; accepted up to 2 while searching and 4 in lock. E22: UART / framing integrity only, as above |
 
 Example (E22 at 2.4 kbit/s, CRUISE, 10-minute window), the full-precision values of the snapshot
 (`rx.windows`); the page shows the received-power rows at the readings' resolution (1.5), here
@@ -869,24 +891,25 @@ Reading it: the median inter-arrival time of 3.22 s is close to the CRUISE frame
 3.17 s at 2.4 kbit/s, the 6.46 s maximum is one lost frame (twice the period), and the RSSI
 p10 of -116 dBm is 12 dB above the -128 dBm sensitivity: the 10th-percentile margin the
 link manager works with. (The RS corrections are the simulator's injected errors, up to 3
-per frame.)
+per frame; real E22 hardware delivers no channel errors to RS, see above.)
 
 ### 4.4 Charts and histograms
 
 | Panel | Keys | What it shows; how to read it |
 |---|---|---|
 | Packet RSSI and noise floor | `rx.series.t`, `rx.series.rssi`, `rx.series.noise` | the last 300 frames (`SERIES_LEN`), dBm. RSSI tracking the noise line = no margin left |
-| SNR and margin | `rx.series.snr_est`, `rx.series.snr_meas`, `rx.series.margin` | the last 300 frames, dB, red dashed line at 0 dB. Margin below 0 dB means frames are decoding below the stated sensitivity |
-| Frequency error | `rx.series.freq_err` | raw LoRa estimate per frame, Hz, with dashed WARN (±50 %) and ALARM (±80 %) lines of FERR_L. E22: "no frequency-error reports (SX126x only)" |
+| SNR and margin | `rx.series.snr_est`, `rx.series.snr_meas`, `rx.series.margin` | the last 300 frames, dB, red dashed line at 0 dB. The margin is the one the header colours (worst case where defined, noise-floor rule: no point where not measurable). Margin below 0 dB means frames are decoding below the stated sensitivity |
+| Frequency error | `rx.series.freq_err` | raw LoRa estimate per frame, Hz, with dashed WARN (±50 %) and ALARM (±80 %) lines of FERR_L. E22: "n/a: the E22 UART module reports no frequency error (SX126x option only)" |
 | (snapshot only) | `rx.series.rs` | RS symbols corrected in each of the last 300 frames (not charted; the histogram below summarises it) |
 | Frequency-error gauge | `rx.windows.10m.freq_err.mean`, `.sem`, `rx.rf.freq_offset_limit_hz` | the 10-minute mean (bar) ± SEM (shaded) on a ±FERR_L scale with OK / WARN / ALARM zones; note line: "10-min mean x Hz ± y Hz of FERR_L z Hz = p % · state S" |
 | RSSI distribution | `rx.hist.rssi` (`lo` -150, `step` 5, `bins`) | count of receptions per 5 dB bin since the GDS started ("whole session"); a two-humped shape = two conditions (e.g. antenna moved) |
-| SNR distribution | `rx.hist.snr` (`lo` -30, `step` 2) | per 2 dB bin; the measured SNR when the radio gives one, else SNR est. |
+| SNR distribution | `rx.hist.snr` (`lo` -30, `step` 2) | per 2 dB bin; the measured SNR when the radio gives one (subtitle "measured SNR"), else SNR est. of the same pass (subtitle "SNR est. distribution", E22) |
 | Frequency-error distribution | `rx.hist.freq_err` (±FERR_L, or ±5000 Hz without one; `step` 100) | per 100 Hz bin |
-| RS corrections per codeblock | `rx.hist.rs_corrections` | 17 counters: codeblocks that needed 0, 1, ... 16 symbol corrections. Weight moving right = the link is approaching the RS limit |
-| ASM bit errors per frame | `rx.hist.asm_bit_errors` | 5 counters: 0..4 bit errors in the sync marker |
+| RS corrections per codeblock | `rx.hist.rs_corrections` | 17 counters: codeblocks that needed 0, 1, ... 16 symbol corrections. SX126x: weight moving right = the link is approaching the RS limit. E22: the subtitle says the corrections are UART errors only (F-P0-3) |
+| ASM bit errors per frame | `rx.hist.asm_bit_errors` | 5 counters: 0..4 bit errors in the sync marker (E22: UART / framing integrity only) |
 
-Values outside a histogram's range are counted in the end bins. Charts show only the bins
+Values outside a histogram's range are counted in the end bins (an overload reading is no
+value: it is not counted, D-76). Charts show only the bins
 around the data (two empty bins either side); hover a bar or point for its exact value and
 time.
 
@@ -911,18 +934,21 @@ receiver sensitivity, N noise floor, RSSI the measured received power.
 | − S/C line loss | `rx.budget.sc_line_loss_db` | - | `[spacecraft] tx_line_loss_db` (default 0.5 dB) | configured |
 | + S/C antenna gain | `rx.budget.sc_antenna_gain_dbi` | - | `[spacecraft] antenna_gain_dbi` (default 2.15 dBi) | configured |
 | = EIRP | `rx.budget.sc_eirp_dbm_est` | - | EIRP = P_t + G_t - L_t | est. |
-| Distance / one-way light time | `rx.budget.distance_km` | `rx.budget.owlt_s` | `[spacecraft] distance_km`; OWLT = d / c. 0 km gives "—" and no free-space loss | configured |
-| − Free-space path loss | `rx.budget.fspl_db` | `rx.budget.measured_path_loss_db_est` (last) | FSPL = 20 log10(4π d f / c) (`rxstats.fspl_db()`, formula text in `rx.budget.fspl_formula`); measured path loss = EIRP + G_r - L_r - RSSI_cal | computed, measured |
-| path loss 10-min mean | - | `rx.budget.measured_path_loss_mean10m_db` | EIRP + G_r - L_r - (10-minute RSSI mean) | measured |
+| Distance / one-way light time | `rx.budget.distance_km` | `rx.budget.owlt_s` | `[spacecraft] distance_km`; OWLT = d / c. 0 km: both null, shown "not configured ([spacecraft] distance_km)", and no free-space loss (F-P0-7) | configured |
+| − Free-space path loss | `rx.budget.fspl_db` | `rx.budget.measured_path_loss_db_est` (last) | FSPL = 20 log10(4π d f / c) (`rxstats.fspl_db()`, formula text in `rx.budget.fspl_formula`); measured path loss = EIRP + G_r - L_r - P, with P the received power the D-76 noise-floor rule accepts (`rx.budget.measured_power_state` = `rx.rf.margin_state`: the RSSI, or the signal power est. "noise removed" when NEAR_NOISE); "n/a (noise floor)" / "n/a (overload)" otherwise | computed, measured |
+| path loss 10-min mean | - | `rx.budget.measured_path_loss_mean10m_db` | EIRP + G_r - L_r - (10-minute RSSI mean, with the same rule applied against the 10-minute noise mean) | measured |
 | + Ground antenna gain | `rx.budget.ground_gain_dbi` | - | `[station] antenna_gain_dbi` (default 12.0 dBi) | configured |
 | − Ground line loss | `rx.budget.ground_line_loss_db` | - | `[station] rx_line_loss_db` (default 1.0 dB) | configured |
 | = Received power | `rx.budget.predicted_pr_dbm` | 10-min RSSI mean (n), at the readings' resolution | P_r,pred = EIRP + G_r - L_r - FSPL | computed, measured |
 | Excess loss (measured − free space) | - | `rx.budget.excess_loss_db_est` | measured path loss (last) - FSPL; amber above 20 dB | est. |
-| Thermal noise kTB (NF assumed) | `rx.budget.thermal_noise_dbm` | 10-min noise mean, at the readings' resolution | kTB = -174 + 10 log10(B) dBm (B = noise bandwidth, [4.2](#42-rf-now)); the NF shown for the SX126x is `rx.budget.noise_figure_assumed_db` = 6 dB ("—" for the E22) | computed, measured |
-| SNR | `rx.budget.predicted_snr_db` | 10-min measured SNR mean (SX126x) or SNR est. mean | predicted P_r - current noise floor | measured or est. |
-| Sensitivity | `rx.budget.sensitivity_dbm` (+ `rx.budget.sensitivity_source`) | - | as in [4.2](#42-rf-now) | source badge |
-| = Link margin | `rx.budget.predicted_margin_db` | `rx.rf.margin_est_db` (coloured as in 4.2) | predicted P_r - S; measured RSSI_cal - S | est. |
-| Range at sensitivity (free space + excess loss) | - | `rx.budget.range_at_sensitivity_km_est` | the distance at which free space plus the measured excess loss would bring the signal down to S: d_max = (c / 4πf) x 10^((EIRP + G_r - L_r - S - L_excess) / 20) (`rxstats.range_for_loss_m()`). With the measured excess loss this equals d x 10^(M/20); without a measurement (no RSSI yet) the excess loss is taken as 0 (pure free space) | est. |
+| Thermal noise kTB (NF / B assumed) | `rx.budget.thermal_noise_dbm` | 10-min noise mean, at the readings' resolution | kTB = -174 + 10 log10(B) dBm (B = noise bandwidth, [4.2](#42-rf-now)); the NF shown for the SX126x is `rx.budget.noise_figure_assumed_db` = 6 dB (null for the E22, whose row says "B assumed: the E22's LoRa bandwidth is not published") | computed, measured |
+| SNR | `rx.budget.predicted_snr_db` | 10-min measured SNR mean (SX126x) or SNR est. mean | predicted P_r - the noise reading of the current pass (null without one, F-P1-5) | measured or est. |
+| Sensitivity, typical | `rx.budget.sensitivity_dbm` (+ `rx.budget.sensitivity_source`) | - | as in [4.2](#42-rf-now), 1 decimal | source badge |
+| Sensitivity, worst case (datasheet min) | `rx.budget.sensitivity_worst_dbm` (+ `rx.budget.sensitivity_worst_source`) | - | as in [4.2](#42-rf-now); "n/a (no worst case published for this radio)" for the SX126x | source badge |
+| = Link margin vs worst case | `rx.budget.predicted_margin_worst_db` (else `rx.budget.predicted_margin_db`) | the header margin ([4.2](#42-rf-now): worst case, noise-floor rule, coloured) | predicted P_r - S_worst; measured as `rx.rf.margin_worst_est_db` | est. |
+| link margin vs typical | `rx.budget.predicted_margin_db` | `rx.rf.margin_est_db` | predicted P_r - S_typ | est. |
+| Range at sensitivity, free space (design) | `rx.budget.range_at_sensitivity_free_space_km` | - | the distance at which free space alone would bring the signal down to S (worst case where defined): d = (c / 4πf) x 10^((EIRP + G_r - L_r - S) / 20) (`rxstats.range_for_loss_m()`); needs only the RF packet's power code | computed |
+| Range at sensitivity, free space + measured excess loss | - | `rx.budget.range_at_sensitivity_km_est` | the same with the measured excess loss subtracted: d x 10^(M/20) for the margin M of the accepted received power. Null - "n/a (needs a configured distance and a usable reading)" - without a distance or at the noise floor / overload (F-P1-7: a pure free-space figure is not a measurement) | est. |
 
 **Uplink rows** (station to spacecraft; keys under `rx.budget.uplink`)
 
@@ -931,8 +957,8 @@ receiver sensitivity, N noise floor, RSSI the measured received power.
 | Station transmitter power | `rx.budget.uplink.gs_power_dbm` | - | `link.power_dbm()` of the station model, `[radio] power` code and, for the SX126x, `[radio.sx126x] pa_gain_db`; `rx.budget.uplink.gs_power_verified` true only for the T37S | datasheet or VERIFY T-RF-07 |
 | Station EIRP | `rx.budget.uplink.gs_eirp_dbm_est` | - | P_gs + G_r - L_r (the station antenna and cable serve both directions) | est. |
 | S/C sensitivity | `rx.budget.uplink.sc_sensitivity_dbm` (+ `rx.budget.uplink.sc_sensitivity_source`) | - | `link.sensitivity()` of the spacecraft's model and rate code from the RF packet, with its Rx boosted gain from RF `rf_flags` b0 for the SX126x. Station T-RF-03 measurements are not applied to the spacecraft | source badge |
-| Received power at the S/C | `rx.budget.uplink.predicted_pr_dbm` | `rx.budget.uplink.measured_uplink_rssi_dbm` ("(RF uplink_rssi)") | predicted: EIRP_gs + G_t - L_t - FSPL; measured: the RSSI of the last uplink packet as the spacecraft reports it (RF `uplink_rssi`, 1 dB, not calibrated) | computed, measured |
-| Uplink margin | `rx.budget.uplink.predicted_margin_db` | `rx.budget.uplink.measured_margin_db` | received power at the spacecraft - spacecraft sensitivity | est. |
+| Received power at the S/C | `rx.budget.uplink.predicted_pr_dbm` | `rx.budget.uplink.measured_uplink_rssi_dbm` ("(RF uplink_rssi)"), `rx.budget.uplink.measured_uplink_rssi_state` | predicted: EIRP_gs + G_t - L_t - FSPL; measured: the RSSI of the last uplink packet as the spacecraft reports it (RF `uplink_rssi`, 1 dB, not calibrated). An E22 spacecraft's octet at the end of its range is an overload there too: state OVERLOAD, no value, "n/a (overload at the S/C)" | computed, measured |
+| Uplink margin | `rx.budget.uplink.predicted_margin_db` | `rx.budget.uplink.measured_margin_db`, `rx.budget.uplink.measured_margin_state`, `rx.budget.uplink.measured_margin_max_db` | received power at the spacecraft - spacecraft sensitivity, with the noise-floor rule against RF `sc_noise_floor` (at the noise floor "≤ x (noise floor)") | est. |
 
 **Worked example** (simulator snapshot, E22-400T33D at code 2, configured d = 2 km,
 f = 433.125 MHz, all other values the `station.toml` defaults):
@@ -948,8 +974,10 @@ f = 433.125 MHz, all other values the `station.toml` defaults):
    34.65 + 11.00 - (-111.9213) = 157.5713 dB.
 6. Excess loss = 158.6500 - 91.2006 = 67.4494 dB (the simulator's RF ignores the distance:
    a real link with 67 dB excess loss at 2 km would be heavily obstructed).
-7. Measured margin = -113 - (-128) = 15.0000 dB; range at sensitivity = 2 km x 10^(15/20)
-   = 11.247 km.
+7. Measured margin (the RSSI 6 dB above the noise: NEAR_NOISE, P_r = -114.26 dBm) = -114.26 -
+   (-126) = 11.7 dB against the worst case (13.7 dB typical); range at sensitivity with the
+   measured excess loss = 2 km x 10^(11.74/20) = 7.73 km; free-space design range (no excess
+   loss) = (c / 4πf) x 10^((34.65 + 12 - 1 + 126) / 20) = 21 062 km.
 8. Thermal noise kTB in the assumed 125 kHz = -174 + 50.9691 = -123.0309 dBm, against a
    measured 10-minute noise mean of -118.1154 dBm.
 9. Uplink: station EIRP = 33 + 12 - 1 = 44.00 dBm; predicted received power at the spacecraft
@@ -993,12 +1021,18 @@ hardware and the ground radio's register read-back. Key prefix `radio`.
 | Rx boosted gain | `radio.rx_boost` | SX126x `[radio.sx126x] rx_boosted_gain` (register 0x08AC = 0x96); "—" for the E22 | — / yes |
 | CAD before TX | `radio.cad` | SX126x `[radio.sx126x] cad_before_tx`: channel-activity detection before every uplink | — / yes |
 | LBT | `radio.lbt` | E22 `[radio] lbt` (listen before talk); "—" for the SX126x | no / — |
-| Sensitivity (dBm) | `radio.sensitivity_dbm` (+ `radio.sensitivity_source`) | as in [4.2](#42-rf-now) | -128 datasheet / -140 computed (integral values are printed without decimals) |
+| Sensitivity, typical (dBm) | `radio.sensitivity_dbm` (+ `radio.sensitivity_source`) | as in [4.2](#42-rf-now); 1 decimal | -128 datasheet / -140 computed (integral values are printed without decimals) |
+| Sensitivity, worst case (dBm, datasheet min) | `radio.sensitivity_worst_dbm` (+ `radio.sensitivity_worst_source`) | as in [4.2](#42-rf-now); "n/a (no worst case published for this radio)" for the SX126x | -126 datasheet / n/a |
 | Air time of one CADU (s) | `radio.airtime_s` (+ `radio.airtime_source`) | SX126x: exact LoRa time on air of 236 octets (Semtech formula, "computed"); E22: 236 x 8 x 1.3 / Rb ("estimated", the flight's model) | 1.0227 estimated / 17.3179 computed |
 | FERR_L (Hz) | `radio.freq_offset_limit_hz` | as `rx.rf.freq_offset_limit_hz` | — / 15625 |
 | Frequency offset calibration (Hz) | `radio.freq_offset_cal_hz` | `[radio] freq_offset_cal_hz`: the static crystal offset between the two radios, the AFC's start value | 0 |
 | Fault log | `radio.has_fault_log` | the model can report abnormal status (FF FF FF 0x): E22-400T37S only | no |
-| Noise register | `radio.has_noise_register` | the model has the E22 ambient-noise query | yes / no |
+| Noise register (model capability) | `radio.has_noise_register` | the model has the E22 ambient-noise query; a capability, not proof the module is configured for it (see "Register check" below) | yes / no |
+
+On the E22 the SX126x-only rows (spreading factor, bandwidth, coding rate, LDRO, Rx boosted
+gain, CAD before TX, FERR_L, frequency offset calibration) are replaced by one line "n/a
+(EBYTE publishes no LoRa parameters for the E22 air-rate codes; SX126x option only)"
+(F-P2-1); the keys stay in the snapshot.
 
 **Spacecraft radio (from RF telemetry)**
 
@@ -1014,8 +1048,10 @@ hardware and the ground radio's register read-back. Key prefix `radio`.
 
 | Shown as | Key | Meaning; if abnormal |
 |---|---|---|
-| Backend | `radio.backend_available`, `radio.backend_error` | whether the GDS has a radio backend; "UNAVAILABLE" with the reason (red badge and a RED alarm "radio backend unavailable: ..."): E22 serial port missing (`[radio] port`, permissions), or no Router Bridge for the SX126x |
-| Radio Control Unit | `radio.rcu` | E22: the station MCU drives the module's M0 / M1 and reads AUX ("active"); needed for GSCAN, WAKE, LINKRATE, LINKCHAN and the configuration read-back. SX126x: "n/a" |
+| Backend (serial port open / bridge attached) | `radio.backend_available`, `radio.backend_error` | whether the GDS has a radio backend; "UNAVAILABLE" with the reason (red badge and a RED alarm "radio backend unavailable: ..."): E22 serial port missing (`[radio] port`, permissions), or no Router Bridge for the SX126x. "available" means the port is open, not that a module answers behind the USB-UART bridge |
+| Module answering (F-P1-4) | `radio.module_answering` (true / null), `radio.module_evidence` | E22: "yes" when the module produced output - a CADU or a noise reply - within 3 x `[radio] noise_poll_s`; otherwise "unknown" (no evidence either way: the noise query goes out only after a received frame, so between passes nothing asks). SX126x: the station MCU's status line within 15 s (false when older). The evidence text says which |
+| Radio Control Unit | `radio.rcu` | E22: the station MCU drives the module's M0 / M1 and reads AUX ("active"); needed for GSCAN, WAKE, LINKRATE, LINKCHAN and the configuration read-back; without it "off ([gds] rcu = false): no register read-back, GSCAN, WAKE, LINKRATE or LINKCHAN" (the shipped E15-USB-T2 default). SX126x: "n/a" |
+| Register check | `radio.register_check` | E22 with an RCU: "read back: matches station.toml" (green) or "read back: MISMATCH <fields>" (red) after VERIFY / RADIO, "not read back yet" before; without an RCU: "not read back: no Radio Control Unit ([gds] rcu = false) - RSSI byte and noise enable assumed from station.toml" (amber): every RSSI and noise value then rests on the module being configured as station.toml says. SX126x: "n/a (the station MCU sketch configures the radio)" |
 | Configured (station.toml) | `radio.configured` (`channel`, `air_rate`, `power`, `lbt`) | the values in the configuration file at start-up |
 | Allowed channels | `radio.allowed_channels` | `[radio] allowed_channels`: CHANNEL and LINKCHAN outside this list are refused (licence and band plan) |
 | Coordinated change | `radio.link_change` (`kind`, `value`, `state`, ...) | a LINKRATE / LINKCHAN in progress: state WAIT_EXEC (the AIRRATE / CHANNEL command is on its way), WAIT_SWITCH (executed on board; the spacecraft switches after 2 more frames), SWITCHED (the ground switched and sent a NOOP; waiting for the first frame on the new setting). "none" otherwise. No frame after the switch within `revert_s` + 30 s + 2 frame periods: the ground switches back (the spacecraft also reverts by itself without uplink) |
@@ -1102,8 +1138,11 @@ Router Bridge (SX126x panel). An estimate pinned at the bound produces the WARN 
 ### 4.8 Doppler and range rate
 
 **What it shows.** The frequency shift caused by the spacecraft's motion along the line of
-sight, and the corresponding range rate. SX126x only (the E22 reports no frequency error,
-the panel shows "—"). Key prefix `rx.rf.doppler`.
+sight, and the corresponding range rate. SX126x only: the E22 reports no frequency error,
+so on the E22 the panel shows one line "n/a: the E22 UART module reports no frequency error,
+so the station cannot measure a Doppler shift or range rate (SX126x option only, docs/20
+L-20)" and the carrier (F-P2-1); /metrics exports no `rx.rf.doppler` value then. Key prefix
+`rx.rf.doppler`.
 
 | Shown as | Key | Unit, display | Formula, source |
 |---|---|---|---|
@@ -1129,22 +1168,24 @@ carry `DOPPLER_INSTANTANEOUS`). For scale: 1 Hz at 433.125 MHz is 0.692 m/s.
 replies); the synchronizer finds the 32-bit attached sync marker (ASM 1ACFFC1D) in it with
 the classic SEARCH -> LOCK -> FLYWHEEL state machine
 ([framesync.py](../dssq-groundstation/python/dssq/framesync.py)). The SX126x delivers whole
-packets, so its state is PACKET and the counters stay 0. Key prefix `sync`.
+packets, so its state is PACKET and the page shows one line "Byte-stream synchronizer: n/a
+(SX126x packet radio: one CADU per LoRa packet, no ASM search)" instead of counters that
+stay 0. Key prefix `sync`.
 
 | Shown as | Key | Meaning | Normal / abnormal |
 |---|---|---|---|
-| State | `sync.state` | SEARCH (looking for the ASM, <= 2 bit errors accepted), LOCK (ASM found where expected, <= 4 bit errors accepted), FLYWHEEL (expected ASM missing; up to 3 misses tolerated before SEARCH), PACKET (SX126x) | LOCK during a pass; SEARCH between passes is normal |
+| State | `sync.state` | SEARCH (looking for the ASM, <= 2 bit errors accepted), LOCK (ASM found where expected, <= 4 bit errors accepted), FLYWHEEL (expected ASM missing; up to 3 misses tolerated before SEARCH), PACKET (SX126x) | LOCK during a pass; SEARCH between passes is normal (grey then, red during AOS) |
 | ASMs found | `sync.asm_found` | sync markers found | equals CADUs delivered |
 | CADUs delivered | `sync.cadus` | CADUs handed to the decoder | grows by 1 per frame |
-| ASM bit errors (total) | `sync.asm_bit_errors` | sum of the bit errors in the found markers | 0 or small |
+| ASM bit errors (total; UART / framing integrity) | `sync.asm_bit_errors` | sum of the bit errors in the found markers. On the E22 the module discards CRC-failed LoRa packets, so these are errors on the module's UART or in the framing, not radio-channel bit errors (F-P0-3) | 0 or small |
 | Slips | `sync.slips` | the ASM was not at the expected position | each slip is a lost or damaged CADU |
 | Flywheel frames | `sync.flywheel_frames` | misses tolerated in FLYWHEEL | rising: octets lost on the air or the UART |
 | Lock losses | `sync.lock_losses` | fallbacks from LOCK / FLYWHEEL to SEARCH (also a partial CADU older than 3 s is dropped) | a few per pass at the edge of coverage |
 | Discarded octets | `sync.discarded_octets` | octets that were not part of any CADU, noise reply or fault report | grows with interference bursts or UART problems |
 | Noise replies parsed | `sync.noise_replies` | E22 noise-register replies found in the stream | equals the noise replies in [4.14](#414-serial-and-radio-link) |
-| Ground radio fault reports | `sync.radio_fault_reports` | T37S FF FF FF 0x reports in the stream | 0 |
+| Ground radio fault reports | `sync.radio_fault_reports` | T37S FF FF FF 0x reports in the stream; "n/a (E22-400T33D: no fault log)" when the model has none (`radio.has_fault_log` false) | 0 |
 | Mean ASM bit errors per CADU | `sync.asm_bit_errors` / `sync.cadus` | computed on the page, 4 decimals | 0.0000 |
-| Time in lock | `rx.state.time_in_lock_pct` | see [4.18](#418-receiver-state) | - |
+| Time in AOS since GDS start | `rx.state.time_in_lock_pct` | the share of the GDS run time spent in AOS - not synchronizer lock (the key keeps its v3 name); see [4.18](#418-receiver-state) | - |
 
 Example (E22, 14 min): LOCK, 344 ASMs and CADUs, 0 bit errors, 0 slips, 0 flywheel frames,
 0 lock losses, 0 discarded octets, 55 noise replies.
@@ -1155,6 +1196,15 @@ Example (E22, 14 min): LOCK, 344 ASMs and CADUs, 0 bit errors, 0 slips, 0 flywhe
 de-randomization, Reed-Solomon RS(255,223) with E = 16 (up to 16 wrong octets per codeword
 are corrected; CCSDS 131.0-B), the frame check (FECF), the header checks, SDLS and the
 packet decoders. Key prefix `rx.decoder`.
+
+**E22 path (F-P0-3, D-76).** The E22 module delivers a LoRa packet only when its own CRC
+passed (docs/20 L-20), so on real E22 hardware no radio-channel error reaches RS: the
+corrections it makes are UART errors between the module and the GDS. The page labels
+"Clean / corrected" and "Symbols corrected" "(UART errors only)", shows SER, pre-FEC BER
+and CER as "n/a on the E22 path: ..." and "RS rescued" as "n/a (the E22 discards
+CRC-failed LoRa packets inside the module: no CRC report)"; the subtitle says the same. The
+keys keep their values (the simulator injects octet errors into E22 CADUs, so they are not 0
+in a simulation). On the SX126x path everything below is a channel measurement.
 
 | Shown as | Key | Meaning, formula | Normal; if abnormal |
 |---|---|---|---|
@@ -1184,36 +1234,42 @@ throughput. Key prefix `rx.frames`.
 
 | Shown as | Key | Unit, display | Formula, meaning | Normal; if abnormal |
 |---|---|---|---|---|
-| Frames OK / lost | `rx.frames.ok`, `rx.frames.lost` | counts | lost = gaps in the master-channel frame count (TM MCFC, mod 256) or, for USLP, in each VC's frame count | - |
-| Frame error rate (since start) | `rx.frames.fer` | scientific; green <= 1e-2, amber > 1e-2, red > 1e-1 | FER = lost / (ok + lost) since the GDS started, including the frames the spacecraft sent while out of view (the counter jump at AOS) | the header FER |
-| Frame error rate, 10 min (link manager; inter-pass gaps excluded) | `rx.frames.fer_10m` | scientific, same colours | lost / (lost + received) over the last 600 s, without the AOS frame's jump: the in-pass FER the link manager uses | > 10 % makes the link manager recommend a slower rate |
+| Frames OK / lost (inside passes) | `rx.frames.ok`, `rx.frames.lost` | counts | lost = gaps in the master-channel frame count (TM MCFC, mod 256) or, for USLP, in each VC's frame count, inside the passes (F-P0-4) | - |
+| Not received while out of view (AOS counter jumps, mod 256: not lost) | `rx.frames.aos_gap_frames` | count | the frame-count jump of every AOS frame: frames the spacecraft sent while out of view, or a reboot; modulo 256, so not even a count of them. Until schema 3 it was added to `lost` and the FER, which made the lifetime FER a function of the gap length mod 256 | - |
+| Frame error rate since the GDS started (in passes) | `rx.frames.fer`, `rx.frames.fer_ci` | "n of N lost · FER x % · two-sided 95 % [lo, hi]", or with no frame lost "0 of N lost · FER ≤ u % (95 %, one-sided) · two-sided 95 % [0, hi]"; green <= 1 %, amber > 1 %, red > 10 % | FER = lost / (ok + lost); `fer_ci` = `rxstats.fer_block()`: `lost`, `received`, `fer`, `confidence` (0.95), `two_sided_lo`, `two_sided_hi`, `one_sided_hi` - the exact Clopper-Pearson bounds of the binomial proportion (Beta quantiles, pure Python; at zero losses the one-sided bound 1 - 0.05^(1/N), about 3/N, the "rule of three") | a FER from a few frames is not a precise number: read the bounds |
+| Frame error rate, last 10 min of reception | `rx.frames.fer_10m`, `rx.frames.fer_10m_ci` | as above | the same over the last 600 s of reception; the header "FER 10m" and the OVERVIEW E22 tile | > 10 % makes the link manager recommend a slower rate |
 | Idle (OID) frames | `rx.frames.oid_frames`, `rx.frames.idle_frame_pct` | count (%) | frames carrying only the idle / identification data; % = 100 x OID / OK | high when the spacecraft has little to send |
 | Channel efficiency (packet / data-field octets) | `rx.frames.channel_efficiency_pct` | % | 100 x octets of real packets delivered / data-field octets of the data-VC frames received | low = frames padded with idle packets |
-| Frames per minute | `rx.frames.frames_per_min` | 2 decimals | frames in the last 60 s x 60 / span, span = min(60 s, time since the GDS started) | 60 / frame period |
-| Information rate (60 s) | `rx.frames.info_rate_bps` | bit/s, 2 decimals | bits of real (non-idle) packets in the last 60 s / span | the useful telemetry rate |
-| CADU rate on air (60 s) | `rx.frames.cadu_rate_bps` | bit/s, 2 decimals | frames in the last 60 s x 1888 bits (236 octets) / span | the gross channel use |
-| (VC / format table) | `rx.frames.by_format` (`TM`, `USLP`), `rx.frames.per_vc` (`<vc>`: `frames`, `lost`) | counts | frames per transfer-frame format; frames and frame-count gaps per virtual channel number (0..3 data, 7 TM OID, 63 USLP OID) | - |
+| Frames per minute (W s) | `rx.frames.frames_per_min`, `rx.frames.rate_window_s` | 2 decimals | frames in the last W s x 60 / span, span = min(W, time since the GDS started); W = max(60 s, 5 x the longest expected frame period) (F-P1-2): at the slow SX126x profiles (frame periods 34.6-138.5 s) a fixed minute holds 0 or 1 frame | 60 / frame period |
+| Information rate (W s) | `rx.frames.info_rate_bps` | bit/s, 2 decimals | bits of real (non-idle) packets in the last W s / span | the useful telemetry rate |
+| CADU rate, payload bits (W s) | `rx.frames.cadu_rate_bps` | bit/s, 2 decimals | frames in the last W s x 1888 bits (236 octets) / span: CADU bits only, without the LoRa overhead | the gross channel use |
+| (VC / format table) | `rx.frames.by_format` (`TM`, `USLP`), `rx.frames.per_vc` (`<vc>`: `frames`, `lost`) | counts | frames per transfer-frame format ("lost" n/a); frames and frame-count gaps inside the passes per virtual channel number (0..3 data, 7 TM OID, 63 USLP OID; the baselines restart at AOS) | - |
 | Passes / this pass | `rx.state.passes`, `rx.state.pass_duration_s` | count / duration | [4.18](#418-receiver-state) | - |
-| Time in lock | `rx.state.time_in_lock_pct` | % | [4.18](#418-receiver-state) | - |
+| Time in AOS since GDS start | `rx.state.time_in_lock_pct` | % | [4.18](#418-receiver-state) | - |
 | Effective LOS timeout | `rx.state.los_timeout_s` | s | [4.18](#418-receiver-state) | - |
 
-**Worked example** (E22 at 2.4 kbit/s, CRUISE, 14 min): 344 OK, 15 lost:
-FER = 15 / 359 = 4.18e-2 (the in-pass 10-minute FER 4.30e-2); 275 OID frames = 79.94 %;
+**Worked example** (E22 at 2.4 kbit/s, CRUISE, 14 min): 344 OK, 15 lost inside the passes:
+FER = 15 / 359 = 4.18 %, two-sided 95 % [2.36 %, 6.80 %] (the in-pass 10-minute FER 4.30 %);
+with no frame lost in 178 the page would show "0 of 178 lost · FER ≤ 1.67 % (95 %,
+one-sided) · two-sided 95 % [0, 2.05 %]"; 275 OID frames = 79.94 %;
 17 frames in the last minute = 17.00 frames/min; CADU rate 17 x 1888 / 60 = 534.93 bit/s
 of the 2400 bit/s air rate; information rate 22.00 bit/s; channel efficiency 66.98 %.
 
 ### 4.12 Packets per APID
 
 A short table of every packet type received: "packet" (APID in hex and name), count, lost
-(sequence-count gaps), "IAT s (meas.)" (measured inter-arrival time) and age. Keys
-`apids.<packet>.count`, `apids.<packet>.lost`, `apids.<packet>.iat_s`,
-`apids.<packet>.age_s`. The full table with latency is on the FRAMES & PACKETS tab
-([6.3](#63-packets-by-apid)). The inter-arrival time is measured because the spacecraft
-stretches its packet periods to what the link can carry ([1.3](#13-how-often-things-change)).
+(sequence-count gaps inside the passes), "out of view" (the sequence-count gap of the first
+packet after AOS: packets generated while out of view, modulo 16384, not lost; F-P0-4),
+"IAT s (EWMA)" (an exponentially weighted mean, weight 0.2, of the measured intervals; the
+LOS gap is not one) and age. Keys `apids.<packet>.count`, `apids.<packet>.lost`,
+`apids.<packet>.aos_gap_packets`, `apids.<packet>.iat_s`, `apids.<packet>.age_s`. The full
+table with latency is on the FRAMES & PACKETS tab ([6.3](#63-packets-by-apid)). The
+inter-arrival time is measured because the spacecraft stretches its packet periods to what
+the link can carry ([1.3](#13-how-often-things-change)).
 
 ### 4.13 SX126x station MCU
 
-**What it shows.** With the SX126x option, the VENTUNO Q MCU (station sketch built with
+**What it shows.** With the SX126x option, the station UNO Q MCU (STM32U585; station sketch built with
 `DSSQ_RADIO_SX126X = 1`) owns the radio and reports a status line every 5 s (`rf_evt S|...`).
 The block is `radio.sx126x` (`Sx126xBridge.snapshot()` in
 [sx126x.py](../dssq-groundstation/python/dssq/radio/sx126x.py)); "not in use (E22 station
@@ -1249,13 +1305,14 @@ fields.)
 
 | Shown as | Key | Meaning; if abnormal |
 |---|---|---|
-| Connected | `rx.radio_link.connected` | green yes / red no. E22: the serial port is open; SX126x: the MCU status is fresh. Down for more than 30 s raises a RED alarm "ground radio link down for n s"; connect / loss events (source RADIO) |
+| Connected (port open / bridge up) | `rx.radio_link.connected` | green yes / red no. E22: the serial port is open - not that a module answers behind the USB-UART bridge; SX126x: the MCU status is fresh. Down for more than 30 s raises a RED alarm "ground radio link down for n s"; connect / loss events (source RADIO) |
+| Module answering | `radio.module_answering`, `radio.module_evidence` (tooltip) | yes / unknown, as in [4.6](#46-radio-configuration) (F-P1-4) |
 | Port | `rx.radio_link.port` | E22 serial device, e.g. /dev/ttyUSB0 (`[radio] port`) |
 | Faults / reopens | `rx.radio_link.faults`, `rx.radio_link.reopens` | E22 link errors seen / successful reopens after a fault (the backend retries by itself; the GDS reopens the port every 10 s while it is missing) |
 | TX dropped | `rx.radio_link.tx_dropped` | octets not sent while the port was down (COP-1 retransmits lost commands) |
 | Last error | `rx.radio_link.last_error`, `rx.radio_link.error` | the last OS error text (with a hint: no such device, permission denied: group dialout, port busy, ...) / why no backend exists |
-| MCU status age (SX126x) | `rx.radio_link.mcu_age_s` | seconds since the SX126x MCU's last status line |
-| Serial octets / rate | `rx.serial.octets`, `rx.serial.octets_per_s` | octets received from the E22 since start / per second over the last 10 s (a pass at 2.4 kbit/s brings about 237 octets per frame period) |
+| MCU status age (SX126x) | `rx.radio_link.mcu_age_s` | seconds since the SX126x MCU's last status line (row shown with the SX126x only) |
+| Serial octets / rate | `rx.serial.octets`, `rx.serial.octets_per_s` | octets received from the E22 since start / per second over the last 10 s (a pass at 2.4 kbit/s brings about 237 octets per frame period); SX126x: "n/a (packets over the Router Bridge)" |
 | Noise queries / replies | `rx.serial.noise_queries`, `rx.serial.noise_replies` | noise readings requested / received. More queries than replies: the module ignores the query (`rssi_noise` disabled in its registers) or replies are lost |
 
 ### 4.15 Two-way link
@@ -1267,13 +1324,13 @@ sees it. The spacecraft column comes from the newest real-time RF packet, kept a
 
 | Row | DOWNLINK (station) | UPLINK (spacecraft) | How to read it |
 |---|---|---|---|
-| RSSI | `rx.rf.rssi_dbm` | `rx.two_way.uplink_rssi` | similar powers both ways mean a balanced link (the station and the spacecraft usually have different powers and antennas) |
-| SNR | `rx.rf.packet.snr_db` | `rx.two_way.uplink_snr` | SX126x only |
+| RSSI | `rx.rf.rssi_dbm` (OVERLOAD on an overload) | `rx.budget.uplink.measured_uplink_rssi_dbm` (the RF `uplink_rssi` after the overload check; OVERLOAD otherwise) | similar powers both ways mean a balanced link (the station and the spacecraft usually have different powers and antennas) |
+| SNR | `rx.rf.packet.snr_db` | `rx.two_way.uplink_snr` | SX126x only (E22: "n/a (E22)") |
 | Frequency error | `rx.rf.packet.freq_err_hz` | `rx.two_way.uplink_freq_err` | SX126x only; with AFC the spacecraft should see a small error because the station transmits on its corrected frequency |
 | Noise floor | `rx.rf.noise_dbm` | `rx.two_way.sc_noise_floor` | the noise each receiver hears |
-| Margin est. | `rx.rf.margin_est_db` | `rx.two_way.uplink_margin_db_est` | uplink margin = uplink RSSI - spacecraft sensitivity ([4.5](#45-link-budget)) |
-| Frames / CLTUs | `rx.frames.ok` frames | `rx.two_way.cltu_ok` ok / `rx.two_way.cltu_bad` bad | CLTUs decoded and rejected on board |
-| Errors corrected | `rx.decoder.symbols_corrected` RS symbols | `rx.two_way.bch_corrected` BCH codeblocks | error-correction workload on each side |
+| Margin est. | the header margin ([4.2](#42-rf-now): worst case, noise-floor rule, coloured) | `rx.two_way.uplink_margin_db_est`; "≤ x (noise floor)" from `rx.budget.uplink.measured_margin_max_db` | uplink margin = uplink RSSI - spacecraft sensitivity, with the noise-floor rule against `sc_noise_floor` ([4.5](#45-link-budget)) |
+| Frames / CLTUs | `rx.frames.ok` frames | `rx.two_way.cltu_ok` ok / `rx.two_way.cltu_bad` bad, "(incl. the station identifications: n sent)" (`link.station_id.count`) | CLTUs decoded and rejected on board. The spacecraft counts every plain-text station identification as a bad CLTU (it holds no CLTU start sequence, [5.9](#59-station-identification)): "bad" is not all errors (F-P2-5) |
+| Errors corrected | `rx.decoder.symbols_corrected` RS symbols ("UART errors only" on the E22, F-P0-3) | `rx.two_way.bch_corrected` BCH codeblocks | error-correction workload on each side |
 | Transmitted | `rx.uplink.cltus` CLTUs / `rx.uplink.octets` octets (`rx.uplink.framing`) | `rx.two_way.frames_sent` frames, OID `rx.two_way.oid_frames_sent` | what each side sent |
 | Duty / airtime total | - | `rx.two_way.tx_duty` % / `rx.two_way.tx_airtime_ms_total` s | spacecraft transmitter use ([7.4](#74-telecom-rf-all-24-fields)) |
 | Frame period / last air time | - | `rx.two_way.frame_period_ms` / `rx.two_way.last_airtime` | "≥ 65.535 s (saturated)" and "≥ 25.5 s (saturated; busy est. ...)" when a field is at its limit |
@@ -1293,23 +1350,29 @@ Keys `linkmgr` and `rx.events`.
 | Shown as | Key | Meaning |
 |---|---|---|
 | Mode | `linkmgr.mode` | OFF, ADVISE (recommendation only, default) or AUTO (executes it with the coordinated LINKRATE procedure; needs the station radio control path); set with the directive `LINKMGR OFF\|ADVISE\|AUTO` |
+| Executable | `linkmgr.executable`, `linkmgr.why_not` | "yes (radio control path present)" or "advice only: LINKRATE needs the Radio Control Unit (station UNO Q MCU D2/D3/D7 wired to the E22 M0/M1/AUX, [gds] rcu = true): the link manager only advises" (F-P1-6): with the shipped `[gds] rcu = false` a recommendation cannot be executed |
 | Target margin | `linkmgr.target_margin_db` | `[linkmgr] target_margin_db` (default 6 dB) |
+| Evaluation window | `linkmgr.recommendation.window_s` | W = max(600 s, 10 x the longest expected frame period) (F-P1-1): at the slow SX126x profiles 10 minutes hold fewer than the 10 frames needed |
 | Recommendation | `linkmgr.recommendation` (`action`; `value` and `why` when there is a proposal or a reason to give) | NONE or "LINKRATE n", with the reason; null before the first evaluation |
-| Margin p10 / FER | `linkmgr.recommendation.margin_p10_db`, `linkmgr.recommendation.fer` | the inputs of the last evaluation: 10th-percentile RSSI of the last 10 minutes minus the sensitivity (rounded to 0.1 dB), and the 10-minute FER without the inter-pass gaps |
+| Margin p10 (vs worst case / typical S) | `linkmgr.recommendation.margin_p10_db`, `linkmgr.recommendation.sensitivity_dbm`, `linkmgr.recommendation.sensitivity_basis`, `linkmgr.recommendation.noise_state`, `linkmgr.recommendation.rssi_p10_dbm`, `linkmgr.recommendation.noise_mean_dbm` | 10th-percentile RSSI of the window minus the sensitivity - the worst case where the datasheet gives one (D-76) - after the noise-floor rule applied to the p10 and the window's noise mean ("≤" at the noise floor: an upper bound), rounded to 0.1 dB |
+| FER in the window | `linkmgr.recommendation.frames`, `linkmgr.recommendation.lost`, `linkmgr.recommendation.fer` | frames received and lost in the window (without the inter-pass gaps) and their FER |
 | (snapshot) | `target_db`, `rate_code`, `power_code`, `model` in `linkmgr.recommendation` | the target, the station's rate code, the spacecraft's TX power code (RF `tx_power_code`) and the model used for that evaluation |
 | Rate limits | `linkmgr.rate_limits` | [lowest, highest] code the manager may choose: E22 from code 2 (0 and 1 are aliases of 2.4 kbit/s), SX126x from profile 0, up to `[linkmgr] max_rate` (default 4) |
 | Hold-off | `linkmgr.holdoff_s` | minimum time between two AUTO changes (default 600 s) |
 | (snapshot) | `linkmgr.model` | the model whose sensitivities the manager uses |
 
-Rules (every `[linkmgr] period_s`, default 60 s; at least 10 RSSI samples in 10 minutes,
-else "insufficient data"): margin p10 < target - 3 dB, or FER > 10 %: one code slower
-(more sensitive), or at the slowest usable code "improve the antennas, height or
-feeders"; margin p10 > target + 9 dB and FER < 1 %: one code faster, if the margin
-predicted at the faster code (its sensitivity difference) stays >= target + 3 dB. The rate
-is the only lever: power changes are left to the operator (TXPWR).
+Rules (every `[linkmgr] period_s`, default 60 s; at least 10 RSSI samples in the window W,
+else "insufficient data (< 10 frames in W s)"): margin p10 < target - 3 dB, or FER > 10 %:
+one code slower (more sensitive), or at the slowest usable code "improve the antennas,
+height or feeders" (at the noise floor the margin's upper bound can still show this);
+margin p10 > target + 9 dB and FER < 1 %: one code faster, if the margin predicted at the
+faster code (its sensitivity difference) stays >= target + 3 dB - and only when the p10
+RSSI is >= 10 dB above the window's noise mean (D-76): near the noise, or without a noise
+reading in the window, the RSSI cannot show that the margin is high, and the reason says so.
+The rate is the only lever: power changes are left to the operator (TXPWR).
 
-Example: margin p10 12.0 dB (E22: p10 -116 dBm - (-128)), FER 4.30e-2, target 6 dB: no
-action (12 < 6 + 9 = 15, and FER < 10 %).
+Example: margin p10 10.0 dB (E22: p10 -116 dBm - (-126), worst case), FER 4.30 %, target
+6 dB: no action (10 < 6 + 9 = 15, and FER < 10 %).
 
 **Pass events** (`rx.events`, each `t`, `event`): the last 20 AOS / LOS transitions (green
 AOS, amber LOS), newest first.
@@ -1342,7 +1405,7 @@ Key prefix `rx.state`; `rx.now` is the time the receiver block was built.
 | Passes | `rx.state.passes` | AOS count since the GDS started |
 | Pass duration | `rx.state.pass_duration_s` | now - AOS time during AOS, else "—" |
 | Since last frame | `rx.state.since_last_frame_s` | now - time of the last good frame |
-| Time in lock | `rx.state.time_in_lock_pct` | 100 x time spent in AOS / time since the GDS started ("lock" here means the AOS state, not the synchronizer's LOCK) |
+| Time in AOS since GDS start | `rx.state.time_in_lock_pct` | 100 x time spent in AOS / time since the GDS started (the key says "lock"; it means the AOS state, not the synchronizer's LOCK) |
 | Effective LOS timeout | `rx.state.los_timeout_s` | max(`[gds] los_timeout_s` (default 90 s), 3 x the longest expected frame period): 90 s for every E22 rate and SX126x profiles 3-7, 103.9 s for profile 2, 207.8 s for profile 1, 415.6 s for profile 0 |
 | Hibernating | `rx.state.hibernating` | the spacecraft hibernates (HK `fdir_flags` b14), or a HIBERNATE was radiated within the last 7200 s and no later HK contradicts it: LOS is then expected and logged as "LOS (hibernating)" without a RED alarm, unless no beacon arrives for more than 7200 s |
 
@@ -1507,7 +1570,7 @@ gives the correlation. Key prefix `time`.
 | Correlation samples | `time.corr_samples` | count | TIMECORR samples in the fit (max 64) |
 | Clock drift | `time.drift_ppm` | ppm, 4 decimals | (b - 1) x 10⁶; "—" with fewer than 2 samples |
 | Fit residual RMS | `time.residual_rms_ms` | ms, 4 decimals | RMS of the residuals of the fit; "—" with fewer than 3 samples (a line through two points always fits) |
-| One-way light time (configured) | `time.owlt_s` | µs / ms / s | `[spacecraft] distance_km` / c |
+| One-way light time (configured) | `time.owlt_s` | µs / ms / s | `[spacecraft] distance_km` / c; null without a configured distance, shown "not configured ([spacecraft] distance_km = 0)" (F-P0-7: "0.000 µs" would be a value; the SCET correction then subtracts no light time) |
 | TIMECORR reference key | `time.timecorr_key` | text | "MCFC" (TM) or "VC0 VCF count" (USLP): which frame counter identifies the reference frame |
 
 Example (simulator, 2 km): partition 1, last SCLK 1218.899918 s, 4 samples, drift 0.0003
@@ -1515,7 +1578,9 @@ ppm, residual RMS 0.0024 ms, OWLT 6.671 µs, key MCFC, SCLK estimate 1224 s. On 
 drift is the UNO Q clock's error and the residual shows the latency jitter of the radio
 path; both are VERIFY on hardware (test T-TM-04 sets `radio_latency_s`). A wrong station
 clock (no NTP) shifts every SCET; the TDM recorder refuses records outside the years
-2000..2100 and counts them in `health.tdm_rejected`.
+2000..2100 and counts them in `health.tdm_rejected`, and the GDS refuses every TDM record
+while the kernel reports the station clock not synchronised (`station_clock.synced` false,
+counted in `health.tdm_rejected_clock` too; [13.7](#137-gds-health-panel)).
 
 ### 5.9 Station identification
 
@@ -1646,7 +1711,7 @@ Rows "RT-ENG" (VC0), "RT-SCI" (VC1), "PLAYBACK" (VC2), "FILE (CFDP)" (VC3) and "
 | Column | Key | Meaning; if abnormal |
 |---|---|---|
 | frames | `vc.<vc>.frames` | frames of this VC that passed RS and the frame check (including ones SDLS then rejected) |
-| lost | `vc.<vc>.lost` | gaps in this VC's frame count (VCFC, mod 256) as the receiver counts them (amber when not 0) |
+| lost (in passes) | `vc.<vc>.lost` | gaps in this VC's frame count (VCFC, mod 256) inside the passes (amber when not 0); the baseline restarts at AOS, so frames sent while out of view are not lost (F-P0-4) |
 | VCFC gaps | `vc.<vc>.vcfc_gaps` | discontinuities the packet extractor saw (each drops a partial packet) |
 | last VCFC | `vc.<vc>.last_vcfc` | frame count of the newest frame |
 | packets | `vc.<vc>.packets` | real (non-idle) packets extracted |
@@ -1676,10 +1741,11 @@ sequence, inter-arrival or latency figures.
 | VC | `apids.<packet>.vcid` | VCn | the virtual channel it last arrived on |
 | count | `apids.<packet>.count` | count | packets received |
 | seq gaps | `apids.<packet>.seq_gaps` | count | discontinuities of the 14-bit packet sequence count |
-| lost | `apids.<packet>.lost` | count (amber) | packets missing: the sum of the gap sizes. Lost packets usually come from lost frames |
+| lost (in passes) | `apids.<packet>.lost` | count (amber) | packets missing inside the passes: the sum of the gap sizes. Lost packets usually come from lost frames |
+| out of view | `apids.<packet>.aos_gap_packets` | count | the sequence-count gap of the first real-time packet after AOS (modulo 16384): packets generated while the spacecraft was out of view, or a reboot - not lost (F-P0-4) |
 | last seq | `apids.<packet>.last_seq` | integer | sequence count of the newest real-time packet |
 | size B | `apids.<packet>.size` | octets | packet length (HK 90, RF 61, MAG 58, ATT 49, SPEC 141, ENV 36, TIMECORR 22, CMDVER 20) |
-| IAT s | `apids.<packet>.iat_s` | s, 3 decimals | measured inter-arrival time, smoothed: iat <- iat + 0.2 (dt - iat). Compare with the cadence table in [1.3](#13-how-often-things-change): larger means the spacecraft stretched the period for the link, or packets were lost |
+| IAT s (EWMA) | `apids.<packet>.iat_s` | s, 3 decimals | measured inter-arrival time, smoothed (an EWMA, not one measured interval): iat <- iat + 0.2 (dt - iat); the LOS gap before the first packet of a pass is not an interval. Compare with the cadence table in [1.3](#13-how-often-things-change): larger means the spacecraft stretched the period for the link, or packets were lost |
 | age | `apids.<packet>.age_s` | duration | time since the newest packet of this type |
 | latency mean s, ± SEM, min, max, n | `apids.<packet>.latency` (`mean`, `sem`, `min`, `max`, `n`, ...) | s, 4 decimals | ERT - SCET over the last 600 s (needs time correlation): how long packets waited on board before reaching the ground. Grows with VC backlog and slow rates |
 
@@ -2791,7 +2857,12 @@ frequency + AFC correction + measured residual); `DOPPLER_INSTANTANEOUS` (range 
 only once `[radio] freq_offset_calibrated` is true. E22 TDMs carry CARRIER_POWER only.
 `tdm.files` lists the newest 20 (`name`, `size`, `mtime`); `GET /api/tdm` lists them for the
 page. Records whose station time lies outside the years 2000-2100 are refused
-(`health.tdm_rejected`: check the station clock). Format details:
+(`health.tdm_rejected`: check the station clock), and so is every record while the kernel
+reports the station clock NOT synchronised (D-76: `station_clock.synced` false; counted in
+`health.tdm_rejected` and `health.tdm_rejected_clock`, one WARN "station clock not
+synchronised (kernel: ...): TDM records skipped" per pass); an unknown clock state refuses
+nothing. A frame whose RSSI reading was an overload ([4.2](#42-rf-now)) gives a record
+without CARRIER_POWER. Format details:
 [18_Data_Products.md](18_Data_Products.md).
 
 **XTCE**: DOWNLOAD XTCE (`GET /api/xtce`) returns the mission database (every packet,
@@ -2958,13 +3029,41 @@ description), the COP-1 directives (BC) and the ground directives (GDS), from
 | Row | Key | Meaning |
 |---|---|---|
 | GDS version / mode | `version`, `mode` | software version (3.0.0) and run mode: `host` (systemd or a terminal), `applab` (the App Lab App), `sim` (software spacecraft) |
-| Snapshot schema | `schema` | 3; a client written for another schema must not trust the keys |
+| Snapshot schema | `schema` | 4 (D-76: `rx.frames.lost` without the AOS jump, `rx.rf.packet.crc_ok` null on the E22, the noise-floor margin, `time.owlt_s` null without a distance, `station_clock`); a client written for another schema must not trust the keys |
 | GDS uptime | `uptime_s` | time since the GDS started |
 | Snapshot time | `utc` | the station clock |
 | Stage errors: <stage> | `health.stage_errors` | failures per Runner stage (register, radio_read, ingest, packets, outbox, jobs, afc, tdm, housekeeping, console); each is caught, counted, logged at most once a minute (WARN, source GDS) and the loop continues; YELLOW alarm for 60 s after one |
 | Last stage error | `health.last_error` (`stage`, `text`, `t`) | the newest failure; report it (with the log) |
-| TDM records refused (station clock) | `health.tdm_rejected` | |
+| Station clock (kernel) | `station_clock.synced`, `station_clock.state`, `station_clock.reason` | "synced (TIME_OK)" green, "NOT SYNCED (TIME_ERROR: TIME_ERROR and STA_UNSYNC)" amber, "unknown (<reason>)" grey; see "Station clock" below |
+| Station clock maximum / estimated error | `station_clock.maxerror_us`, `station_clock.esterror_us` | the kernel's maximum and estimated error of the clock, shown in ms ("(kernel)") |
+| Station clock checked | `station_clock.checked_t`, `station_clock.refresh_s` | when the GDS last asked the kernel ("every 10 s") |
+| TDM records refused (station clock or out-of-range value) | `health.tdm_rejected` | records the TDM recorder or the GDS refused: a station time outside 2000-2100, a measurement outside the TDM limits, or an unsynchronised station clock |
+| of them: station clock not synchronised | `health.tdm_rejected_clock` | records refused because the kernel reported the station clock not synchronised (D-76) |
 | (snapshot) | `health.archive_write_errors`, `health.archive_last_error` | as `logger.write_errors` with the last error text |
+
+**Station clock** (`station_clock`, [clocksync.py](../dssq-groundstation/python/dssq/clocksync.py),
+D-76). Every ERT, the SCLK correlation, the TDM time tags and the archive use the station's
+wall clock, so the GDS asks the kernel whether it considers that clock synchronised: a
+read-only `ntp_adjtime()` (`adjtimex()` as the fallback) with modes = 0, which changes
+nothing and needs no privilege, at most every 10 s from the housekeeping (`refresh_s`; the
+snapshot reads the cached answer).
+
+| Key | Meaning |
+|---|---|
+| `station_clock.synced` | true: the kernel state is not TIME_ERROR and STA_UNSYNC (0x0040) is clear; false: TIME_ERROR or STA_UNSYNC (no NTP / chrony / timesyncd discipline, e.g. the board booted without a network); null: unknown - no libc function, the call failed (a sandbox may refuse it) or not Linux, never guessed |
+| `station_clock.state` | the kernel's clock state: TIME_OK, TIME_INS, TIME_DEL, TIME_OOP, TIME_WAIT or TIME_ERROR |
+| `station_clock.sta_unsync` | the STA_UNSYNC status bit |
+| `station_clock.maxerror_us`, `station_clock.esterror_us` | the kernel's maximum and estimated error, microseconds (Linux adjtimex(2)) |
+| `station_clock.reason` | why it is not synchronised ("TIME_ERROR and STA_UNSYNC") or why it is unknown; null when synchronised |
+| `station_clock.checked_t` | when the kernel was last asked (null: not yet) |
+| `station_clock.refresh_s` | 10 s (`clocksync.REFRESH_S`) |
+
+Effects: the header CLOCK field, these rows, the TDM refusal ([12.4](#124-tracking-data-messages-and-xtce)),
+`dssq_station_clock_synced` on /metrics (1 / 0, absent when unknown), the LED matrix (row 7,
+last column blinking while unsynchronised) and an event (source CLOCK: WARN "station clock
+NOT synchronised ...", INFO when it is synchronised again, INFO when the state is unknown).
+Fix: enable NTP (`timedatectl set-ntp true`, a network the board can reach) and check
+`timedatectl` shows "System clock synchronized: yes".
 
 ### 13.8 Station I/O panel
 
@@ -2979,7 +3078,7 @@ Radio Control Unit. Key `station_io`.
 | CardKB | `station_io.kb` | present at I2C address 0x5F on the header Wire bus |
 | Radio Control Unit | `station_io.rcu_configured` | `[gds] rcu` in station.toml: "enabled in station.toml" (the MCU drives the E22 M0 / M1 and reads AUX) or "disabled in station.toml" |
 | RCU last mode change | `station_io.rcu_last`, `station_io.rcu_last_t` | what the MCU reports in its hello about its last `rcu_mode` call since it started (D-78): "OK at <time>" (AUX high afterwards), "FAILED at <time>" (AUX stayed low for 1 s, or a mode outside 0..3), "never"; "unknown" without a hello. AUX has the MCU's pull-up, so OK proves the mode pins were driven, not that a module is wired |
-| Typing on the CardKB | `station_io.input` | the line being typed (K lines), shown as "> TEXT_" |
+| Typing on the CardKB | `station_io.input` | the line being typed (K lines), shown as "> TEXT_"; "—" while there is no MCU link |
 | Last annunciator line | `station_io.last_status_line` | the newest S line sent: `S\|aos\|alarm\|uplink\|beacon` |
 | Beacon level sent | `station_io.beacon_sent` | its beacon field (-1 = unknown) |
 
@@ -3046,6 +3145,7 @@ header pill, the OVERVIEW reasons list, the station ALARM lamp and buzzer
 | `<packet>.<field> YELLOW limit` | a field at or beyond a yellow limit |
 | `beacon IMPORTANT` | HK `beacon_level` = 2 |
 | `frequency offset > 50 % of FERR_L` | SX126x frequency-offset state WARN |
+| `receiver overload (<n> in 10 min): received signal too strong to measure: increase distance or add attenuation (receiver damage limit +10 dBm)` | an RSSI reading at the top of the radio's scale within the last 600 s (`rxstats.OVERLOAD_RECENT_S`; D-76, [4.2](#42-rf-now) "RSSI reading") |
 | `FDIR <names>` | any HK fault-protection flag except HIBERNATE and TX_INHIBIT ([7.5](#75-fault-protection-flags)) |
 | `spacecraft reset cause BROWNOUT (check the radio supply)` | HK `reset_cause` = BROWNOUT |
 | `sensor wiring: RM3100 and Nicla not on separate buses` | `sensor_bus.separated` is false: the flight reported the Nicla Sense ME and an RM3100 on the same bus (WARN EVR 0x060D "... not separated", or acquisitions naming one bus), D-73; the data is still used ([7.6](#76-sensors)) |
@@ -3101,26 +3201,36 @@ configured). Request limits and the security headers: [17_Security_Model.md](17_
 | Family | Source |
 |---|---|
 | `dssq_los`, `dssq_state_<key>` | `rx.state` (passes, pass_duration_s, since_last_frame_s, time_in_lock_pct, los_timeout_s, hibernating) |
-| `dssq_rf_<key>` | every numeric scalar of `rx.rf` (e.g. `dssq_rf_rssi_dbm`, `dssq_rf_margin_est_db`, `dssq_rf_sensitivity_dbm`, `dssq_rf_noise_bw_hz`) |
-| `dssq_rf_packet_<key>`, `dssq_rf_snr_db_<stat>`, `dssq_rf_freq_err_hz_<stat>`, `dssq_rf_doppler_<key>`, `dssq_rf_afc_<key>` | the nested `rx.rf` blocks |
-| `dssq_decoder_<key>`, `dssq_decoder_sdls_rejected{verdict=...}` | `rx.decoder` |
-| `dssq_frames_<key>`, `dssq_frames_by_format{format=...}`, `dssq_frames_vc_frames{vc=...}`, `dssq_frames_vc_lost{vc=...}` | `rx.frames` (e.g. `dssq_frames_fer`, `dssq_frames_lost`) |
-| `dssq_budget_<key>`, `dssq_budget_uplink_<key>` | `rx.budget` |
+| `dssq_rf_<key>` | every numeric scalar of `rx.rf` (e.g. `dssq_rf_rssi_dbm`, `dssq_rf_margin_worst_est_db`, `dssq_rf_sensitivity_dbm`, `dssq_rf_sensitivity_worst_dbm`, `dssq_rf_noise_bw_hz`, `dssq_rf_rssi_overloads`). During LOS the values of the last reception (`rssi_dbm`, `rssi_raw_dbm`, `rssi_mw`, `snr_est_db`, `pr_est_dbm`, `cn0_est_dbhz`, `ebn0_est_db`, the margins, `snr_margin_db`: `web.LIVE_RF_KEYS`) are not exported - they are history, not the link (F-P1-10) |
+| `dssq_rf_packet_<key>`, `dssq_rf_snr_db_<stat>`, `dssq_rf_freq_err_hz_<stat>`, `dssq_rf_doppler_<key>`, `dssq_rf_afc_<key>` | the nested `rx.rf` blocks. An E22 station exports only `dssq_rf_packet_rssi_dbm`: no CRC verdict (it has none, F-P0-2), no SNR or frequency-error window (not even n = 0), no Doppler block (it cannot measure one), no AFC (F-P2-1) |
+| `dssq_decoder_<key>`, `dssq_decoder_sdls_rejected{verdict=...}` | `rx.decoder` (on the E22 the RS figures are UART integrity, [4.10](#410-decoder)) |
+| `dssq_frames_<key>`, `dssq_frames_by_format{format=...}`, `dssq_frames_vc_frames{vc=...}`, `dssq_frames_vc_lost{vc=...}` | `rx.frames` (e.g. `dssq_frames_fer`, `dssq_frames_lost` inside the passes, `dssq_frames_aos_gap_frames`, `dssq_frames_rate_window_s`) |
+| `dssq_frames_fer_ci_<k>`, `dssq_frames_fer_10m_ci_<k>` | the exact FER bounds of `rx.frames.fer_ci` / `rx.frames.fer_10m_ci`: `two_sided_lo`, `two_sided_hi`, `one_sided_hi`, `confidence`, `lost`, `received` |
+| `dssq_budget_<key>`, `dssq_budget_uplink_<key>` | `rx.budget` (the measured path loss, excess loss and measured range are absent during LOS) |
+| `dssq_rssi_10m_p10_dbm` | `rx.windows.10m.rssi.p10` |
+| `dssq_sync_<key>` | the frame synchronizer counters of `sync` (asm_found, slips, lock_losses, discarded_octets, ...: the E22's real link-integrity counters) |
+| `dssq_serial_<key>` | `rx.serial` (octets, octets_per_s, noise_queries, noise_replies) |
+| `dssq_radio_link_connected`, `dssq_station_io_connected` | `rx.radio_link.connected`, `station_io.connected` |
+| `dssq_linkmgr_margin_p10_db`, `dssq_linkmgr_executable` | `linkmgr.recommendation.margin_p10_db`, `linkmgr.executable` |
+| `dssq_station_clock_synced` | `station_clock.synced`: 1 synchronised, 0 not; absent while unknown (D-76) |
 | `dssq_beacon_level`, `dssq_alarm_level` (0 NONE, 1 YELLOW, 2 RED), `dssq_uptime_s` | top level |
 | `dssq_sdls_<key>` | numeric `link.sdls` values |
 | `dssq_cfdp_<counter>`, `dssq_cfdp_transactions` | `cfdp` |
-| `dssq_stage_errors{stage=...}`, `dssq_tdm_rejected` | `health` |
+| `dssq_stage_errors{stage=...}`, `dssq_tdm_rejected`, `dssq_tdm_rejected_clock` | `health` |
 | `dssq_logger_<key>` | numeric `logger` values (e.g. `dssq_logger_paused`, `dssq_logger_free_bytes`) |
 | `dssq_apid_count`, `dssq_apid_lost`, `dssq_apid_iat_s`, `dssq_apid_age_s` `{packet=...}` | `apids` |
 | `dssq_tlm{packet=...,param=...}` | every decoded field of the newest real-time packets (`tlm`) |
 
 Booleans are exported as 0 / 1; text values and missing values produce no sample (a gap in
-the series, never a fake number). The simulator snapshots expose 141 families (E22) and 179
-(SX126x: AFC, Doppler and the SX126x fields). Example lines: `dssq_rf_rssi_dbm -113.0`,
-`dssq_rf_margin_est_db 15.0`, `dssq_frames_fer 0.04178272980501393`,
-`dssq_tlm{packet="HK",param="bus_temp"} 32.42`, `dssq_apid_count{packet="HK"} 23`.
-Useful alert rules: `dssq_alarm_level >= 2`, `dssq_los == 1`, `dssq_rf_margin_est_db < 3`,
-`dssq_logger_paused == 1`, `increase(dssq_decoder_uncorrectable[10m]) > 0`.
+the series, never a fake number). The simulator snapshots expose about 180 families (E22)
+and about 210 (SX126x: AFC, Doppler and the SX126x fields); the count depends on the packets
+seen. Example lines: `dssq_rf_rssi_dbm -113.0`, `dssq_rf_margin_worst_est_db 11.7`,
+`dssq_frames_fer 0.04178272980501393`, `dssq_frames_fer_10m_ci_one_sided_hi 0.0167`,
+`dssq_station_clock_synced 1`, `dssq_tlm{packet="HK",param="bus_temp"} 32.42`,
+`dssq_apid_count{packet="HK"} 23`. Useful alert rules: `dssq_alarm_level >= 2`,
+`dssq_los == 1`, `dssq_rf_margin_worst_est_db < 3`, `increase(dssq_rf_rssi_overloads[10m]) > 0`,
+`dssq_station_clock_synced == 0`, `dssq_logger_paused == 1`,
+`increase(dssq_decoder_uncorrectable[10m]) > 0`.
 
 ---
 
@@ -3156,12 +3266,18 @@ point, how strong the link is and how many frames survive. The record sheets are
    statistics table shows them at the readings' resolution only (1.5);
    noise mean; SNR (measured for the SX126x, est. for the E22). Use the means, never a
    single reading: one E22 reading has 1 dB steps and fading moves it by several dB.
-3. Record the margins: the 10-minute p10 of RSSI minus the sensitivity (the robust margin
-   the link manager uses, `linkmgr.recommendation.margin_p10_db`) and the last
-   `rx.rf.margin_est_db`. For the SX126x also the SNR margin (`rx.rf.snr_margin_db`).
-4. Record the losses: `rx.frames.fer_10m`, `rx.decoder.uncorrectable` and the RS
-   corrections (mean of `rx.windows.10m.rs`), and for the SX126x the CRC failures and RS
-   rescues.
+3. Record the margins: the p10 of RSSI minus the worst-case sensitivity (the robust margin
+   the link manager uses, `linkmgr.recommendation.margin_p10_db`, with its
+   `linkmgr.recommendation.noise_state`) and the last `rx.rf.margin_worst_est_db` with
+   `rx.rf.margin_state`: at NOISE_FLOOR the RSSI cannot measure the margin (only the upper
+   bound `rx.rf.margin_worst_max_db`) - judge the point by the FER and its bounds instead.
+   For the SX126x also the SNR margin (`rx.rf.snr_margin_db`). Any OVERLOAD
+   (`rx.rf.rssi_overloads` rising): add attenuation before recording anything.
+4. Record the losses: `rx.frames.fer_10m` with its bounds (`rx.frames.fer_10m_ci`:
+   `two_sided_lo`, `two_sided_hi`, and `one_sided_hi` when nothing was lost) and
+   `rx.decoder.uncorrectable`; for the SX126x also the RS corrections (mean of
+   `rx.windows.10m.rs`), the CRC failures and RS rescues (on the E22 the RS corrections are
+   UART errors only, [4.10](#410-decoder)).
 5. Read the link budget: `rx.budget.excess_loss_db_est` (measured minus free-space loss)
    and `rx.budget.range_at_sensitivity_km_est` (where the link would end with the same
    excess loss).
@@ -3205,12 +3321,14 @@ document.
 | `alarm`, `alarm_reasons`, `alarm_red_count` | text, list, count | [15](#15-alarm-logic) |
 | `beacon` | level, name, t, since, history, hibernating, hibernate_expected | [7.7](#77-beacon) |
 | `rx` | now, state, rf, budget, windows, hist, decoder, frames, serial, uplink, two_way, series, events, radio_link | [4](#4-receiver-tab) |
-| `rx.rf` | freq_mhz, freq_hz, model, air_rate_code, rate_label, air_rate_bps, rssi_dbm, rssi_raw_dbm, rssi_resolution_db, rssi_cal_offset_db, rssi_mw, noise_dbm, noise_source, noise_age_s, snr_est_db, pr_est_dbm, n0_est_dbm_hz, cn0_est_dbhz, cn0_source, ebn0_est_db, noise_bw_hz, noise_bw_source, sensitivity_dbm, sensitivity_source, margin_est_db, required_snr_db, snr_margin_db, freq_offset_limit_hz, freq_offset_abs_median_hz, freq_offset_state, crc_fail_packets, packet_error_rate, packet, snr_db, freq_err_hz, doppler, afc | [4.2](#42-rf-now) |
-| `radio` | model ... frame_period_max_s_est (station radio, spacecraft radio, station hardware) | [4.6](#46-radio-configuration) |
+| `rx.rf` | freq_mhz, freq_hz, model, air_rate_code, rate_label, air_rate_bps, rssi_dbm, rssi_raw_dbm, rssi_state, rssi_overloads, rssi_overload_last_t, rssi_invalid, rssi_resolution_db, rssi_cal_offset_db, rssi_mw, noise_dbm, noise_source, noise_age_s, noise_rejected, snr_est_db, pr_est_dbm, n0_est_dbm_hz, cn0_est_dbhz, cn0_source, ebn0_est_db, noise_bw_hz, noise_bw_source, sensitivity_dbm, sensitivity_source, sensitivity_worst_dbm, sensitivity_worst_source, margin_state, margin_basis, margin_est_db, margin_worst_est_db, margin_max_db, margin_worst_max_db, required_snr_db, snr_margin_db, freq_offset_limit_hz, freq_offset_abs_median_hz, freq_offset_state, crc_fail_packets, packet_error_rate, packet, snr_db, freq_err_hz, doppler, afc | [4.2](#42-rf-now) |
+| `rx.frames` | ok, lost, aos_gap_frames, fer, fer_ci, fer_10m, fer_10m_ci, oid_frames, idle_frame_pct, channel_efficiency_pct, frames_per_min, info_rate_bps, cadu_rate_bps, rate_window_s, by_format, per_vc | [4.11](#411-frames) |
+| `rx.budget` | sc_model ... uplink (design and measured terms, incl. sensitivity_worst_dbm, sensitivity_worst_source, predicted_margin_worst_db, measured_power_state, range_at_sensitivity_free_space_km, range_at_sensitivity_km_est) | [4.5](#45-link-budget) |
+| `radio` | model ... frame_period_max_s_est (station radio incl. sensitivity_worst_dbm / sensitivity_worst_source, spacecraft radio, station hardware incl. register_check, module_answering, module_evidence) | [4.6](#46-radio-configuration) |
 | `link` | tm_framing_cfg, tm_framing_seen, tc_framing, sdls, ident, station_id | [5](#5-link--security-tab) |
 | `sync` | state, asm_found, asm_bit_errors, slips, discarded_octets, cadus, noise_replies, flywheel_frames, lock_losses, radio_fault_reports | [4.9](#49-frame-synchronizer) |
 | `vc` | RT-ENG, RT-SCI, PLAYBACK, FILE (CFDP), OID | [6.2](#62-virtual-channels) |
-| `apids` | one entry per packet name | [6.3](#63-packets-by-apid) |
+| `apids` | one entry per packet name (apid, count, seq_gaps, lost, aos_gap_packets, last_seq, age_s, iat_s, latency, size, vcid) | [6.3](#63-packets-by-apid) |
 | `tlm` | HK, RF, CMDVER, TIMECORR, RFSCAN, MAG, ATT, SPEC, ENV, SPECBURST: the newest real-time packet of each type received (each apid, values, limits, units, ert, scet, sclk, seq, vcid) | [7](#7-spacecraft-tab), [9](#9-science-tab) |
 | `decoded` | mode, fdir, sensors_ok, sensors_missing, reset_cause, farm_state, radio_fault, radio_model, framing, rate_label, air_rate_bps, sdls_tc_service, sdls_tm_service, sdls_tm_state, cfdp_state, seq_state, beacon, mag_bist, magcal, rf_flags, mag_flags | [7.8](#78-onboard-state-and-the-decoded-block) |
 | `imu` | available, flags, grv_present, grv_valid, paired, q_grv, grv_accuracy, up, gravity_g, tilt_deg, roll_deg, pitch_deg, heading_rel_deg, heading_offset_deg, tilt_disagreement_deg, lin_acc_mg, lin_acc_abs_mg, nwin, gap, acc_sat, gyro_sat, vib_rms_mg, vib_peak_mg, rate_mean_dps, rate_abs_dps, spin_axis, rate_peak_dps, motion, still_rate_dps, still_vib_mg, vib_floor_mg, rate_floor_dps, spin_axis_min_dps, bandwidth_hz, acc_offset_mg, acc_sens_err_pct, gyro_bias_stability_dph, na | [9.4](#94-imu-6-dof) |
@@ -3221,9 +3339,10 @@ document.
 | `tdm` | enabled, auto_write, records, dropped, aos_t, last_file, last_write_t, files | [12.4](#124-tracking-data-messages-and-xtce) |
 | `sequence` | onboard, file, uplink, sclk_estimate_s | [11](#11-sequences-tab) |
 | `magcal` | field_ut, units, onboard, bist | [10](#10-magcal-tab) |
-| `health` | stage_errors, last_error, tdm_rejected, archive_write_errors, archive_last_error | [13.7](#137-gds-health-panel) |
+| `health` | stage_errors, last_error, tdm_rejected, tdm_rejected_clock, archive_write_errors, archive_last_error | [13.7](#137-gds-health-panel) |
+| `station_clock` | synced, state, sta_unsync, maxerror_us, esterror_us, reason, checked_t, refresh_s | [13.7](#137-gds-health-panel) |
 | `logger` | enabled ... totals (36 values) | [12.5](#125-receiver-data-logger) |
-| `linkmgr` | mode, model, target_margin_db, recommendation, holdoff_s, rate_limits | [4.16](#416-link-manager-and-pass-events) |
+| `linkmgr` | mode, model, target_margin_db, recommendation, holdoff_s, rate_limits, executable, why_not | [4.16](#416-link-manager-and-pass-events) |
 | `pending_confirm` | list of id, text, kind, confirmed, authorized, t, expires_s | [13.2](#132-pending-confirmations) |
 | `evrs` | list of ert, scet, sclk, severity, event_id, text, vcid | [7.10](#710-spacecraft-evrs) |
 | `events` | list of t, level, source, text | [14](#14-health-events-and-logs) |
