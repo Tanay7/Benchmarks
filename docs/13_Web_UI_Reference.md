@@ -231,6 +231,8 @@ Small coloured badges and words in labels tell you how far to trust a number.
 | "heuristic" | - | rule-based judgement (light-source class, fluorescence, burst transients) | SPECTROMETER |
 | "proxy" | - | an index evaluated on the nearest available bands (WBI, PRI) | SPECTROMETER |
 | "informational" | - | shown for insight, not for decisions (die-temperature drift) | SPECTROMETER |
+| **on board** | blue | measured or computed on the spacecraft (BHI260AP outputs, the Nicla ARU's window statistics, the flight's aggregation over the ATT period) | SCIENCE IMU (6-DOF) source column ([9.4](#94-imu-6-dof)) |
+| **ground** | grey | derived by the GDS from telemetry (formulas in [9.4](#94-imu-6-dof)) | SCIENCE IMU (6-DOF) source column |
 | **MISMATCH** | red | the spacecraft reports a different radio model, or the station SX126x sketch was built for another chip / TCXO | RECEIVER radio configuration, SX126x MCU |
 
 Telemetry limits colour the value cell: yellow background for YELLOW, red for RED
@@ -1708,7 +1710,8 @@ a telemetry field, and before commanding.
 ```
 +-----------------------------+-----------------------------+-----------------------------+
 | Housekeeping (HK, 43 fields | Telecom (RF, 24 fields      | Fault protection (16 bits)  |
-|  + ERT / SCET / SCLK)       |  + ERT / SCET / SCLK)       | Sensors (10 bits)           |
+|  + ERT / SCET / SCLK)       |  + ERT / SCET / SCLK)       | Sensors (11 bits)           |
+|                             |                             | Sensor buses (D-73)         |
 +-----------------------------+-----------------------------+-----------------------------+
 | Beacon (step chart + the    | Onboard state (sequence,    | Other packets (CMDVER,      |
 |  last 12 changes)           |  BIST, MAGCAL, CFDP, flags) |  TIMECORR, RFSCAN)          |
@@ -1969,8 +1972,10 @@ Send `RSTCNT` once the cause is understood. The flags that follow a state clear 
 
 ### 7.6 Sensors
 
-The Sensors panel shows the 10 bits of HK `sensor_health` (`SENSOR_BITS`), green "OK" or
-amber "MISSING".
+The Sensors panel shows the 11 bits of HK `sensor_health` (`SENSOR_BITS`). An instrument bit
+(NICLA_ME, AS7265X, RM3100_OB, RM3100_IB) is green "OK" or red "MISSING"; a bit of one Nicla
+Sense ME output (the `ME_*` bits) is green "OK" or amber "not valid" (the output exists only
+while the Nicla answers, so a MISSING NICLA_ME also clears every `ME_*` bit).
 
 | Bit | Name | Instrument | OK means |
 |---|---|---|---|
@@ -1982,13 +1987,43 @@ amber "MISSING".
 | b5 | ME_BARO | BMP390 | pressure valid |
 | b6 | ME_BSEC | BME688 + BSEC | air-quality outputs valid |
 | b7 | AS7265X | spectrometer (0x49) | the driver reports it working |
-| b8 | RM3100_OB | outboard magnetometer, boom tip (0x20) | found and working |
+| b8 | RM3100_OB | outboard magnetometer, boom tip (0x20) | found and working; cleared after 5 failed samples in a row (WARN EVR 0x060E, D-73) |
 | b9 | RM3100_IB | inboard magnetometer, boom mid-point (0x23), **optional** | found and working; MISSING is normal when it is not fitted |
+| b10 | ME_GRV | BHI260AP game rotation vector (6-DOF, ARU page 2, D-75) | valid in the newest page 2 (present in the BHI260AP firmware, fresh, inside the quaternion norm gate); "not valid" with an ARU firmware without page 2 |
 
 `SENSORS <mask>` enables or disables the instruments (bits b0, b7, b8, b9 only); a disabled
 instrument is not counted as lost by the beacon. A missing instrument that should be there:
 check `i2c_errors` and the EVRs 0x060B ("instrument acquired") / 0x0606, then the wiring
 ([03_Hardware_Integration.md](03_Hardware_Integration.md)).
+
+**Sensor buses** (D-73; `GroundStation.sensor_bus`, [dssq/sensors.py](../dssq-groundstation/python/dssq/sensors.py)).
+The flight names the I2C bus of every instrument it finds - "A4/A5" (the NICLA bus, Wire2)
+or "Qwiic" (the MAG bus, Wire1) - in its event reports; the table below the bits shows the
+latest report per instrument. The flight sends these reports at boot (before the BOOT EVR)
+and when an instrument is lost or found again, so a ground started after the spacecraft
+booted may never see them: then every bus reads "unknown (no report)" and the separation
+"unknown (no acquisition events received since the ground started)" until the next report.
+
+| Column / row | Keys | Meaning |
+|---|---|---|
+| instrument | `sensor_bus.instruments.<instrument>.name` | Nicla Sense ME, RM3100 outboard, RM3100 inboard, AS7265X (keys `nicla`, `rm3100_ob`, `rm3100_ib`, `as7265x`) |
+| bus | `sensor_bus.instruments.<instrument>.bus`, `sensor_bus.instruments.<instrument>.wrong_bus`, `sensor_bus.instruments.<instrument>.warning` | the bus of the latest report (`null` = none received); amber "(not the recommended bus)" when it differs from the recommended one, with the flight's WARN 0x060D text as the tooltip (`warning`, shown while the instrument stays on that bus) |
+| recommended | `sensor_bus.instruments.<instrument>.recommended` | A4/A5 for the Nicla Sense ME, Qwiic for the RM3100s; `null` = "any (no preferred bus)": the AS7265X is used on either bus without a warning |
+| state | `sensor_bus.instruments.<instrument>.state`, `sensor_bus.instruments.<instrument>.event_id`, `sensor_bus.instruments.<instrument>.t`, `sensor_bus.instruments.<instrument>.playback`, `sensor_bus.instruments.<instrument>.hk_ok` | "acquired" (EVR 0x060B, 0x0706 for the AS7265X, or a WARN 0x060D naming it) or red "LOST" (0x0606 Nicla Sense ME, 0x060E RM3100), with the EVR id and its ground receive time; `playback` = the report came from the recorder (VC2: never replaces a real-time report, fills an instrument without one); `hk_ok` = the instrument's bit in the newest HK (amber "HK MISSING" next to an acquisition: the instrument went away, e.g. absent after a reboot) |
+| Separated | `sensor_bus.separated`, `sensor_bus.separation`, `sensor_bus.shared_bus` | the separation rule: the Nicla Sense ME and the RM3100s must be on different buses. `true` "yes: ..." (green), `false` amber "NOT SEPARATED: ... both on <bus>" (YELLOW alarm reason `sensor wiring: RM3100 and Nicla not on separate buses`, [15](#15-alarm-logic); the data is still used), `null` "unknown (...)" with the reason. Counted like the flight's own check: only instruments whose latest report is an acquisition and that the newest HK does not report MISSING |
+| Lost instruments | `sensor_bus.lost` | "<name> (<bus>)" of every instrument whose latest report is a loss |
+| Last "not separated" WARN | `sensor_bus.last_not_separated` | `{text, t, playback}` of the newest flight WARN 0x060D "<Nicla> and <RM3100> both on <bus>: not separated (docs/03)", or `null` |
+| - | `sensor_bus.reports` | number of sensor-bus EVRs used since the ground started |
+
+Keys of the block, one by one: `sensor_bus.instruments`, `sensor_bus.separated`,
+`sensor_bus.separation`, `sensor_bus.shared_bus`, `sensor_bus.lost`,
+`sensor_bus.last_not_separated`, `sensor_bus.reports`; per instrument
+`sensor_bus.instruments.nicla`, `sensor_bus.instruments.rm3100_ob`,
+`sensor_bus.instruments.rm3100_ib`, `sensor_bus.instruments.as7265x`.
+
+Example (both simulator runs, the recommended layout of the boot reports): Nicla Sense ME
+A4/A5, RM3100 outboard and inboard Qwiic, AS7265X Qwiic; "yes: Nicla Sense ME on A4/A5,
+RM3100 outboard on Qwiic, RM3100 inboard on Qwiic".
 
 ### 7.7 Beacon
 
@@ -2044,7 +2079,7 @@ empty list until the packet arrives.
 |---|---|---|
 | `decoded.mode` | HK `fsw_mode` | CRUISE |
 | `decoded.fdir` | HK `fdir_flags`, names of the set bits | [] |
-| `decoded.sensors_ok`, `decoded.sensors_missing` | HK `sensor_health` | all 10 / [] |
+| `decoded.sensors_ok`, `decoded.sensors_missing` | HK `sensor_health` | all 11 / [] |
 | `decoded.reset_cause` | HK `reset_cause` | POWER-ON |
 | `decoded.farm_state` | HK `farm_state` | OPEN |
 | `decoded.radio_fault` | HK `radio_fault` | NONE |
@@ -2435,7 +2470,8 @@ top; the two charts show `spectral_history.lux` and `spectral_history.cct_k` aga
 
 **What it is for.** The other instruments: the three magnetometers (two RM3100 on the boom,
 the BMM150 inside the Nicla Sense ME), the attitude from the Nicla's BHI260AP fusion and
-from the independent TRIAD solution, and the environment sensors. Values are the newest
+from the independent TRIAD solution, the BHI260AP 6-DOF products ([9.4](#94-imu-6-dof)), and
+the environment sensors. Values are the newest
 real-time MAG (APID 0x020), ATT (0x021) and ENV (0x023) packets on VC1: keys
 `tlm.MAG.values.<field>`, `tlm.ATT.values.<field>`, `tlm.ENV.values.<field>` (field tables:
 [05_Telemetry_and_Command_Dictionary.md](05_Telemetry_and_Command_Dictionary.md)). Default
@@ -2445,7 +2481,8 @@ ATT 60 / 8 s, ENV 120 / 30 s; off in SAFE.
 ```
 +---------------------------------------------------------------+-----------------------------+
 | Magnetometers: outboard / inboard / body, gradient, dual-     | Attitude: fusion vs TRIAD   |
-| sensor separation, sampling, flags, boom radii                | Environment                 |
+| sensor separation, sampling, flags, boom radii                | IMU (6-DOF)                 |
+|                                                               | Environment                 |
 +---------------------------------------------------------------+-----------------------------+
 ```
 
@@ -2453,14 +2490,17 @@ ATT 60 / 8 s, ENV 120 / 30 s; off in SAFE.
 
 ### 9.1 Magnetometers
 
-The MAG vectors are the **mean** of `nsamples` 1 Hz readings over the MAG period, in µT
-(raw: no calibration is applied to the MAG packet, even with an onboard MAGCAL active).
+The MAG vectors are the **mean** of `nsamples` 1 Hz readings over the MAG period, in µT.
+The RM3100 vectors are raw: no calibration is applied to the MAG packet, even with an
+onboard MAGCAL active. The BMM150 vector is the BHI260AP's "magnetometer corrected" output:
+the BHI260's BSX calibration is applied inside the Nicla, so it is labelled "corrected by the
+BHI260 (BSX)", not raw.
 
 | Row | Keys | Formula; meaning |
 |---|---|---|
 | RM3100 outboard (boom) | `tlm.MAG.values.ob_b_x`, `ob_b_y`, `ob_b_z`, `ob_rms` | the science magnetometer at the boom tip; \|B\| = √(Bx² + By² + Bz²); RMS = fluctuation of the readings within the interval |
 | RM3100 inboard | `ib_b_x`, `ib_b_y`, `ib_b_z`, `ib_rms` | the optional second unit at the boom mid-point ("—" when absent) |
-| BMM150 body | `body_b_x`, `body_b_y`, `body_b_z`, `body_rms` | the Nicla Sense ME's magnetometer inside the bus |
+| BMM150 body (Nicla Sense ME), corrected by the BHI260 (BSX) | `body_b_x`, `body_b_y`, `body_b_z`, `body_rms` | the Nicla Sense ME's magnetometer inside the bus, BSX-corrected (above) |
 | Gradient inboard - outboard | - | ΔB = B_ib - B_ob per axis |
 | S/C field at outboard (est., 1/r³) | `cfg.r_outboard_m`, `cfg.r_inboard_m` | assuming the spacecraft's own field is a dipole falling as 1/r³: with k = (r_ob / r_ib)³, B_sc,ob = (B_ib - B_ob) / (k - 1) |
 | Ambient field (est.) | - | B_amb = B_ob - B_sc,ob: the field with the spacecraft's contribution removed |
@@ -2486,7 +2526,7 @@ radii; verify the magnetic cleanliness ([03_Hardware_Integration.md](03_Hardware
 | Fusion vs TRIAD angle | - | 2 acos(\|q1 · q2\|): the rotation between the two solutions; a few degrees is normal, tens of degrees mean one of them is wrong (magnetic disturbance, an uncalibrated boom magnetometer, the gravity vector during motion) |
 | TRIAD magnetometer | `flags` b6 TRIAD_RM3100, HK `magcal_state` | which field TRIAD used: the boom RM3100 (amber "UNCALIBRATED: no MAGCAL loaded" when no calibration is active) or the BMM150 |
 | BMM150 scale | `flags` b5 MAG_SCALE | read from the BHI260AP, or the firmware fallback 1/16 µT per LSB |
-| Acceleration, rate, BMM150 field | `acc_x` ... (g), `gyro_x` ... (°/s), `mag_x` ... (µT) | with \|a\| and \|B\|; TRIAD needs \|a\| between 0.9 and 1.1 g (at rest) |
+| Acceleration (g, one sample), rate (°/s, one sample), BMM150 field (µT), corrected by the BHI260 (BSX) | `acc_x` ... (g), `gyro_x` ... (°/s), `mag_x` ... (µT) | the latest single reading of the ARU page 0 (the window statistics of the period are in [9.4](#94-imu-6-dof)); with \|a\| and \|B\|; TRIAD needs \|a\| between 0.9 and 1.1 g (at rest). The BMM150 field is BSX-corrected, not raw |
 
 Example (E22 sim): fusion yaw / pitch / roll 118.76 / 55.90 / -39.84°, TRIAD 118.75 /
 55.90 / -39.85°, angle between them 0.007° (the simulator makes them agree), fusion accuracy
@@ -2505,6 +2545,73 @@ Example (E22 sim): fusion yaw / pitch / roll 118.76 / 55.90 / -39.84°, TRIAD 11
 
 Example (E22 sim): 1013.12 hPa, 22.11 °C, 46 %RH, IAQ 42 / 40, 560 ppm CO₂eq, 0.80 ppm
 bVOC, 152000 Ω, accuracy 3 of 3.
+
+### 9.4 IMU (6-DOF)
+
+The BHI260AP's 6-DOF outputs (D-75): the game rotation vector q_grv (accelerometer +
+gyroscope, **no magnetometer**) and the statistics of the Nicla ARU's 1.000 s windows of
+25 Hz samples, from ATT v4 (`tlm.ATT.values.imu_flags`, `q_grv_w` ... `q_grv_z`,
+`imu_nwin`, `vib_rms`, `vib_peak`, `rate_mean_x` ... `rate_mean_z`, `rate_peak`; layout in
+[05_Telemetry_and_Command_Dictionary.md](05_Telemetry_and_Command_Dictionary.md)). The GDS
+derives the rest (`imu`, `imu_products()` in
+[dssq/sensors.py](../dssq-groundstation/python/dssq/sensors.py)). The **source** column says
+where a value comes from: "on board" = measured or computed on the spacecraft (BHI260AP,
+ARU windows, flight aggregation), "ground" = derived by the GDS. A value that cannot be
+produced shows "n/a (<reason>)" with the reason from `imu.na`, never a number.
+
+**Conventions.** Both quaternions are device -> world, scalar first as sent, world Z = up
+(Android convention, as `q_fus` in [9.2](#92-attitude)); the Nicla's device frame is taken as
+the body frame. The game rotation vector's world has arbitrary horizontal axes, fixed when
+the BHI260AP starts, that drift with the gyro bias. For a unit q = (w, x, y, z): up vector in
+body axes u = R(q)^T e_z = (2(xz - wy), 2(yz + wx), w² - x² - y² + z²); tilt = acos(u_z)
+(body +Z from the vertical), roll = atan2(u_y, u_z), pitch = atan2(-u_x, √(u_y² + u_z²)):
+a Z-up body frame, level = body +Z up = tilt, roll and pitch 0 (the ZYX Euler roll and pitch
+of q).
+
+| Row | Keys | Source | Meaning |
+|---|---|---|---|
+| Present in the BHI260AP firmware / valid | `imu.grv_present`, `imu.grv_valid`, `imu.flags`; HK `ME_GRV` | on board | ATT `imu_flags` b6 GRV_PRESENT (the BHI260AP firmware provides the game rotation vector; also clear when the ARU page 2 could not be read, e.g. an ARU firmware without it) and b0 GRV (fresh <= 200 ms, inside the norm gate); `imu.available` false = no ATT v4 yet (`imu.na` group `all`) |
+| Quaternion w x y z | `imu.q_grv` | on board | the game rotation vector, normalised, 4 decimals (Q14 resolution) |
+| Accuracy estimate | `imu.grv_accuracy` | on board | always `null`: "n/a (the BHI260AP reports none for the game rotation vector: always 0, datasheet Table 89)" (`imu.na` group `grv_accuracy`) |
+| Up vector, gravity reading | `imu.up`, `imu.gravity_g` | ground | u, and 1 g x u = what the accelerometer reads at rest (the sign of Android's gravity sensor) |
+| Tilt / roll / pitch | `imu.tilt_deg`, `imu.roll_deg`, `imu.pitch_deg` | ground | as above, degrees (gravity-referenced, valid during motion because the fusion filters them) |
+| Relative heading | `imu.heading_rel_deg` | ground | atan2(2(wz + xy), 1 - 2(y² + z²)): the body X axis in the horizontal plane, counter-clockwise seen from above, from the arbitrary game-rotation reference. **Not a compass heading**; it drifts with the gyro bias (bias stability `imu.gyro_bias_stability_dph` = 5 °/h, datasheet Table 119) |
+| Heading offset | `imu.heading_offset_deg` | ground | only when `imu.paired` (ATT `imu_flags` b2: q_fus and q_grv from one ARU rebuild): dq = q_fus ⊗ conj(q_grv), ψ = atan2(2(dw dz + dx dy), 1 - 2(dy² + dz²)). Its change over time = game-rotation drift and / or a magnetic disturbance of the 9-DOF heading (T-SC-15) |
+| Tilt disagreement | `imu.tilt_disagreement_deg` | ground | acos(1 - 2(dx² + dy²)): the angle between the two up vectors; ~0 when both filters agree on gravity |
+| Linear acceleration est. | `imu.lin_acc_mg`, `imu.lin_acc_abs_mg`, `imu.acc_offset_mg`, `imu.acc_sens_err_pct` | ground | ATT acc - 1 g x u in mg, with \|a\|, only when `imu.paired` and ATT b1 ACCEL. ATT v4 carries no window mean of the acceleration, so acc is the one page-0 sample of the same ARU rebuild. An **estimate, not a spacecraft acceleration**: zero-g offset up to ±50 mg over life, sensitivity error up to ±2 % (datasheet Table 117) |
+| Windows aggregated | `imu.nwin`, `imu.gap`, `imu.acc_sat`, `imu.gyro_sat` | on board | ATT `imu_nwin` (1 s windows in the ATT period, 0 = none: group `stats`), with "windows or samples missed" (b5 GAP), "accelerometer / gyroscope near full scale" (b3 / b4) |
+| Vibration RMS / peak | `imu.vib_rms_mg`, `imu.vib_peak_mg`, `imu.vib_floor_mg`, `imu.bandwidth_hz` | on board | the RMS of the windows' acceleration RMS (window mean removed, three axes) and the largest deviation of one sample from its window mean, mg; bandwidth <= `imu.bandwidth_hz` = 12.5 Hz (half the 25 Hz sample rate). Noise floor est. 1.2 mg x √3 = 2.1 mg from the datasheet value at ODR 200 Hz (25 Hz: not specified, VERIFY T-SC-14). While the body turns, the change of the gravity projection inside a window counts as vibration |
+| Mean rate | `imu.rate_mean_dps` | on board | mean of the window mean rates, °/s, 2 decimals |
+| \|ω\| of the mean rate | `imu.rate_abs_dps`, `imu.rate_floor_dps` | ground | with the noise floor est. 0.07 °/s x √3 = 0.12 °/s (datasheet Table 119 at ODR 200 Hz). The residual gyro offset after the BHI260AP's own calibration is not specified (zero-rate offset ±1 °/s with its fast offset compensation off) |
+| Spin axis | `imu.spin_axis`, `imu.spin_axis_min_dps` | ground | rate_mean / \|ω\|, only when \|ω\| > `imu.spin_axis_min_dps` = 10 x the floor = 1.21 °/s, else n/a with the value (group `spin`) |
+| Peak \|rate\| | `imu.rate_peak_dps` | on board | the largest \|ω\| of one sample in the period, °/s |
+| Motion state | `imu.motion`, `imu.still_rate_dps`, `imu.still_vib_mg` | ground | "stationary" when at least one window and rate_peak < `[science] still_rate_dps` (0.5 °/s) and vib_peak < `[science] still_vib_mg` (10 mg); "moving" otherwise; "unknown" without a window (group `motion`). The thresholds are about 3 σ of the datasheet noise, VERIFY T-SC-14 ([15_Configuration_Reference.md](15_Configuration_Reference.md)) |
+| IMU flags | `imu.flags` | on board | the names of the set ATT `imu_flags` bits (GAP and *_SAT amber) |
+
+Every key of the block: `imu.available`, `imu.flags`, `imu.grv_present`, `imu.grv_valid`,
+`imu.paired`, `imu.q_grv`, `imu.grv_accuracy`, `imu.up`, `imu.gravity_g`, `imu.tilt_deg`,
+`imu.roll_deg`, `imu.pitch_deg`, `imu.heading_rel_deg`, `imu.heading_offset_deg`,
+`imu.tilt_disagreement_deg`, `imu.lin_acc_mg`, `imu.lin_acc_abs_mg`, `imu.nwin`, `imu.gap`,
+`imu.acc_sat`, `imu.gyro_sat`, `imu.vib_rms_mg`, `imu.vib_peak_mg`, `imu.rate_mean_dps`,
+`imu.rate_abs_dps`, `imu.spin_axis`, `imu.rate_peak_dps`, `imu.motion`, `imu.still_rate_dps`,
+`imu.still_vib_mg`, `imu.vib_floor_mg`, `imu.rate_floor_dps`, `imu.spin_axis_min_dps`,
+`imu.bandwidth_hz`, `imu.acc_offset_mg`, `imu.acc_sens_err_pct`, `imu.gyro_bias_stability_dph`,
+`imu.na`.
+
+`imu.na` holds one reason per group that cannot be produced: `all` (no ATT v4 yet), `grv`
+(no valid game rotation vector: IMU_F_GRV_PRESENT or IMU_F_GRV clear, or outside the norm
+gate), `pair` (IMU_F_PAIRED clear, or ATT b0 QUAT clear), `lin_acc` (IMU_F_PAIRED or ATT b1
+ACCEL clear), `stats` (`imu_nwin` 0), `spin` (no window, or \|ω\| not above the spin-axis
+minimum), `motion` (no window) and always `grv_accuracy`. The ATT sentinels (0x7FFF,
+0xFFFF) decode to `null` and never become numbers.
+
+Example (E22 sim, TEST mode; the simulator tumbles the spacecraft at 5-8 °/s, so the period
+is "moving" and the turn of gravity inside each 1 s window dominates the vibration):
+q_grv valid and paired, tilt / roll / pitch 100.58 / 106.77 / -50.48°, heading offset
++25.05° (the simulator's game-rotation reference starts 25° from the rotation vector and
+drifts 2 °/h), tilt disagreement 0.00°, linear acceleration 2 mg (the simulated noise),
+9 windows, vibration 24.6 / 45 mg, mean rate -0.27 -5.02 4.36 °/s, \|ω\| 6.65 °/s, spin
+axis -0.041 -0.754 0.655, peak 7.7 °/s.
 
 ---
 
@@ -2941,6 +3048,7 @@ header pill, the OVERVIEW reasons list, the station ALARM lamp and buzzer
 | `frequency offset > 50 % of FERR_L` | SX126x frequency-offset state WARN |
 | `FDIR <names>` | any HK fault-protection flag except HIBERNATE and TX_INHIBIT ([7.5](#75-fault-protection-flags)) |
 | `spacecraft reset cause BROWNOUT (check the radio supply)` | HK `reset_cause` = BROWNOUT |
+| `sensor wiring: RM3100 and Nicla not on separate buses` | `sensor_bus.separated` is false: the flight reported the Nicla Sense ME and an RM3100 on the same bus (WARN EVR 0x060D "... not separated", or acquisitions naming one bus), D-73; the data is still used ([7.6](#76-sensors)) |
 | `<n> SDLS TM rejects in the last 60 s` | TM frames refused by SDLS recently ([5.3](#53-sdls-tm-rejections)) |
 | `SDLS service mismatch suspected (spacecraft TM without AE header)` | 3 data frames in a row rejected as BAD_SPI / BAD_IV |
 | `radio model mismatch: spacecraft <m>, station <n>` | RF `radio_model` differs from the station's model |
@@ -3105,6 +3213,8 @@ document.
 | `apids` | one entry per packet name | [6.3](#63-packets-by-apid) |
 | `tlm` | HK, RF, CMDVER, TIMECORR, RFSCAN, MAG, ATT, SPEC, ENV, SPECBURST: the newest real-time packet of each type received (each apid, values, limits, units, ert, scet, sclk, seq, vcid) | [7](#7-spacecraft-tab), [9](#9-science-tab) |
 | `decoded` | mode, fdir, sensors_ok, sensors_missing, reset_cause, farm_state, radio_fault, radio_model, framing, rate_label, air_rate_bps, sdls_tc_service, sdls_tm_service, sdls_tm_state, cfdp_state, seq_state, beacon, mag_bist, magcal, rf_flags, mag_flags | [7.8](#78-onboard-state-and-the-decoded-block) |
+| `imu` | available, flags, grv_present, grv_valid, paired, q_grv, grv_accuracy, up, gravity_g, tilt_deg, roll_deg, pitch_deg, heading_rel_deg, heading_offset_deg, tilt_disagreement_deg, lin_acc_mg, lin_acc_abs_mg, nwin, gap, acc_sat, gyro_sat, vib_rms_mg, vib_peak_mg, rate_mean_dps, rate_abs_dps, spin_axis, rate_peak_dps, motion, still_rate_dps, still_vib_mg, vib_floor_mg, rate_floor_dps, spin_axis_min_dps, bandwidth_hz, acc_offset_mg, acc_sens_err_pct, gyro_bias_stability_dph, na | [9.4](#94-imu-6-dof) |
+| `sensor_bus` | instruments (nicla, rm3100_ob, rm3100_ib, as7265x: name, bus, recommended, wrong_bus, warning, state, hk_ok, event_id, t, playback), separated, separation, shared_bus, lost, last_not_separated, reports | [7.6](#76-sensors) |
 | `time` | partition, last_sclk, scet_of_last_sclk, corr_samples, drift_ppm, residual_rms_ms, owlt_s, timecorr_key, sclk_estimate_s | [5.8](#58-time-correlation) |
 | `cop` | vs, nr, lockout, suspended, retransmit, queued, outstanding, pending_bypass, farm_b, t1_s, verify_timeout_s, uplink_blocked, build_errors, records, recent, tc_framing, sdls_service, sdls_sn, frame_limit | [5.5](#55-cop-1-fop), [13.3](#133-command-history) |
 | `cfdp` | transactions, counters, files_dir, onboard | [12.1](#121-cfdp-transactions) |
@@ -3123,5 +3233,5 @@ document.
 | `cmd_stages`, `cmd_errors`, `cmd_sources` | code -> name | [7.9](#79-other-packets-cmdver-timecorr-rfscan) |
 
 `/api/science`: `spectral`, `spectral_history`, `spectral_burst`, `spectral_skymap`,
-`spectral_library`, `cfg` (`r_outboard_m`, `r_inboard_m`, `field_ut`), `led_limits`
+`spectral_library`, `cfg` (`r_outboard_m`, `r_inboard_m`, `field_ut`, `still_rate_dps`, `still_vib_mg`), `led_limits`
 (`max_code`, `allowed_led_cur`) ([8](#8-spectrometer-tab), [9](#9-science-tab)).

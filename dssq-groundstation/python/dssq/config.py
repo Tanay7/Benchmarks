@@ -93,7 +93,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "cfdp": {"inactivity_s": 600.0, "check_s": 60.0, "files_dir": "files", "max_file_mib": 64},
     "spectral": {"white_ref_file": "spec_white_ref.json", "library_file": "spec_library.json",
                  "classifier": {}},
-    "science": {"r_outboard_m": 1.0, "r_inboard_m": 0.5},
+    # D-75: 6-DOF stationarity thresholds (dssq/sensors.py motion_state), VERIFY T-SC-14
+    "science": {"r_outboard_m": 1.0, "r_inboard_m": 0.5, "still_rate_dps": 0.5, "still_vib_mg": 10.0},
     "tdm": {"auto_write": True},
     "linkmgr": {"mode": "ADVISE", "target_margin_db": 6.0, "period_s": 60.0, "holdoff_s": 600.0,
                 "max_rate": 4, "revert_s": 180},
@@ -389,6 +390,8 @@ def validate(cfg: dict[str, Any]) -> list[str]:
     # [science]
     _num(cfg, "science", "r_outboard_m", 0.0, lo_open=True)
     _num(cfg, "science", "r_inboard_m", 0.0, lo_open=True)
+    _num(cfg, "science", "still_rate_dps", 0.0, 2000.0, lo_open=True)     # BHI260AP gyro range +/-2000 deg/s
+    _num(cfg, "science", "still_vib_mg", 0.0, 16000.0, lo_open=True)      # accelerometer range +/-16 g
     if "field_ut" in cfg["science"]:
         _num(cfg, "science", "field_ut", 1.0, 800.0)
     # [tdm]

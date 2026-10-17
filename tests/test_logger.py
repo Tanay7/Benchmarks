@@ -126,7 +126,7 @@ def test_rx_stats_one_row_per_second_e22(monkeypatch, tmp_path):
     # interval increments sum to the receiver totals
     assert sum(col["frames_ok"]) == gs.rx.frames_ok > 20
     assert sum(col["frames_lost"]) == gs.rx.frames_lost
-    assert sum(col["rs_symbols"]) == gs.rx.sym_corrected > 0
+    assert sum(col["rs_symbols"]) == gs.rx.sym_corrected == 0    # E22: no octet errors (D-76), RS below
     assert sum(col["n_rx"]) == gs.rx.receptions
     with_rx = [r for r in rows if r[RX_STATS_COLUMNS.index("n_rx")]]
     assert with_rx and all(r[RX_STATS_COLUMNS.index("rssi_dbm")] is not None for r in with_rx)
@@ -147,11 +147,13 @@ def test_rx_stats_one_row_per_second_e22(monkeypatch, tmp_path):
 
 def test_rx_stats_packet_mode_afc_doppler_snr(monkeypatch, tmp_path):
     w = World(monkeypatch, tmp_path, radio={"model": "SX126x", "air_rate": 4}, static_offset_hz=6000.0,
-              doppler_rate_hz_s=0.5, seed=5)
+              doppler_rate_hz_s=0.5, crc_fail_prob=0.2, seed=5)
     w.run(120, step=0.5)
     w.gs.archive.commit()
     rows = _rows(Path(w.cfg["gds"]["archive_dir"]),
-                 "SELECT snr_db, freq_err_hz, afc_hz, doppler_hz, range_rate_m_s, n_rx FROM rx_stats ORDER BY t")
+                 "SELECT snr_db, freq_err_hz, afc_hz, doppler_hz, range_rate_m_s, n_rx, rs_symbols FROM rx_stats "
+                 "ORDER BY t")
+    assert sum(r[6] for r in rows) == w.gs.rx.sym_corrected > 0                   # CRC-failed packets, RS rescue
     rx = [r for r in rows if r[5]]
     assert rx and all(r[0] is not None and r[1] is not None for r in rx)          # measured SNR, freq error
     assert any(r[2] not in (None, 0.0) for r in rows)                              # AFC correction applied
