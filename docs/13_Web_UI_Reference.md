@@ -247,6 +247,7 @@ each kind of value uses.
 | Kind of value | Shown as | Example | Rule (dashboard.html) |
 |---|---|---|---|
 | measured received power and what is derived from it (RSSI, noise floor, SNR est., margin est., signal power est., N0, C/N0, Eb/N0, measured path loss): single readings and window statistics alike | at the readings' resolution, never finer (D-70): whole dB with the E22; with the SX126x RSSI in 0.5 dB steps, the rest in 0.1 dB; means are shown without "± SEM" | -39 dBm (E22), -113.5 dBm (SX126x) | `fres(v, kind)` |
+| received power in watts (RECEIVER tab: packet RSSI and noise floor, their window statistics; D-76) | scientific notation with a real exponent, P[W] = 10^((dBm - 30) / 10) of the calibrated reading; 2 significant figures for 1 dB and 0.5 dB readings (E22 RSSI and noise, SX126x RSSI), 3 for 0.1 dB readings (SX126x noise floor), chosen by the same resolution logic as `fres()` | 5.0 × 10⁻¹⁵ W (-113 dBm, E22), 1.82 × 10⁻¹⁵ W (-117.4 dBm, SX126x noise) | `fwatt(w, kind)`, `dbmW(dbm)` |
 | SX126x measured SNR (SnrPkt/4) | 2 decimals (0.25 dB steps) | 6.25 dB | `fx(v, 2)` |
 | computed link-budget figures (the "design" column) | 4 decimals | -110.4321 dBm | `fx(v, 4)` |
 | frequencies, frequency errors, Doppler | 1 decimal, Hz | 433125000.0 Hz, 469.0 Hz | `fu(v, 1, "Hz")` |
@@ -286,7 +287,9 @@ readings of the same radio are still meaningful.
 ### 1.6 The statistics windows explained
 
 The RECEIVER tab keeps eight measured quantities in three windows and summarises each
-window with eleven statistics (`rx.windows`, computed by `rxstats.Window.stats()`).
+window with eleven statistics (`rx.windows`, computed by `rxstats.Window.stats()`). The two
+received powers (`rssi`, `noise`) carry a twelfth, their linear mean in milliwatts
+`mean_mw` ([4.3](#43-receiver-statistics)).
 
 **The windows.**
 
@@ -315,6 +318,7 @@ counted as an inter-arrival time.
 | max | `max` | sn | the best (highest) reading |
 | last | `last` | xn in arrival order | the newest reading |
 | fade p90-p10 | `fade_depth` | p90 - p10 | the depth of fading: how far the signal swings |
+| mean in watts (`rssi`, `noise` only) | `mean_mw` | (1/n) Σ 10^(xi / 10) mW, the linear mean of the per-reading powers over the same readings; shown in W in the rows "in watts" | the average power, which is not 10^(mean / 10) ([4.3](#43-receiver-statistics)) |
 
 **Worked example.** Five RSSI readings -112, -110, -113, -111, -114 dBm (computed with the
 GDS's own `Window` class): n = 5, mean = -112.0000; deviations 0, +2, -1, +1, -2, so
@@ -572,7 +576,8 @@ Layout (three columns on a wide screen; panels reflow on a narrow one):
 | RF now (every rx.rf scalar) | Link budget (design vs       |
 |                             | measured, downlink + uplink) |
 +-----------------------------+-----------------------------+-----------------------------+
-| Receiver statistics: 8 metrics x 3 windows (1 min, 10 min, pass) x 11 statistics         |
+| Receiver statistics: 8 metrics x 3 windows (1 min, 10 min, pass) x 11 statistics;       |
+| packet RSSI and noise floor also in watts                                               |
 +-----------------------------+-----------------------------+-----------------------------+
 | Packet RSSI and noise chart | SNR and margin chart        | Frequency error chart       |
 | Frequency-error gauge       | Radio configuration         | AFC (+ last 20 AFC events)  |
@@ -595,7 +600,10 @@ Layout (three columns on a wide screen; panels reflow on a narrow one):
 The "RF now" panel lists every scalar of `rx.rf` (built by `ReceiverStats.snapshot()` in
 [rxstats.py](../dssq-groundstation/python/dssq/rxstats.py)), then the last packet and the
 10-minute SNR and frequency-error summaries. The values are those of the **newest
-reception**; their statistics over time are in [4.3](#43-receiver-statistics). Each card
+reception**; their statistics over time are in [4.3](#43-receiver-statistics). The packet
+RSSI and the noise floor are each followed by a row with the same reading in watts; the
+line under the panel title says "Watts: P = 10^((dBm − 30)/10) of the calibrated reading
+(RSSI calibration offset): as accurate as the radio's RSSI and no more" (D-76). Each card
 below gives: what the panel shows, the snapshot key, unit and display, the exact source,
 the formula, how often it changes, what to expect from this hardware, how to read it, what
 to do when it is abnormal, related values and a worked example.
@@ -620,7 +628,7 @@ checks in [4.6](#46-radio-configuration).
 
 | | |
 |---|---|
-| Shown as | "Packet RSSI, last (calibrated)" and "Packet RSSI, last (raw reading)", each followed by "(resolution x dB)"; the raw row of an overload reads "octet at the top of its scale (reads -256 dBm): not a power" |
+| Shown as | "Packet RSSI, last (calibrated)" and "Packet RSSI, last (raw reading)", each followed by "(resolution x dB)"; the raw row of an overload reads "octet at the top of its scale (reads -256 dBm): not a power". Between the two, "Packet RSSI, last (calibrated), in watts" (card "Packet RSSI and noise floor in watts" below) |
 | Keys | `rx.rf.rssi_dbm` (calibrated; null unless the reading is a received power, `rx.rf.rssi_state` OK), `rx.rf.rssi_raw_dbm` (the reading as the radio reported it); the same value is `rx.rf.packet.rssi_dbm` |
 | Unit, display | dBm at the resolution: whole dB (E22), 0.5 dB steps (SX126x) |
 | Source | E22: the RSSI octet the module appends to each received packet (REG3 bit 7, `[radio] rssi_byte = true`), dBm = -(256 - octet) (`framesync._emit`). SX126x: RssiPkt / 2 from GetPacketStatus, sent by the station MCU in 0.1 dBm in `rf_rx` |
@@ -659,23 +667,25 @@ checks in [4.6](#46-radio-configuration).
 | Related | every RSSI and noise value, the link budget's measured column, the TDM `CARRIER_POWER` |
 | Example | 1.00 dB / 0.0000 dB (E22, uncalibrated default) |
 
-#### Received power, linear
+#### Packet RSSI and noise floor in watts (D-76)
 
 | | |
 |---|---|
-| Shown as | "Received power, linear" |
-| Key | `rx.rf.rssi_mw` (milliwatts in the snapshot) |
-| Unit, display | watts in scientific notation with 2 significant digits: a 1 dB reading carries no more (D-70, F-P2-3) |
-| Formula | P[mW] = 10^(RSSI_cal / 10) |
-| Updates | every reception |
-| Meaning | the same reading on a linear scale: useful to see that -110 dBm is ten times the power of -120 dBm |
-| Example | -113 dBm = 5.0119e-12 mW, shown as "5.0e-15 W"; -108 dBm is "1.6e-14 W" |
+| Shown as | "Packet RSSI, last (calibrated), in watts" (right after the calibrated RSSI row) and "Noise floor (calibrated, latest reading), in watts" (right after the noise-floor row) |
+| Keys | `rx.rf.rssi_mw` (milliwatts in the snapshot); the noise row converts `rx.rf.noise_dbm` on the page (no key of its own) |
+| Unit, display | watts in scientific notation with a real exponent, "a.b × 10⁻ⁿ W" (`fwatt()`, [1.5](#15-display-conventions)). Significant figures follow the reading's resolution: 2 for 1 dB and 0.5 dB steps (E22 RSSI and noise, SX126x RSSI), 3 for the SX126x noise floor's 0.1 dB steps (D-70) |
+| Formula | P[W] = 10^((dBm - 30) / 10) = P[mW] / 1000, of the calibrated reading before it is rounded for the dBm row, so the last figure can differ from converting the rounded dBm text (-113.4 dBm shows "-113 dBm" and 4.6 × 10⁻¹⁵ W) |
+| Accuracy | the watt value follows the calibrated dBm reading (`[radio] rssi_cal_offset_db`, T-RF-02): it is as accurate as the radio's RSSI and no more |
+| No value | "n/a (overload: too strong to measure)" (`rx.rf.rssi_state` OVERLOAD), "n/a (invalid reading: no received power)" (INVALID), "n/a (no reception yet)"; noise: "n/a (no noise reading)" |
+| Updates | every reception; the noise row with every noise reading |
+| Meaning | the same reading on a linear scale: -110 dBm is ten times the power of -120 dBm |
+| Example | E22: -113 dBm = 5.0119e-12 mW, shown as "5.0 × 10⁻¹⁵ W"; -108 dBm is "1.6 × 10⁻¹⁴ W"; noise -119 dBm "1.3 × 10⁻¹⁵ W". SX126x: RSSI -126.5 dBm "2.2 × 10⁻¹⁶ W", noise -117.4 dBm "1.82 × 10⁻¹⁵ W" |
 
 #### Noise floor, noise source, noise reading age
 
 | | |
 |---|---|
-| Shown as | "Noise floor (calibrated, latest reading)", "Noise source", "Noise reading age", "Noise readings rejected (end of range)" |
+| Shown as | "Noise floor (calibrated, latest reading)" (followed by its row in watts, card "Packet RSSI and noise floor in watts" above), "Noise source", "Noise reading age", "Noise readings rejected (end of range)" |
 | Keys | `rx.rf.noise_dbm`, `rx.rf.noise_source`, `rx.rf.noise_age_s`, `rx.rf.noise_rejected` (E22 noise octets at the end of their range or below -160 dBm: counted as a reply, not used) |
 | Unit, display | dBm at the resolution (whole dB with the E22, 0.1 dB with the SX126x); text; s 1 decimal |
 | Source | E22: the ambient-noise register, read with the query C0 C1 C2 C3 (reply C1 00 02 <noise> <last RSSI>), dBm = -(256 - octet); needs `[radio] rssi_noise = true`. SX126x: the station MCU's `rf_noise` RPC, the median of 8 instantaneous RSSI samples (GetRssiInst) in 0.1 dBm. Source text: "E22 noise register" or "SX126x GetRssiInst median of 8" |
@@ -859,13 +869,42 @@ their own panels ([4.8](#48-doppler-and-range-rate), [4.7](#47-afc)).
 [section 1.6](#16-the-statistics-windows-explained). Keys:
 `rx.windows.<window>.<metric>.<stat>` with window `1m`, `10m` or `pass`, the metrics below,
 and stat one of `n`, `mean`, `sem`, `std`, `min`, `p10`, `p50`, `p90`, `max`, `last`,
-`fade_depth` (pass windows also carry `truncated`). A row shows "—" until its window holds
-a sample.
+`fade_depth` (pass windows also carry `truncated`); the `rssi` and `noise` windows also carry
+`mean_mw` (below). A row shows "—" until its window holds a sample.
+
+**Received power in watts (D-76).** Under each window row of "Packet RSSI" and "Noise floor"
+a row "1 min, in watts" / "10 min, in watts" / "pass, in watts" gives the same window in W,
+formatted like the RF now rows ("a.b × 10⁻ⁿ W", 2 significant figures for 1 dB and 0.5 dB
+readings, 3 for the SX126x noise floor). The section title says: rows "in watts": mean =
+linear mean (mean of W), not 10^(mean dBm); min, percentiles, max and last converted from
+dBm; σ, SEM and fade in dB only. The panel adds the line "Watts: P = 10^((dBm − 30)/10) of the
+calibrated readings (RSSI calibration offset): as accurate as the radio's RSSI and no more".
+
+| Column of a row "in watts" | Source |
+|---|---|
+| n | the window's `n`: the same readings |
+| mean | `rx.windows.<window>.rssi.mean_mw` / `rx.windows.<window>.noise.mean_mw` / 1000: the linear mean (mean of W) of the per-reading powers, (1/n) Σ 10^((xi - 30) / 10) W, computed by the GDS (`rxstats.linear_mean_mw()`) over the same accepted readings as the dB statistics: calibrated, no overload or invalid reading. Tooltip "linear mean (mean of W)" |
+| ± SEM, σ, fade p90-p10 | "n/a (dB only)": these exist in dB only |
+| min, max, last | the dBm value converted, 10^((x - 30) / 10): these are readings, and the conversion is monotonic. As in RF now, the full-precision value is converted, not the dBm text rounded to the resolution |
+| p10, p50, p90 | the dBm value converted; the dB percentile is interpolated between two neighbouring readings, so its watt value lies between those readings' powers |
+| (empty window) | "0" and "n/a (no reading in this window)" |
+
+Why the mean in watts is not 10^(mean dBm / 10): the dB mean is the mean of the logarithms,
+i.e. the geometric mean of the power, which is lower than the linear mean whenever the power
+fluctuates (they are equal only for equal readings). Two readings -100 and -110 dBm
+(1.0 × 10⁻¹³ W and 1.0 × 10⁻¹⁴ W): linear mean 5.5 × 10⁻¹⁴ W, while the dB mean -105 dBm
+converts to 3.2 × 10⁻¹⁴ W. That window's two rows (`Window` statistics: p10 -109, p50 -105,
+p90 -101 dBm):
+
+| Row | n | mean | ± SEM | σ | min | p10 | p50 | p90 | max | last | fade p90-p10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 10 min | 2 | -105 | — | 5 | -110 | -109 | -105 | -101 | -100 | -110 | 8 |
+| 10 min, in watts | 2 | 5.5 × 10⁻¹⁴ W | n/a (dB only) | n/a (dB only) | 1.0 × 10⁻¹⁴ W | 1.3 × 10⁻¹⁴ W | 3.2 × 10⁻¹⁴ W | 7.9 × 10⁻¹⁴ W | 1.0 × 10⁻¹³ W | 1.0 × 10⁻¹⁴ W | n/a (dB only) |
 
 | Metric (as shown) | Metric key | Unit, decimals | A sample is added | This hardware; how to read it |
 |---|---|---|---|---|
-| Packet RSSI (dBm) | `rssi` | dBm, 4 | every reception that is a received power (calibrated; an overload or invalid reading adds none, D-76) | the link level. p10 = the level held 90 % of the time; fade depth = p90 - p10 |
-| Noise floor (dBm) | `noise` | dBm, 4 | every noise reading (at most one per 20 s) | should be flat; σ above about 1 dB or steps mean changing interference |
+| Packet RSSI (dBm) | `rssi` | dBm, 4; also in W (rows "in watts", `mean_mw`) | every reception that is a received power (calibrated; an overload or invalid reading adds none, D-76) | the link level. p10 = the level held 90 % of the time; fade depth = p90 - p10 |
+| Noise floor (dBm) | `noise` | dBm, 4; also in W (rows "in watts", `mean_mw`) | every noise reading (at most one per 20 s) | should be flat; σ above about 1 dB or steps mean changing interference |
 | SNR est. (RSSI − noise) (dB) | `snr_est` | dB, 4 | every reception with a noise reading of the same pass (F-P1-5) | see the SNR est. card; a reception without one adds no sample |
 | SNR measured (SX126x) (dB) | `snr_meas` | dB, 4 | every SX126x packet | compare the mean with the required SNR of the profile; not shown on the E22 (F-P2-1) |
 | Frequency error (Hz) | `freq_err` | Hz, 1 | every SX126x packet (raw) | with AFC: the residual after the correction; σ = frequency jitter; not shown on the E22 |

@@ -901,6 +901,83 @@ def test_dashboard_shows_only_what_the_receiver_can_measure(sim_station, tmp_pat
     assert got["h-margin"][0] == "12.25 dB SNR" and "CRC" in got["rx-now"][0] and "Doppler shift" in got["rx-dop"][0]
 
 
+TIMES = "\u00d7"                                       # the multiplication sign of "1.3 x 10^-15 W"
+SUPERSCRIPT = str.maketrans("-0123456789", "\u207b\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079")
+
+
+def _watts(text: str) -> str:
+    """A power in W as the page shows it (fwatt): "5.0e-15" -> 5.0, the multiplication sign,
+    10 and the exponent -15 in superscript digits, " W"."""
+    mant, exp = text.split("e")
+    return f"{mant} {TIMES} 10{str(int(exp)).translate(SUPERSCRIPT)} W"
+
+
+# any 2-figure _watts() text with a negative exponent (re reads the \uXXXX escapes)
+W_RE = rf"\d\.\d {TIMES} 10\u207b[\u2070\u00b9\u00b2\u00b3\u2074-\u2079]+ W"
+
+
+def _power_windows(st, mean_mw):
+    """10-min RSSI window of two readings, -100 and -110 dBm (calibrated): the dB statistics as
+    rxstats.Window gives them and the given linear mean; the 1-min noise window empty."""
+    st["rx"]["windows"]["10m"]["rssi"] = {"n": 2, "mean": -105.0, "sem": 5.0, "std": 5.0, "min": -110.0, "p10": -109.0,
+                                          "p50": -105.0, "p90": -101.0, "max": -100.0, "last": -110.0,
+                                          "fade_depth": 8.0, "mean_mw": mean_mw}
+    st["rx"]["windows"]["1m"]["noise"] = {"n": 0}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
+def test_receiver_tab_shows_received_power_in_watts(sim_station, tmp_path):
+    """D-76 (the owner: "the received power in watts (exponent)"): every received power on the
+    RECEIVER tab also in watts with a real exponent (_watts()), P = 10^((dBm - 30) / 10), with 2
+    significant figures for 1 dB and 0.5 dB readings and 3 for the SX126x's 0.1 dB noise floor;
+    the window mean in watts is the GDS's linear mean (mean_mw), not 10^(mean dBm); no SEM or
+    sigma in watts; an overload, an empty window or a missing noise reading is "n/a (<reason>)"."""
+    _, snap, sci = sim_station
+    ids = ["rx-now", "rx-stats"]
+    # the simulator's own E22 snapshot: watts next to the RSSI, the noise floor and the windows
+    got = _render(tmp_path, snap, sci, ids)
+    now, stats = got["rx-now"][0], got["rx-stats"][0]
+    assert snap["rx"]["rf"]["rssi_resolution_db"] == 1.0 and snap["rx"]["windows"]["10m"]["rssi"]["n"] > 0
+    assert re.search(r"Packet RSSI, last \(calibrated\), in watts" + W_RE, now), now
+    assert re.search(r"Noise floor \(calibrated, latest reading\), in watts" + W_RE, now), now
+    assert "rows \"in watts\": mean = linear mean (mean of W)" in stats
+    assert stats.count("10 min, in watts") == 2 and stats.count("in watts") == 6 + 2    # 3 windows x RSSI, noise
+    assert re.search(r"10 min, in watts\d+" + W_RE + r"n/a \(dB only\)n/a \(dB only\)", stats), stats
+    # E22 (1 dB): 2 significant figures; the linear mean is shown, not 10^(mean dBm)
+    st = json.loads(json.dumps(snap))
+    st["rx"]["rf"].update(rssi_dbm=-113.0, rssi_mw=10 ** -11.3, rssi_state="OK", noise_dbm=-119.0)
+    _power_windows(st, 5.5e-11)                                                 # (1e-10 + 1e-11) / 2 mW
+    got = _render(tmp_path, st, sci, ids)
+    now, stats = got["rx-now"][0], got["rx-stats"][0]
+    assert "in watts" + _watts("5.0e-15") in now and "latest reading), in watts" + _watts("1.3e-15") in now
+    # n, linear mean, SEM, sigma, then min p10 p50 p90 max last converted (-110 -109 -105 -101 -100 -110 dBm),
+    # fade depth: the mean 5.5e-14 W is not the p50 = 10^(mean dBm) = 3.2e-14 W
+    db_only = "n/a (dB only)"
+    row = ["10 min, in watts", "2", _watts("5.5e-14"), db_only, db_only, _watts("1.0e-14"), _watts("1.3e-14"),
+           _watts("3.2e-14"), _watts("7.9e-14"), _watts("1.0e-13"), _watts("1.0e-14"), db_only]
+    assert "".join(row) in stats, stats
+    assert "1 min, in watts0n/a (no reading in this window)" in stats
+    # SX126x: RSSI in 0.5 dB steps (2 significant figures), noise in 0.1 dB steps (3)
+    st["radio"]["packet_mode"] = True
+    st["rx"]["rf"].update(rssi_resolution_db=0.5, rssi_dbm=-126.5, rssi_mw=10 ** -12.65, noise_dbm=-117.4)
+    st["rx"]["windows"]["10m"]["noise"] = {"n": 3, "mean": -117.4, "sem": 0.1, "std": 0.1, "min": -117.5,
+                                           "p10": -117.5, "p50": -117.4, "p90": -117.3, "max": -117.3,
+                                           "last": -117.4, "fade_depth": 0.2, "mean_mw": 10 ** -11.74}
+    got = _render(tmp_path, st, sci, ids)
+    now, stats = got["rx-now"][0], got["rx-stats"][0]
+    assert "(calibrated), in watts" + _watts("2.2e-16") in now
+    assert "latest reading), in watts" + _watts("1.82e-15") in now
+    assert "10 min, in watts3" + _watts("1.82e-15") in stats and _watts("1.78e-15") in stats   # min -117.5 dBm
+    # an overload reading has no power; nor has a station without a noise reading
+    st["rx"]["rf"].update(rssi_state="OVERLOAD", rssi_dbm=None, rssi_mw=None, noise_dbm=None)
+    now = _render(tmp_path, st, sci, ids)["rx-now"][0]
+    assert "in wattsn/a (overload: too strong to measure)" in now and "in wattsn/a (no noise reading)" in now
+    st["rx"]["rf"].update(rssi_state="INVALID")
+    assert "in wattsn/a (invalid reading: no received power)" in _render(tmp_path, st, sci, ids)["rx-now"][0]
+    st["rx"]["rf"].update(rssi_state=None)
+    assert "in wattsn/a (no reception yet)" in _render(tmp_path, st, sci, ids)["rx-now"][0]
+
+
 # =============================================================================
 # App Lab entry point (PB-6.2)
 # =============================================================================
