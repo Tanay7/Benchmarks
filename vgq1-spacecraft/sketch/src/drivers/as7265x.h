@@ -1,8 +1,8 @@
 // =============================================================================
 //  AS7265X 18-channel spectrometer driver (ams AS72651 + AS72652 + AS72653, SparkFun
-//  "Triad" board), I2C address 0x49 on the NICLA bus (Wire2, header pins A4/A5, the
-//  recommended bus, D-73) or on the MAG bus (Wire1, the UNO Q Qwiic socket), whichever it
-//  answers on (A4/A5 first). Own implementation of the datasheet's virtual-register protocol
+//  "Triad" board), I2C address 0x49 on the NICLA bus (Wire2, header pins A4/A5) or on the
+//  MAG bus (Wire1, the UNO Q Qwiic socket), whichever it answers on (A4/A5 first; no
+//  preferred bus, D-73). Own implementation of the datasheet's virtual-register protocol
 //  (ams AS7265x datasheet v1-04, "I2C Virtual Register Write/Read Access",
 //  Figures 24-51); no vendor library.
 //

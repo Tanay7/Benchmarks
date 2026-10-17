@@ -225,8 +225,8 @@ def test_sensor_bus_evrs_match_flight_source() -> None:
     calls: dict[int, set[str]] = {}
     for m in re.finditer(r'evr\(\d,\s*(0x[0-9A-Fa-f]+)\s*,\s*"([^"]*)"', flight):
         calls.setdefault(int(m.group(1), 16), set()).add(m.group(2))
-    for eid, fmt in dd.SENSOR_BUS_EVRS.items():
-        assert calls.get(eid) == {fmt}, (hex(eid), calls.get(eid), fmt)
+    for eid, fmts in dd.SENSOR_BUS_EVRS.items():
+        assert calls.get(eid) == set(fmts), (hex(eid), calls.get(eid), fmts)
     names = re.search(r'b == SBUS_NICLA \? "([^"]+)" : b == SBUS_MAG \? "([^"]+)"',
                       (SRC / "fsw" / "sensor_bus.h").read_text())
     assert names is not None and names.groups() == dd.SENSOR_BUSES
@@ -234,6 +234,12 @@ def test_sensor_bus_evrs_match_flight_source() -> None:
         ("RM3100 outboard", "Qwiic")
     assert dd.evr_instrument_bus(0x060D, "Nicla Sense ME found on Qwiic; the recommended bus is A4/A5 (docs/03)") == \
         ("Nicla Sense ME", "Qwiic")
+    sep = "Nicla Sense ME and RM3100 outboard both on A4/A5: not separated (docs/03)"
+    assert dd.evr_not_separated(0x060D, sep) == ("Nicla Sense ME", "RM3100 outboard", "A4/A5")
+    assert dd.evr_instrument_bus(0x060D, sep) is None              # not a wrong-bus report
+    assert dd.evr_not_separated(0x060D, "Nicla Sense ME and X both on SDA/SCL: not separated (docs/03)") is None
+    assert dd.evr_instrument_lost(0x060E, "RM3100 ib stopped responding (5 failed samples on Qwiic)") == \
+        ("RM3100 inboard", "Qwiic")
     assert dd.evr_instrument_bus(0x0706, "AS7265X HW 40/41 FW 12.0.0 devices NIR+VIS+UV on A4/A5") == \
         ("AS7265X", "A4/A5")
     for eid, text in ((0x060B, "instrument acquired: X on Mars"), (0x060B, "instrument acquired: X"),

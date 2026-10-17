@@ -107,10 +107,12 @@ class Flight {
   void report_radio(bool boot);                         // EVR 0x0306
   void report_radio_model();                            // EVR 0x0308 (E22 model strap, contract 33)
   void report_tcxo();                                   // EVR 0x0309 (SX126x TCXO fall-back, DS-09)
-  void report_spec_identity();                          // EVR 0x0706 (+ 0x060D off its bus)
+  void report_spec_identity();                          // EVR 0x0706 (names the bus; no preferred bus)
   // EVR 0x060B "instrument acquired: <name> on <bus>", and WARN 0x060D when `bus` is not the
   // instrument's preferred bus (D-73).
   void report_acquired(const char* name, uint8_t bus, uint8_t preferred);
+  // WARN 0x060D "... not separated" when the Nicla Sense ME and RM3100 `unit` share a bus (D-73).
+  void report_separation(uint8_t unit);
   bool probe_nicla();                                   // A4/A5 then Qwiic; aru_bus_
   bool probe_rm3100(uint8_t unit, uint16_t cc);         // Qwiic then A4/A5; mag_bus_of_[unit]
   void run_boot_bist();
@@ -324,7 +326,6 @@ class Flight {
   ReprobeTimer reprobe_;                 // re-acquisition of instruments missing since boot or lost
   uint8_t aru_bus_ = kSensorBusNone;     // bus the Nicla Sense ME answered on (SensorBus)
   uint8_t mag_bus_of_[kMagUnits] = {kSensorBusNone, kSensorBusNone};   // ... each RM3100
-  uint8_t spec_bus_reported_ = kSensorBusNone;   // AS7265X bus of the last identity EVR
   LossCounter mag_loss_[kMagUnits];      // consecutive failed RM3100 samples (D-73)
   AruReading aru_last_;
   bool aru_valid_ = false, aru_env_valid_ = false;

@@ -181,21 +181,25 @@ static const uint32_t kSdlsSnWaitS = 120;
 //   Nicla Sense ME  0x2A  attitude reference unit (custom firmware, three 32-octet pages),
 //                         wired through its ESLOV connector J5: pin 4 SDA -> A4, pin 3 SCL -> A5,
 //                         pin 1 5 V, pin 5 GND, pin 2 INT not connected (D-74)
-//   AS7265X         0x49  SparkFun Spectral Triad (18 channels, 410-940 nm), recommended here
+//   AS7265X         0x49  SparkFun Spectral Triad (18 channels, 410-940 nm): either bus, no
+//                         preferred one (the owner's layout has it on the Qwiic socket)
 #define NICLA_WIRE Wire2
 // MAG bus = Wire1 = I2C4 on the Qwiic socket (pin 3 SDA PD13, pin 4 SCL PD12, pin 2 +3V3):
-// the boom magnetometers ALONE, so the long boom cable is isolated from the attitude
-// reference. Controller re-initialisation only, no GPIO bus clear: PD12/PD13 have no
+// the boom magnetometers, never with the Nicla, so the long boom cable is isolated from the
+// attitude reference. Controller re-initialisation only, no GPIO bus clear: PD12/PD13 have no
 // Arduino pin number, and the devicetree that arduino:zephyr 0.90.0, 1.0.0 and main give a
 // sketch has no scl-gpios / sda-gpios on the i2c4 node (a GPIO_DT_SPEC_GET on it does not
 // compile on any of the three).
 //   RM3100 outboard 0x20  science magnetometer at the boom tip   (SA1 = 0, SA0 = 0)
 //   RM3100 inboard  0x23  OPTIONAL, boom mid-point, auto-detected (SA1 = 1, SA0 = 1)
+//   (the owner's AS7265X board sits here too: its 4-pin I2C row carries the RM3100 wires)
 #define MAG_WIRE Wire1
 // Every instrument is probed on its preferred bus first and on the other bus second, at
 // boot and at every re-probe (fsw/sensor_bus.h): the Nicla and the AS7265X A4/A5 then
-// Qwiic (the AS7265X as since D-13), the RM3100s Qwiic then A4/A5. One found only on the
-// other bus is used, with WARN EVR 0x060D naming the recommended bus.
+// Qwiic (the AS7265X as since D-13), the RM3100s Qwiic then A4/A5. A Nicla or RM3100 found
+// only on the other bus is used, with WARN EVR 0x060D naming the recommended bus; the
+// AS7265X has no preferred bus (no warning). The Nicla and an RM3100 on the same bus are
+// used, with WARN EVR 0x060D "... not separated" (D-73).
 // The A4/A5 pins as GPIOs, for the NICLA bus clear (I2cBus, open drain emulated):
 // digital-pin-gpios index 18 = A4 = PC1, 19 = A5 = PC0 (variant overlay).
 static const int      kPinSensorSda  = 18;

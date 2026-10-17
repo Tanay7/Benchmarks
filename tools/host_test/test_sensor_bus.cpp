@@ -3,7 +3,8 @@
 //  path (D-75, fsw/attitude.h): the ARU page-2 decoder (magic, CRC, quaternion norm gate,
 //  field offsets), the pairing rule, ImuStats (window de-duplication, gaps, RMS of the
 //  window RMS, peaks, mean of the means, saturation, sentinels, period reset), the RM3100
-//  loss counter, preferred-then-alternate probing and the per-bus recovery limiter.
+//  loss counter, preferred-then-alternate probing, the separation rule and the per-bus
+//  recovery limiter.
 // =============================================================================
 #include <cmath>
 #include <cstring>
@@ -169,6 +170,13 @@ HOST_TEST(sensor_bus_roles) {
             std::strcmp(sensor_bus_name(kSensorBusNone), "none") == 0,
         "bus names A4/A5 / Qwiic (as EVR 0x0706 prints them)");
   CHECK(sensor_bus_other(SBUS_NICLA) == SBUS_MAG && sensor_bus_other(SBUS_MAG) == SBUS_NICLA, "other bus");
+  // Separation rule (D-73): only two instruments FOUND on the same bus share it.
+  CHECK(sensor_buses_shared(SBUS_MAG, SBUS_MAG) && sensor_buses_shared(SBUS_NICLA, SBUS_NICLA) &&
+            !sensor_buses_shared(SBUS_NICLA, SBUS_MAG) && !sensor_buses_shared(SBUS_MAG, SBUS_NICLA),
+        "separation: Nicla and RM3100 on one bus are shared, on different buses separated");
+  CHECK(!sensor_buses_shared(kSensorBusNone, kSensorBusNone) && !sensor_buses_shared(kSensorBusNone, SBUS_MAG) &&
+            !sensor_buses_shared(SBUS_NICLA, kSensorBusNone),
+        "separation: an instrument not found never shares a bus");
   // Preferred-then-alternate probing; the order of attempts is recorded.
   struct Case { uint8_t preferred; bool on[2]; uint8_t want; std::vector<uint8_t> tries; const char* what; };
   const Case cases[] = {

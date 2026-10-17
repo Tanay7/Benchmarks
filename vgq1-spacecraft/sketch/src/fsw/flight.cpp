@@ -526,12 +526,8 @@ void Flight::report_spec_identity() {
   evr(1, 0x0706, "AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s", (unsigned)i.hw_type,
       (unsigned)i.hw_version, (unsigned)i.fw_major, (unsigned)i.fw_patch, (unsigned)i.fw_build,
       spec_device_names(i.dev_mask), sensor_bus_name(bus));
-  // D-73: the AS7265X is recommended on A4/A5; on the Qwiic socket it shares the boom bus
-  // with the RM3100s. Warned once per change of bus, not at every re-identification.
-  if (bus != SBUS_NICLA && bus != spec_bus_reported_)
-    evr(2, 0x060D, "%s found on %s; the recommended bus is %s (docs/03)", "AS7265X", sensor_bus_name(bus),
-        sensor_bus_name(SBUS_NICLA));
-  spec_bus_reported_ = bus;
+  // D-73 (owner's layout): the AS7265X has no preferred bus - on A4/A5 or on the Qwiic
+  // socket it is used without a warning; this EVR names the bus it answered on.
 }
 
 // D-73: every acquisition names its bus; a bus other than the preferred one is used, with
@@ -543,10 +539,23 @@ void Flight::report_acquired(const char* name, uint8_t bus, uint8_t preferred) {
         sensor_bus_name(preferred));
 }
 
+// D-73 separation rule: the Nicla Sense ME and the RM3100s must be on different buses. Checked
+// for one RM3100 unit at each acquisition of it or of the Nicla (sensor_bus.h); a shared bus
+// is used, with WARN 0x060D "<Nicla> and <RM3100> both on <bus>: not separated", which the
+// ground turns into a YELLOW alarm reason (sensor wiring). Only instruments acquired now
+// count: a lost RM3100 keeps its last bus for the loss EVR, which must not raise a warning.
+void Flight::report_separation(uint8_t unit) {
+  const Rm3100& m = unit ? mag_ib_ : mag_ob_;
+  if (aru_.ok() && m.ok() && sensor_buses_shared(aru_bus_, mag_bus_of_[unit]))
+    evr(2, 0x060D, "%s and %s both on %s: not separated (docs/03)", "Nicla Sense ME",
+        unit ? "RM3100 inboard" : "RM3100 outboard", sensor_bus_name(aru_bus_));
+}
+
 bool Flight::probe_nicla() {
   aru_bus_ = probe_preferred(SBUS_NICLA, [this](uint8_t b) { return aru_.begin(bus_of(b)); });
   if (aru_bus_ == kSensorBusNone) return false;
   report_acquired("Nicla Sense ME", aru_bus_, SBUS_NICLA);
+  for (uint8_t u = 0; u < kMagUnits; ++u) report_separation(u);
   return true;
 }
 
@@ -557,6 +566,7 @@ bool Flight::probe_rm3100(uint8_t unit, uint16_t cc) {
   if (mag_bus_of_[unit] == kSensorBusNone) return false;
   mag_loss_[unit].reset();
   report_acquired(unit ? "RM3100 inboard" : "RM3100 outboard", mag_bus_of_[unit], SBUS_MAG);
+  report_separation(unit);
   return true;
 }
 

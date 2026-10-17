@@ -5,14 +5,17 @@
 //
 //  Roles (config.h NICLA_WIRE / MAG_WIRE):
 //    SBUS_NICLA  Wire2 = I2C3, header A4 (SDA) / A5 (SCL), GPIO bus clear: the Nicla
-//                Sense ME (0x2A, through its ESLOV connector, D-74) and, recommended,
-//                the AS7265X (0x49)
-//    SBUS_MAG    Wire1 = I2C4, the Qwiic socket: the boom RM3100s (0x20, optional 0x23)
-//                ALONE, so the long boom cable is isolated from the attitude reference;
+//                Sense ME (0x2A, through its ESLOV connector, D-74)
+//    SBUS_MAG    Wire1 = I2C4, the Qwiic socket: the boom RM3100s (0x20, optional 0x23),
+//                so the long boom cable is isolated from the attitude reference;
 //                controller re-initialisation only (i2c_bus.h)
+//    The AS7265X (0x49) has no preferred bus: it is used on either without a warning (in the
+//    owner's layout it is on the Qwiic socket and the RM3100s are wired to its I2C row).
 //  Every address is distinct, so any instrument may sit on either bus: each is probed on
-//  its preferred bus first and on the other one second (probe_preferred), and one found
-//  only on the other bus is used with a WARN EVR naming the recommended bus.
+//  its preferred bus first and on the other one second (probe_preferred), and a Nicla or
+//  RM3100 found only on the other bus is used with a WARN EVR naming the recommended bus.
+//  Separation rule: the Nicla and an RM3100 on the SAME bus (sensor_buses_shared) are used,
+//  with a WARN EVR "... not separated".
 //
 //  Fault protection per bus: its own recovery rate limit (RecoverLimiter), so a recovery
 //  on one bus never holds back the other's. HK keeps one i2c_errors (the sum of both buses)
@@ -34,6 +37,10 @@ inline const char* sensor_bus_name(uint8_t b) {
   return b == SBUS_NICLA ? "A4/A5" : b == SBUS_MAG ? "Qwiic" : "none";
 }
 inline uint8_t sensor_bus_other(uint8_t b) { return b == SBUS_NICLA ? (uint8_t)SBUS_MAG : (uint8_t)SBUS_NICLA; }
+
+// Separation rule (D-73): true when two instruments were both found and on the same bus
+// (the Nicla Sense ME and an RM3100 must not be; kSensorBusNone = not found, never shared).
+inline bool sensor_buses_shared(uint8_t a, uint8_t b) { return a != kSensorBusNone && a == b; }
 
 // Preferred-then-alternate probing: try_bus(bus) attempts the instrument's begin() on one
 // bus and returns true when it answered. Returns the bus that answered, or kSensorBusNone.

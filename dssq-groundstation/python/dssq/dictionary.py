@@ -138,21 +138,29 @@ ENV_FLAG_BITS = ["BARO", "BSEC", "TEMP_RH", "GAS"]
 RF_FLAG_BITS = ["RX_BOOST", "LBT"]
 
 # Sensor-bus event reports (D-73; flight fsw/flight.cpp, literal formats - the cross-check test
-# compares them with the flight source). The bus is "A4/A5" (NICLA bus, Wire2) or "Qwiic"
-# (MAG bus, Wire1); evr_instrument_bus() gives the instrument and its bus named by a text.
+# compares them with the flight source; one id may print more than one format). The bus is
+# "A4/A5" (NICLA bus, Wire2) or "Qwiic" (MAG bus, Wire1); evr_instrument_bus() gives the
+# instrument and its bus named by a text, evr_not_separated() the pair a WARN 0x060D names
+# when the Nicla Sense ME and an RM3100 share a bus, evr_instrument_lost() the instrument of
+# a loss report. The AS7265X has no preferred bus (0x0706 names it, never a 0x060D).
 SENSOR_BUSES = ("A4/A5", "Qwiic")
-SENSOR_BUS_EVRS: dict[int, str] = {
-    0x0605: "I2C bus fault on %s (%u consecutive errors) - %s",
-    0x0606: "Nicla Sense ME stopped responding on %s",
-    0x060A: "I2C bus clear on %s: SDA or SCL still low after %u clocks",
-    0x060B: "instrument acquired: %s on %s",
-    0x060D: "%s found on %s; the recommended bus is %s (docs/03)",
-    0x060E: "RM3100 %s stopped responding (%u failed samples on %s)",
-    0x0706: "AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s",
+SENSOR_BUS_EVRS: dict[int, tuple[str, ...]] = {
+    0x0605: ("I2C bus fault on %s (%u consecutive errors) - %s",),
+    0x0606: ("Nicla Sense ME stopped responding on %s",),
+    0x060A: ("I2C bus clear on %s: SDA or SCL still low after %u clocks",),
+    0x060B: ("instrument acquired: %s on %s",),
+    0x060D: ("%s found on %s; the recommended bus is %s (docs/03)",
+             "%s and %s both on %s: not separated (docs/03)"),
+    0x060E: ("RM3100 %s stopped responding (%u failed samples on %s)",),
+    0x0706: ("AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s",),
 }
+EVR_NICLA_LOST = 0x0606
 EVR_INSTRUMENT_ACQUIRED = 0x060B
 EVR_WRONG_BUS = 0x060D
 EVR_RM3100_LOST = 0x060E
+EVR_SPEC_IDENTITY = 0x0706
+EVR_BOOT = 0x0001                   # flight boot report: every instrument is acquired (and reported) again
+_NOT_SEPARATED = ": not separated (docs/03)"
 
 
 def evr_instrument_bus(event_id: int, text: str) -> tuple[str, str] | None:
@@ -164,12 +172,38 @@ def evr_instrument_bus(event_id: int, text: str) -> tuple[str, str] | None:
     elif event_id == EVR_WRONG_BUS:
         name, sep, rest = text.partition(" found on ")
         bus = rest.partition(";")[0]
-    elif event_id == 0x0706 and text.startswith("AS7265X "):
+    elif event_id == EVR_SPEC_IDENTITY and text.startswith("AS7265X "):
         name = "AS7265X"
         _head, sep, bus = text.rpartition(" on ")
     else:
         return None
     return (name, bus) if sep and name and bus in SENSOR_BUSES else None
+
+
+def evr_not_separated(event_id: int, text: str) -> tuple[str, str, str] | None:
+    """(Nicla name, RM3100 name, bus) of the WARN 0x060D "<a> and <b> both on <bus>: not
+    separated (docs/03)" (D-73 separation rule), else None. Untrusted text: only the two bus
+    names are accepted."""
+    if event_id != EVR_WRONG_BUS or not text.endswith(_NOT_SEPARATED):
+        return None
+    pair, sep, bus = text[:-len(_NOT_SEPARATED)].rpartition(" both on ")
+    a, sep2, b = pair.partition(" and ")
+    return (a, b, bus) if sep and sep2 and a and b and bus in SENSOR_BUSES else None
+
+
+def evr_instrument_lost(event_id: int, text: str) -> tuple[str, str] | None:
+    """(instrument, bus) of a loss report, else None: 0x0606 "Nicla Sense ME stopped responding
+    on <bus>", 0x060E "RM3100 <ob|ib> stopped responding (<n> failed samples on <bus>)" (the
+    RM3100 named as in 0x060B: "RM3100 outboard" / "RM3100 inboard")."""
+    if event_id == EVR_NICLA_LOST and text.startswith("Nicla Sense ME stopped responding on "):
+        name, bus = "Nicla Sense ME", text.rpartition(" on ")[2]
+    elif event_id == EVR_RM3100_LOST and text.startswith("RM3100 ") and text.endswith(")"):
+        unit = text[len("RM3100 "):].partition(" ")[0]
+        name = {"ob": "RM3100 outboard", "ib": "RM3100 inboard"}.get(unit, "")
+        bus = text[:-1].rpartition(" on ")[2]
+    else:
+        return None
+    return (name, bus) if name and bus in SENSOR_BUSES else None
 
 
 def decode_bits(value: int | None, names: list[str]) -> list[str]:
