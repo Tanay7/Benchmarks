@@ -89,7 +89,7 @@ hardware**; every such item is listed in [20_Known_Limitations.md](20_Known_Limi
 | [D-46](#d-46) | CCSDS 121.0-B-3 lossless compression for SPECBURST | Science |
 | [D-47](#d-47) | Log-encoded spectra; heuristics and approximations labelled | Science |
 | [D-48](#d-48) | Magnetometer calibration fitted on the ground, applied on board to attitude only | Science |
-| [D-49](#d-49) | Stored command sequences (Voyager CCS style), RAM only | Autonomy |
+| [D-49](#d-49) | Stored command sequences (Interstellar probe command-computer style), RAM only | Autonomy |
 | [D-50](#d-50) | Beacon urgency levels (Deep Space 1 style) | Autonomy |
 | [D-51](#d-51) | Standard ground products: CCSDS TDM and XTCE | Ground |
 | [D-52](#d-52) | Sensor facts taken from the manufacturers' data, not from libraries | Science |
@@ -680,7 +680,7 @@ Full detail: [22_Bundled_Libraries.md](22_Bundled_Libraries.md).
 | **Status** | Current. Thresholds with a real rotation are **VERIFY on hardware**. |
 
 <a id="d-49"></a>
-### D-49 Stored command sequences (Voyager CCS style), RAM only
+### D-49 Stored command sequences (Interstellar probe command-computer style), RAM only
 
 | | |
 |---|---|

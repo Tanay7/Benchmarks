@@ -40,7 +40,7 @@ VGQ-1 / DSS-Q1 does exactly that with hobby hardware:
 
 It is a working, end-to-end engineering model, built for the longest range the radios allow
 at a useful data rate ([02](02_Link_Budget_and_RF_Analysis.md)). It does not imitate one
-historic probe; it takes ideas from several (Voyager's stored command sequences, Deep Space 1's
+historic probe; it takes ideas from several (an Interstellar probe's stored command sequences, Deep Space 1's
 beacon levels, the JPL clock "partitions").
 
 ### 1.2 Elements and their deep-space analogues
@@ -630,7 +630,7 @@ A rate or channel change could cut the link; every such change therefore heals b
 
 ### 7.3 Stored command sequences
 
-A Voyager-style table of 32 entries in RAM ([fsw/autonomy.h](../vgq1-spacecraft/sketch/src/fsw/autonomy.h)
+An Interstellar-probe-style table of 32 entries in RAM ([fsw/autonomy.h](../vgq1-spacecraft/sketch/src/fsw/autonomy.h)
 `CommandSequencer`): `SEQLOAD` stores one command (up to 12 octets) at an absolute SCLK time or
 a time relative to `SEQCTRL START`, at most 604800 s (7 days) ahead. The embedded command is
 checked by the same parser as a live command; hazardous commands, `REBOOT`, `SEQLOAD` and

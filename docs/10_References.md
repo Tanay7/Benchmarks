@@ -155,7 +155,7 @@ value for this terrestrial demonstration). Which standards are deliberately not 
 * G. J. Holzmann, "The Power of Ten - Rules for Developing Safety Critical Code", IEEE Computer
   39(6), 2006 (NASA/JPL) - the flight coding rules.
 * Deep Space 1 Beacon Monitor Operations Experiment (NASA JPL) - beacon urgency levels.
-* Voyager Computer Command Subsystem time-tagged sequences - stored command sequences.
+* An Interstellar probe's Computer Command Subsystem time-tagged sequences (J. Taylor (ed.), *Deep Space Communications*, JPL 2014, ch. 3) - stored command sequences.
 
 ## 7 Further reading
 
