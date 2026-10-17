@@ -141,8 +141,8 @@ FIELD_ENUMS = {
     "SPEC.spec_mode": "SPEC_MODES", "SPEC.spec_class": "SPEC_CLASSES"}
 FIELD_BITS = {
     "HK.fdir_flags": "FDIR_BITS", "HK.sensor_health": "SENSOR_BITS", "RF.rf_flags": "RF_FLAG_BITS",
-    "MAG.flags": "MAG_FLAG_BITS", "ATT.flags": "ATT_FLAG_BITS", "ENV.flags": "ENV_FLAG_BITS",
-    "SPEC.flags": "SPEC_FLAG_BITS"}
+    "MAG.flags": "MAG_FLAG_BITS", "ATT.flags": "ATT_FLAG_BITS", "ATT.imu_flags": "IMU_FLAG_BITS",
+    "ENV.flags": "ENV_FLAG_BITS", "SPEC.flags": "SPEC_FLAG_BITS"}
 VARIABLE_DESC = {dic.APID_EVR: "Event report: severity, event id, text (0..80 characters)",
                  dic.APID_RFSCAN: "Spacecraft RF survey: noise per channel",
                  dic.APID_SPECBURST: "AS7265X burst samples (raw or CCSDS 121.0-B-3 payload per encoding)",
@@ -280,6 +280,7 @@ def dictionary_doc() -> dict[str, Any]:
              "RADIO_FAULTS": dic.RADIO_FAULTS, "SPEC_MODES": spectral.MODE_NAMES,
              "SPEC_CLASSES": spectral.CLASS_NAMES, "FDIR_BITS": dic.FDIR_BITS, "SENSOR_BITS": dic.SENSOR_BITS,
              "MAG_FLAG_BITS": dic.MAG_FLAG_BITS, "ATT_FLAG_BITS": dic.ATT_FLAG_BITS,
+             "IMU_FLAG_BITS": dic.IMU_FLAG_BITS,
              "ENV_FLAG_BITS": dic.ENV_FLAG_BITS, "RF_FLAG_BITS": dic.RF_FLAG_BITS,
              "SPEC_FLAG_BITS": SPEC_FLAG_BITS}
     led_max = dict(zip(spectral.LAMP_NAMES, spectral.LED_MAX_CODE, strict=True))

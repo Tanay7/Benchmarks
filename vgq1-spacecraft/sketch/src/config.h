@@ -170,24 +170,37 @@ static const uint32_t kSdlsEpochWaitS = 120;
 // a restore (EGSE absent) they are accepted again from the in-RAM counter, EVR 0x0124.
 static const uint32_t kSdlsSnWaitS = 120;
 
-// ---- Sensor bus: one I2C bus on the UNO Q header pins, no multiplexer -------------------
-//   Nicla Sense ME  0x2A  attitude reference unit (custom firmware, two 32-octet pages)
-//   AS7265X         0x49  SparkFun Spectral Triad (18 channels, 410-940 nm)
+// ---- Sensor buses (D-73): two I2C buses with fixed roles, no multiplexer ------------------
+// ArduinoCore-zephyr variant arduino_uno_q_stm32u585xx: i2cs = <&i2c2>, <&i2c4>, <&i2c3>, i.e.
+// Wire = I2C2, Wire1 = I2C4, Wire2 = I2C3. Wire (header "SDA"/"SCL", PB11/PB10) is the E22
+// UART here and is never started. All pins are 3.3 V only (ABX00162): every pull-up of both
+// buses goes to 3.3 V, one set per bus.
+//
+// NICLA bus = Wire2 = I2C3 on header A4 (SDA, PC1, JANALOG 13) / A5 (SCL, PC0, JANALOG 14),
+// with the GPIO bus clear (I2cBus):
+//   Nicla Sense ME  0x2A  attitude reference unit (custom firmware, three 32-octet pages),
+//                         wired through its ESLOV connector J5: pin 4 SDA -> A4, pin 3 SCL -> A5,
+//                         pin 1 5 V, pin 5 GND, pin 2 INT not connected (D-74)
+//   AS7265X         0x49  SparkFun Spectral Triad (18 channels, 410-940 nm), recommended here
+#define NICLA_WIRE Wire2
+// MAG bus = Wire1 = I2C4 on the Qwiic socket (pin 3 SDA PD13, pin 4 SCL PD12, pin 2 +3V3):
+// the boom magnetometers ALONE, so the long boom cable is isolated from the attitude
+// reference. Controller re-initialisation only, no GPIO bus clear: PD12/PD13 have no
+// Arduino pin number, and the devicetree that arduino:zephyr 0.90.0, 1.0.0 and main give a
+// sketch has no scl-gpios / sda-gpios on the i2c4 node (a GPIO_DT_SPEC_GET on it does not
+// compile on any of the three).
 //   RM3100 outboard 0x20  science magnetometer at the boom tip   (SA1 = 0, SA0 = 0)
 //   RM3100 inboard  0x23  OPTIONAL, boom mid-point, auto-detected (SA1 = 1, SA0 = 1)
-// Wire2 = I2C3 on header pins A4 (SDA, PC1) and A5 (SCL, PC0): ArduinoCore-zephyr
-// variant arduino_uno_q_stm32u585xx, i2cs = <&i2c2>, <&i2c4>, <&i2c3>. A4/A5 are 3.3 V
-// only (ABX00162): every pull-up on this bus goes to 3.3 V.
-#define SENSOR_WIRE Wire2                       // header A4 = SDA (PC1), A5 = SCL (PC0)
-// Wire1 (I2C4, PD12/PD13) is the Qwiic connector (3.3 V). Only the AS7265X may be plugged
-// in there instead of A4/A5: the driver probes A4/A5 first, then Qwiic, at boot and at
-// every re-probe, and uses the bus it answers on (owner request 2026-10-12, D-13).
-#define QWIIC_WIRE Wire1
-// The same two pins as GPIOs, for the bus clear (I2cBus, open drain emulated):
+#define MAG_WIRE Wire1
+// Every instrument is probed on its preferred bus first and on the other bus second, at
+// boot and at every re-probe (fsw/sensor_bus.h): the Nicla and the AS7265X A4/A5 then
+// Qwiic (the AS7265X as since D-13), the RM3100s Qwiic then A4/A5. One found only on the
+// other bus is used, with WARN EVR 0x060D naming the recommended bus.
+// The A4/A5 pins as GPIOs, for the NICLA bus clear (I2cBus, open drain emulated):
 // digital-pin-gpios index 18 = A4 = PC1, 19 = A5 = PC0 (variant overlay).
 static const int      kPinSensorSda  = 18;
 static const int      kPinSensorScl  = 19;
-static const uint32_t kI2cClockHz    = 100000;  // 100 kHz: tolerant of a long boom cable
+static const uint32_t kI2cClockHz    = 100000;  // 100 kHz, both buses: tolerant of a long boom cable
 // Bus clear (AS-T6): SCL half period and pulse limit (the I2C-bus recovery procedure:
 // up to nine clocks release a target that holds SDA, then a STOP).
 static const uint32_t kI2cClearHalfPeriodUs = 5;

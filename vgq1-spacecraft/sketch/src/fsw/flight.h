@@ -7,12 +7,13 @@
 //    * FDS  (flight data subsys) : sampling, packetisation, VC0..3 multiplexing,
 //                                  SDLS TM protection, SSR, CFDP file delivery
 //    * AACS (attitude)           : Nicla Sense ME fusion + independent TRIAD
-//                                  (calibrated boom RM3100 or BMM150)
+//                                  (calibrated boom RM3100 or BMM150) + BHI260AP
+//                                  6-DOF (game rotation vector, 1 s window statistics)
 //    * Telecom                   : one vgq::Radio (E22-400T33D, E22-400T37S or
 //                                  SX126x) driven by events, duty-cycle control,
 //                                  downlink load plan
-//    * Fault protection (FDIR)   : command loss, thermal, bus, radio monitors,
-//                                  beacon urgency level
+//    * Fault protection (FDIR)   : command loss, thermal, bus (per sensor bus, D-73),
+//                                  radio monitors, instrument loss, beacon urgency level
 //  The protocol- and security-critical decisions live in pure, host-tested
 //  modules (datalink.h, commands.h, autonomy.h, spectral.h, tlm_packets.h,
 //  ssr.h); this class wires them to the hardware. Phase B specification PB-8.6
@@ -44,6 +45,7 @@
 #include "datalink.h"
 #include "rpc_mailbox.h"
 #include "sclk.h"
+#include "sensor_bus.h"
 #include "spectral.h"
 #include "ssr.h"
 #include "status_display.h"
@@ -105,7 +107,12 @@ class Flight {
   void report_radio(bool boot);                         // EVR 0x0306
   void report_radio_model();                            // EVR 0x0308 (E22 model strap, contract 33)
   void report_tcxo();                                   // EVR 0x0309 (SX126x TCXO fall-back, DS-09)
-  void report_spec_identity();                          // EVR 0x0706
+  void report_spec_identity();                          // EVR 0x0706 (+ 0x060D off its bus)
+  // EVR 0x060B "instrument acquired: <name> on <bus>", and WARN 0x060D when `bus` is not the
+  // instrument's preferred bus (D-73).
+  void report_acquired(const char* name, uint8_t bus, uint8_t preferred);
+  bool probe_nicla();                                   // A4/A5 then Qwiic; aru_bus_
+  bool probe_rm3100(uint8_t unit, uint16_t cc);         // Qwiic then A4/A5; mag_bus_of_[unit]
   void run_boot_bist();
 
   // ---- telecom ----
@@ -166,10 +173,12 @@ class Flight {
   void service_mag(uint32_t now);
   void start_mag_sample();
   void finish_mag_unit(uint8_t unit, Rm3100& m);
+  void note_mag_sample(uint8_t unit, bool ok);          // RM3100 loss detection (D-73)
   void service_bist(uint32_t now);
   void run_bist_unit(uint8_t unit);
-  void bus_recover(uint32_t now, const char* why);
-  void reprobe_instruments(uint32_t now);               // C28: units missing since boot
+  I2cBus& bus_of(uint8_t b) { return b == SBUS_MAG ? mag_bus_ : nicla_bus_; }
+  void bus_recover(uint8_t bus, uint32_t now, const char* why);   // that bus only, its own limiter
+  void reprobe_instruments(uint32_t now);               // C28: units missing since boot or lost
   bool apply_mag_cc();                                  // MAGCC between samples (C29)
   void note_valid_tc(uint32_t now);                     // command-loss timer and HK age
 
@@ -188,8 +197,10 @@ class Flight {
   Radio& radio_ = flight_radio();
   RadioSettings rcfg_, pending_cfg_, revert_cfg_;
   RxPacket rx_pkt_;
-  I2cBus bus_;
-  I2cBus qwiic_;                         // QWIIC_WIRE: only the AS7265X may be there
+  I2cBus nicla_bus_;                     // NICLA_WIRE, A4/A5, bus clear: Nicla Sense ME (+ AS7265X)
+  I2cBus mag_bus_;                       // MAG_WIRE, Qwiic, re-init only: the boom RM3100s
+  RecoverLimiter recover_[kSensorBuses]; // per-bus FDIR recovery rate limit (D-73)
+  bool bus_clear_failed_[kSensorBuses] = {false, false};   // the last bus clear left SDA/SCL low
   NiclaAru aru_;                         // Nicla Sense ME (attitude reference unit)
   As7265x spec_;                         // AS7265X spectrometer driver
   SpecConfig spec_cfg_ = spec_default_config();   // SPECCFG / SPECMODE configuration in force
@@ -310,10 +321,18 @@ class Flight {
   float bus_temp_c_ = NAN;               // Nicla Sense ME temperature (spacecraft bus); NAN = no fresh reading
   uint16_t mag_cc_ = 200;                // RM3100 cycle count in force (MAGCC; begin() default)
   bool mag_cc_pending_ = false;          // MAGCC waits for the end of a sample
-  ReprobeTimer reprobe_;                 // re-acquisition of instruments missing since boot
-  bool bus_clear_failed_ = false;        // the last bus clear left SDA/SCL low
+  ReprobeTimer reprobe_;                 // re-acquisition of instruments missing since boot or lost
+  uint8_t aru_bus_ = kSensorBusNone;     // bus the Nicla Sense ME answered on (SensorBus)
+  uint8_t mag_bus_of_[kMagUnits] = {kSensorBusNone, kSensorBusNone};   // ... each RM3100
+  uint8_t spec_bus_reported_ = kSensorBusNone;   // AS7265X bus of the last identity EVR
+  LossCounter mag_loss_[kMagUnits];      // consecutive failed RM3100 samples (D-73)
   AruReading aru_last_;
   bool aru_valid_ = false, aru_env_valid_ = false;
+  // BHI260AP 6-DOF (ARU page 2, D-75): the latest page, whether it pairs with aru_last_
+  // (same ARU rebuild), and the window statistics of the current ATT period.
+  AruImu aru_imu_;
+  bool aru_imu_valid_ = false, aru_imu_paired_ = false;
+  ImuStats imu_stats_;
   float last_mag_ut_[3] = {0, 0, 0};     // latest BMM150 sample (ATT, TRIAD fallback)
   uint8_t bist_pending_ = 0;             // MAGBIST units waiting for a PA-off, lamps-off window
   uint32_t bist_wait_t0_ = 0;
@@ -324,8 +343,6 @@ class Flight {
   bool spec_unknown_reported_ = false;   // EVR 0x0707 LAMP STATE UNKNOWN raised
   bool no_lamp_reported_ = false;        // EVR 0x0707 for ERR_NO_LAMP, once per configuration
   uint16_t burst_tx_frames_ = 0;         // frames transmitted while the burst ran (C-26)
-  uint32_t last_recover_ms_ = 0;
-  bool recovered_once_ = false;          // last_recover_ms_ valid
   uint32_t i2c_err_snapshot_ = 0, i2c_quiet_s_ = 0;
 
   // ---- CFDP ----

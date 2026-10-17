@@ -123,7 +123,12 @@ size_t pack_att(const AttPacket& p, uint8_t* out) {
   for (uint8_t i = 0; i < 4; ++i) w.i16(p.q_fus[i]);
   w.u16(p.q_fus_acc_mrad);
   for (uint8_t i = 0; i < 4; ++i) w.i16(p.q_triad[i]);
-  return w.n;                                                     // kAttLen = 37
+  w.u8(p.imu_flags);                                              // ATT v4 (D-75) from offset 37
+  for (uint8_t i = 0; i < 4; ++i) w.i16(p.q_grv[i]);
+  w.u8(p.imu_nwin); w.u16(p.vib_rms_dmg); w.u16(p.vib_peak_mg);
+  for (uint8_t i = 0; i < 3; ++i) w.i16(p.rate_mean_cdps[i]);
+  w.u16(p.rate_peak_ddps);
+  return w.n;                                                     // kAttLen = 59
 }
 
 size_t pack_env(const EnvPacket& p, uint8_t* out) {

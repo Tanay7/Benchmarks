@@ -132,7 +132,7 @@ Conventions: all fields big-endian (CCSDS network order). Engineering value = ra
 | 13 | 42 | `body_rms` | u16 | 0.001 | uT | 0xFFFF |  | Body BMM150 (Nicla Sense ME) RMS fluctuation in interval |
 | 14 | 44 | `rm3100_cc` | u16 | raw |  | reading |  | RM3100 cycle count |
 
-### APID 0x021 - ATT: Attitude determination (Nicla Sense ME + TRIAD) (37 octets of user data, VC1)
+### APID 0x021 - ATT: Attitude determination (Nicla Sense ME + TRIAD + BHI260AP 6-DOF), v4 (59 octets of user data, VC1)
 
 | # | Offset | Field | Type | Scale / decoder | Unit | N/A | Limits (red low / yellow low / yellow high / red high) | Description |
 |---|---|---|---|---|---|---|---|---|
@@ -143,18 +143,30 @@ Conventions: all fields big-endian (CCSDS network order). Engineering value = ra
 | 4 | 7 | `gyro_x` | i16 | 0.1 | deg/s | 0x7FFF |  | Angular rate X |
 | 5 | 9 | `gyro_y` | i16 | 0.1 | deg/s | 0x7FFF |  | Angular rate Y |
 | 6 | 11 | `gyro_z` | i16 | 0.1 | deg/s | 0x7FFF |  | Angular rate Z |
-| 7 | 13 | `mag_x` | i16 | 0.1 | uT | 0x7FFF |  | BMM150 field (latest) X |
-| 8 | 15 | `mag_y` | i16 | 0.1 | uT | 0x7FFF |  | BMM150 field (latest) Y |
-| 9 | 17 | `mag_z` | i16 | 0.1 | uT | 0x7FFF |  | BMM150 field (latest) Z |
-| 10 | 19 | `q_fus_w` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion W |
-| 11 | 21 | `q_fus_x` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion X |
-| 12 | 23 | `q_fus_y` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion Y |
-| 13 | 25 | `q_fus_z` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion Z |
+| 7 | 13 | `mag_x` | i16 | 0.1 | uT | 0x7FFF |  | BMM150 field, magnetometer corrected by the BHI260 (BSX), latest X |
+| 8 | 15 | `mag_y` | i16 | 0.1 | uT | 0x7FFF |  | BMM150 field, magnetometer corrected by the BHI260 (BSX), latest Y |
+| 9 | 17 | `mag_z` | i16 | 0.1 | uT | 0x7FFF |  | BMM150 field, magnetometer corrected by the BHI260 (BSX), latest Z |
+| 10 | 19 | `q_fus_w` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion (9-DOF rotation vector) W |
+| 11 | 21 | `q_fus_x` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion (9-DOF rotation vector) X |
+| 12 | 23 | `q_fus_y` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion (9-DOF rotation vector) Y |
+| 13 | 25 | `q_fus_z` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260 fusion quaternion (9-DOF rotation vector) Z |
 | 14 | 27 | `q_fus_acc` | u16 | 0.001 | rad | 0xFFFF |  | BHI260 fusion accuracy estimate |
 | 15 | 29 | `q_triad_w` | i16 | 6.10352e-05 |  | 0x7FFF |  | TRIAD quaternion W |
 | 16 | 31 | `q_triad_x` | i16 | 6.10352e-05 |  | 0x7FFF |  | TRIAD quaternion X |
 | 17 | 33 | `q_triad_y` | i16 | 6.10352e-05 |  | 0x7FFF |  | TRIAD quaternion Y |
 | 18 | 35 | `q_triad_z` | i16 | 6.10352e-05 |  | 0x7FFF |  | TRIAD quaternion Z |
+| 19 | 37 | `imu_flags` | u8 | raw |  | - |  | b0 game rotation vector valid, b1 >= 1 window aggregated, b2 q_grv and q_fus from one ARU rebuild, b3 accel near full scale, b4 gyro near full scale, b5 windows or samples missed, b6 game rotation vector present in the BHI260AP firmware (IMU_FLAG_BITS) |
+| 20 | 38 | `q_grv_w` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260AP game rotation vector (6-DOF, no magnetometer; heading relative), latest W |
+| 21 | 40 | `q_grv_x` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260AP game rotation vector (6-DOF, no magnetometer; heading relative), latest X |
+| 22 | 42 | `q_grv_y` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260AP game rotation vector (6-DOF, no magnetometer; heading relative), latest Y |
+| 23 | 44 | `q_grv_z` | i16 | 6.10352e-05 |  | 0x7FFF |  | BHI260AP game rotation vector (6-DOF, no magnetometer; heading relative), latest Z |
+| 24 | 46 | `imu_nwin` | u8 | raw |  | - |  | 1 s IMU windows aggregated (0 = none) |
+| 25 | 47 | `vib_rms` | u16 | 0.1 | mg | 0xFFFF |  | Vibration: RMS of the windows' acceleration RMS (mean removed, 25 Hz samples) |
+| 26 | 49 | `vib_peak` | u16 | raw | mg | 0xFFFF |  | Largest deviation of one acceleration sample from its window mean |
+| 27 | 51 | `rate_mean_x` | i16 | 0.01 | deg/s | 0x7FFF |  | Angular rate, mean of the window means X |
+| 28 | 53 | `rate_mean_y` | i16 | 0.01 | deg/s | 0x7FFF |  | Angular rate, mean of the window means Y |
+| 29 | 55 | `rate_mean_z` | i16 | 0.01 | deg/s | 0x7FFF |  | Angular rate, mean of the window means Z |
+| 30 | 57 | `rate_peak` | u16 | 0.1 | deg/s | 0xFFFF |  | Largest \|angular rate\| of one sample |
 
 ### APID 0x022 - SPEC: AS7265X spectrometer (SPEC v3.1) (129 octets of user data, VC1)
 
@@ -294,6 +306,7 @@ Seconds between packets (overridable per packet with `PKTRATE`). The spacecraft 
 | 7 | AS7265X |
 | 8 | RM3100_OB |
 | 9 | RM3100_IB |
+| 10 | ME_GRV |
 
 ### MAG.flags
 
@@ -317,6 +330,18 @@ Seconds between packets (overridable per packet with `PKTRATE`). The spacecraft 
 | 4 | TRIAD |
 | 5 | MAG_SCALE |
 | 6 | TRIAD_RM3100 |
+
+### ATT.imu_flags (ATT v4, BHI260AP 6-DOF)
+
+| Bit | Name |
+|---|---|
+| 0 | GRV |
+| 1 | STATS |
+| 2 | PAIRED |
+| 3 | ACC_SAT |
+| 4 | GYRO_SAT |
+| 5 | GAP |
+| 6 | GRV_PRESENT |
 
 ### ENV.flags
 
@@ -587,20 +612,22 @@ Extracted from the flight sources. `+n` = base id plus a code (e.g. the TC rejec
 | 0x0602 | ERROR | `radio change NOT confirmed by uplink - reverting to ch %u code %u` |
 | 0x0603 | INFO | `transmitter re-enabled` |
 | 0x0604 | FATAL | `PA over-temperature: transmitter OFF for %u s, SAFE` |
-| 0x0605 | ERROR | `I2C bus fault (%u consecutive errors) - bus clear + re-init` |
-| 0x0606 | ERROR | `Nicla Sense ME stopped responding` |
+| 0x0605 | ERROR | `I2C bus fault on %s (%u consecutive errors) - %s` |
+| 0x0606 | ERROR | `Nicla Sense ME stopped responding on %s` |
 | 0x0607 | INFO | `Nicla Sense ME responding again` |
 | 0x0608 | WARN | `brownout reset: TX power derated (code %u) - check radio supply` |
 | 0x0609 | INFO | `I2C bus healthy again: FDIR I2C_BUS cleared` |
-| 0x060A | ERROR | `I2C bus clear: SDA or SCL still low after %u clocks` |
-| 0x060B | INFO | `instrument acquired: %s` |
+| 0x060A | ERROR | `I2C bus clear on %s: SDA or SCL still low after %u clocks` |
+| 0x060B | INFO | `instrument acquired: %s on %s` |
 | 0x060C | ERROR | `IWDG settings not confirmed in %lu ms: watchdog runs, timeout may be short` |
+| 0x060D | WARN | `%s found on %s; the recommended bus is %s (docs/03)` |
+| 0x060E | WARN | `RM3100 %s stopped responding (%u failed samples on %s)` |
 | 0x0701 | INFO | `spectral event: angle %u.%02u deg (threshold %u.%02u)` |
 | 0x0702 | INFO | `light source %s -> %s (%u %%)` |
 | 0x0703 | INFO | `%s` |
 | 0x0704 | INFO | `BURST START n=%u s cycles=%u` |
 | 0x0705 | WARN | `AS7265X recovered by soft reset` |
-| 0x0706 | INFO | `AS7265X HW %02X/%02X FW %u.%u.%u devices %s` |
+| 0x0706 | INFO | `AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s` |
 | 0x0707 | WARN | `AS7265X %s` |
 | 0x0800 | WARN | `HIBERNATE: duty-cycled receive, beacon every %u s` |
 | 0x0801 | WARN | `WAKE: %s` |

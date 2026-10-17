@@ -91,7 +91,7 @@ CALLSIGN = "N0CALL"                                     # flight VGQ_CALLSIGN de
 IDLE_TEXT = f"DE {CALLSIGN} VGQ-1 ".encode("ascii")
 MODE_NAMES = ("BOOT", "SAFE", "CRUISE", "ENCOUNTER", "TEST")
 BEACON_NOMINAL, BEACON_INTERESTING, BEACON_IMPORTANT, BEACON_URGENT = 0, 1, 2, 3
-SENSORS_ALL = 0x03FF                                    # every SENSOR_BITS instrument healthy
+SENSORS_ALL = 0x03FF                                    # b0..b9 healthy; b10 ME_GRV clear: no 6-DOF part (ATT v4)
 RS_RESCUE_ERRORS = (4, 12)                              # symbol errors on a CRC-failed CADU (<= 16)
 NOISE_FLOOR_NF_DB = link.SX126X_NF_DB
 DEFAULT_FIELD_UT = 50.0
@@ -1137,7 +1137,10 @@ class SimSpacecraft(link.RadioBackend):
                              "gyro_x": round(math.degrees(TUMBLE_RAD_S[2]), 1),
                              "gyro_y": round(math.degrees(TUMBLE_RAD_S[1]), 1),
                              "gyro_z": round(math.degrees(TUMBLE_RAD_S[0]), 1),
-                             "mag_x": 19.5, "mag_y": 0.5, "mag_z": 44.0, "q_fus_acc": 0.035}
+                             "mag_x": 19.5, "mag_y": 0.5, "mag_z": 44.0, "q_fus_acc": 0.035,
+                             # ATT v4 (D-75): the BHI260AP 6-DOF part is not simulated yet - sent
+                             # as the flight sends it without ARU page 2 (sentinels, no flags).
+                             "imu_flags": 0, "imu_nwin": 0}
         # q = body -> NED (the simulator's world is NED: MAG_FIELD_DIR points down). The flight
         # fields differ in convention: q_fus = BHI260 device -> ENU (Android world), q_triad =
         # TRIAD NED -> body (attitude.h triad_ned). ENU <-> NED is a 180 deg turn about (1,1,0).

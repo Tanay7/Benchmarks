@@ -201,7 +201,7 @@ def test_flight_header_constants_match_dictionary() -> None:
     assert [n for n, _ in sorted(fdir.items(), key=lambda kv: kv[1])] == dd.FDIR_BITS
     sns = _enum(tlm, r"\bSNS_(\w+)\s*=\s*1u\s*<<\s*(\d+)")
     assert [n for n, _ in sorted(sns.items(), key=lambda kv: kv[1])] == dd.SENSOR_BITS
-    for prefix, names in (("MAG_F_", dd.MAG_FLAG_BITS), ("ATT_F_", dd.ATT_FLAG_BITS),
+    for prefix, names in (("MAG_F_", dd.MAG_FLAG_BITS), ("ATT_F_", dd.ATT_FLAG_BITS), ("IMU_F_", dd.IMU_FLAG_BITS),
                           ("ENV_F_", dd.ENV_FLAG_BITS), ("RF_F_", dd.RF_FLAG_BITS)):
         bits = sorted(_enum(tlm, rf"\b{prefix}(\w+)\s*=\s*(0x[0-9A-Fa-f]+)").values())
         assert bits == [1 << i for i in range(len(names))], prefix
@@ -216,6 +216,45 @@ def test_flight_header_constants_match_dictionary() -> None:
     spec = (SRC / "fsw" / "spectral.h").read_text()
     assert _enum(spec, r"\b(kSpecBurstHdrLen|kSpecV31Len)\s*=\s*(\d+)") == {
         "kSpecBurstHdrLen": spectral.BURST_HDR_LEN, "kSpecV31Len": spectral.SPEC_V31_LEN}
+
+
+def test_sensor_bus_evrs_match_flight_source() -> None:
+    """dictionary.SENSOR_BUS_EVRS (D-73) are the flight's literal formats, and every flight
+    EVR of those ids prints one of them; the bus names are the flight's sensor_bus_name()."""
+    flight = (SRC / "fsw" / "flight.cpp").read_text()
+    calls: dict[int, set[str]] = {}
+    for m in re.finditer(r'evr\(\d,\s*(0x[0-9A-Fa-f]+)\s*,\s*"([^"]*)"', flight):
+        calls.setdefault(int(m.group(1), 16), set()).add(m.group(2))
+    for eid, fmt in dd.SENSOR_BUS_EVRS.items():
+        assert calls.get(eid) == {fmt}, (hex(eid), calls.get(eid), fmt)
+    names = re.search(r'b == SBUS_NICLA \? "([^"]+)" : b == SBUS_MAG \? "([^"]+)"',
+                      (SRC / "fsw" / "sensor_bus.h").read_text())
+    assert names is not None and names.groups() == dd.SENSOR_BUSES
+    assert dd.evr_instrument_bus(0x060B, "instrument acquired: RM3100 outboard on Qwiic") == \
+        ("RM3100 outboard", "Qwiic")
+    assert dd.evr_instrument_bus(0x060D, "Nicla Sense ME found on Qwiic; the recommended bus is A4/A5 (docs/03)") == \
+        ("Nicla Sense ME", "Qwiic")
+    assert dd.evr_instrument_bus(0x0706, "AS7265X HW 40/41 FW 12.0.0 devices NIR+VIS+UV on A4/A5") == \
+        ("AS7265X", "A4/A5")
+    for eid, text in ((0x060B, "instrument acquired: X on Mars"), (0x060B, "instrument acquired: X"),
+                      (0x0605, "I2C bus fault on A4/A5 (11 consecutive errors) - re-init"),
+                      (0x060D, "found on Qwiic"), (0x0706, "AS7265X HW 40/41 devices NIR")):
+        assert dd.evr_instrument_bus(eid, text) is None, (hex(eid), text)
+
+
+def test_aru_page2_constants_match_flight() -> None:
+    """The Nicla ARU firmware's page-2 flag bits and magic (nicla_sense_me_aru.ino) equal the
+    flight decoder's (fsw/attitude.h AruImuFlag, kAruMagicImu), and the page select accepts
+    exactly pages 0..2 (D-75)."""
+    aru = (ROOT / "nicla_sense_me_aru" / "nicla_sense_me_aru.ino").read_text()
+    att = (SRC / "fsw" / "attitude.h").read_text()
+    fw = _enum(aru, r"\bkF_(\w+)\s*=\s*(0x[0-9A-Fa-f]+)")
+    fl = _enum(att, r"\bARU_IMU_(\w+)\s*=\s*(0x[0-9A-Fa-f]+)")
+    assert fw == {"GRV": 1, "STATS": 2, "ACC_SAT": 4, "GYRO_SAT": 8, "MISSED": 16, "GRV_PRESENT": 32,
+                  "ACC_RANGE": 64}
+    assert fl == fw
+    assert "s[0] = 0xA9;" in aru and _enum(att, r"\b(kAruMagicImu)\s*=\s*(0x[0-9A-Fa-f]+)") == {"kAruMagicImu": 0xA9}
+    assert re.search(r"static const uint8_t kPages = 3;", aru) and "(v >= 0 && v < kPages) ? v : 0" in aru
 
 
 # ---- integration downlinks (test_integration.cpp) --------------------------------------
@@ -356,8 +395,8 @@ def test_integration_packets_bit_exact_with_expected_values(integration: dict[st
                     assert values["cmd_source"] == dd.CMD_SOURCE_STORED and values["tc_seq"] == 0
                 if p.apid == dd.APID_MAG:
                     assert values["flags"] == 0x30
-                if p.apid == dd.APID_ATT:
-                    assert values["flags"] == 0x7F
+                if p.apid == dd.APID_ATT:                    # ATT v4 (D-75): imu_flags 0x67
+                    assert values["flags"] == 0x7F and values["imu_flags"] == 0x67 and values["imu_nwin"] == 8
                 if p.apid == dd.APID_SPECBURST:
                     encodings.add(values["encoding"])
                     smp = [(x["dt_ms"], x["raw"]) for x in values["samples"]]
@@ -558,7 +597,7 @@ def test_uplink_round_trip_through_flight_tc_accept(vectors: Path) -> None:
 def test_dictionary_structure() -> None:
     assert dd.packet_len(dd.APID_HK) == 78
     assert [dd.packet_len(a) for a in (dd.APID_RF, dd.APID_CMDVER, dd.APID_TIMECORR, dd.APID_MAG, dd.APID_ATT,
-                                       dd.APID_SPEC, dd.APID_ENV)] == [49, 8, 10, 46, 37, 129, 24]
+                                       dd.APID_SPEC, dd.APID_ENV)] == [49, 8, 10, 46, 59, 129, 24]
     assert not dd.VARIABLE_APIDS & set(dd.PACKETS)
     assert set(dd.PACKET_NAMES) == set(dd.PACKETS) | dd.VARIABLE_APIDS == set(dd.APID_VC)
     assert dd.APID_VC[dd.APID_CFDP] == 3 and VC_NAMES[3] == "FILE (CFDP)" and VC_NAMES[63] == "IDLE/OID (USLP)"
@@ -573,7 +612,9 @@ def test_dictionary_structure() -> None:
     assert hk[-6:] == ["seq_state", "seq_count", "seq_next_dt_s", "mag_bist", "magcal_state", "beacon_level"]
     assert dd.SDLS_TM_STATES == sd.TM_STATE_NAMES and dd.CMD_ERRORS[7] == "BUSY"
     assert {16, 17, 18, 19} <= set(dd.RADIO_FAULTS) and not hasattr(dd, "AIR_RATES_BPS")
-    assert dd.SENSOR_INSTRUMENT_MASK == 0x0381 and len(dd.SENSOR_BITS) == 10
+    assert dd.SENSOR_INSTRUMENT_MASK == 0x0381 and len(dd.SENSOR_BITS) == 11 and dd.SENSOR_BITS[10] == "ME_GRV"
+    att = [f[0] for f in dd.PACKETS[dd.APID_ATT]["fields"]]          # ATT v4 (D-75): v3 fields first
+    assert att.index("imu_flags") == 19 and att[-1] == "rate_peak" and len(att) == 31
     assert list(spectral.EVR_SPECTRAL_IDS) == list(range(0x0701, 0x0708))
 
 
@@ -607,6 +648,8 @@ def test_bit_and_bist_decoders() -> None:
     assert dd.decode_bits(0, dd.FDIR_BITS) == [] and dd.decode_bits(None, dd.FDIR_BITS) == []
     assert dd.decode_bits(0x4001, dd.FDIR_BITS) == ["RADIO_CFG", "HIBERNATE"]
     assert dd.decode_bits(0x0381, dd.SENSOR_BITS) == ["NICLA_ME", "AS7265X", "RM3100_OB", "RM3100_IB"]
+    assert dd.decode_bits(0x0401, dd.SENSOR_BITS) == ["NICLA_ME", "ME_GRV"]
+    assert dd.decode_bits(0x67, dd.IMU_FLAG_BITS) == ["GRV", "STATS", "PAIRED", "GAP", "GRV_PRESENT"]
     assert dd.decode_bits(0x80, dd.RF_FLAG_BITS) == ["b7"]                      # never dropped
     for bad in (-1, 1 << 32, 1.5, True, "3"):
         with pytest.raises(ValueError):

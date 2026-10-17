@@ -4,8 +4,8 @@
 //  loop is bounded by a compile-time constant; all state is static storage.
 //
 //  1. CommandSequencer: stored command sequences (24.1 SEQLOAD 0x1D / SEQCTRL
-//     0x1E, 24.2), the analogue of the time-tagged sequences of the Voyager
-//     Computer Command Subsystem. A 32-entry table holds commands with an
+//     0x1E, 24.2), the analogue of the time-tagged sequences of an Interstellar
+//     probe's Computer Command Subsystem. A 32-entry table holds commands with an
 //     absolute SCLK time or a time relative to the START of the sequence; when
 //     armed, at most one due entry per loop pass is handed to the normal command
 //     dispatcher.

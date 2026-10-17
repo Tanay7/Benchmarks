@@ -104,8 +104,9 @@ enum SensorBit : uint16_t {
   SNS_ME_BARO   = 1u << 5,   // BMP390
   SNS_ME_BSEC   = 1u << 6,   // BME688 + BSEC
   SNS_AS7265X   = 1u << 7,   // spectrometer (set from As7265x::ok() at run time)
-  SNS_RM3100_OB = 1u << 8,   // science magnetometer, boom tip (0x20)
-  SNS_RM3100_IB = 1u << 9,   // optional second RM3100, boom mid-point (0x23)
+  SNS_RM3100_OB = 1u << 8,   // science magnetometer, boom tip (0x20); cleared after 5 failed samples
+  SNS_RM3100_IB = 1u << 9,   // optional second RM3100, boom mid-point (0x23); likewise
+  SNS_ME_GRV    = 1u << 10,  // BHI260AP game rotation vector valid (ARU page 2 b0, D-75)
 };
 static const uint16_t kSensorInstrumentMask =
     SNS_NICLA_ME | SNS_AS7265X | SNS_RM3100_OB | SNS_RM3100_IB;   // 0x0381
@@ -127,6 +128,15 @@ enum AttFlag : uint8_t {          // ATT.flags (PB-1.9, C-21)
   ATT_F_TRIAD        = 0x10,      // TRIAD quaternion valid
   ATT_F_MAG_SCALE    = 0x20,      // BMM150 scale read from the BHI260 (0 = firmware fallback)
   ATT_F_TRIAD_RM3100 = 0x40,      // TRIAD used the calibrated RM3100 field (0 = BMM150)
+};
+enum ImuFlag : uint8_t {          // ATT.imu_flags (ATT v4, D-75): BHI260AP 6-DOF, ARU page 2
+  IMU_F_GRV          = 0x01,      // q_grv valid (latest page 2 b0)
+  IMU_F_STATS        = 0x02,      // at least one valid 1 s window aggregated (imu_nwin >= 1)
+  IMU_F_PAIRED       = 0x04,      // q_grv from the same ARU rebuild as q_fus (page 2 seq = page 0 seq)
+  IMU_F_ACC_SAT      = 0x08,      // a window of the period saw the accelerometer near full scale
+  IMU_F_GYRO_SAT     = 0x10,      // ... the gyroscope near full scale (or its mean clamped)
+  IMU_F_GAP          = 0x20,      // windows skipped or samples missed in the period
+  IMU_F_GRV_PRESENT  = 0x40,      // the BHI260AP firmware provides the game rotation vector
 };
 enum EnvFlag : uint8_t {          // ENV.flags (PB-1.11)
   ENV_F_PRESSURE = 0x01,          // BMP390 pressure valid
@@ -252,14 +262,22 @@ struct MagPacket {                // APID 0x020, 46 octets (layout unchanged)
   uint16_t rm3100_cycle_count;
 };
 
-struct AttPacket {                // APID 0x021, 37 octets (layout unchanged)
-  uint8_t  flags;                 // AttFlag
-  int16_t  acc_mg[3];
-  int16_t  gyro_ddps[3];          // 0.1 deg/s
-  int16_t  mag_dT[3];             // BMM150, 0.1 uT (latest sample)
-  int16_t  q_fus[4];              // BHI260 rotation vector w,x,y,z * 16384
-  uint16_t q_fus_acc_mrad;        // BHI260 accuracy estimate of that solution
-  int16_t  q_triad[4];            // independent TRIAD solution (gravity + field), w,x,y,z * 16384
+struct AttPacket {                // APID 0x021, ATT v4: 59 octets (offsets 0..36 as v3; D-75)
+  uint8_t  flags;                 //  0 AttFlag
+  int16_t  acc_mg[3];             //  1
+  int16_t  gyro_ddps[3];          //  7 0.1 deg/s
+  int16_t  mag_dT[3];             // 13 BMM150, 0.1 uT (latest sample)
+  int16_t  q_fus[4];              // 19 BHI260 rotation vector w,x,y,z * 16384
+  uint16_t q_fus_acc_mrad;        // 27 BHI260 accuracy estimate of that solution
+  int16_t  q_triad[4];            // 29 independent TRIAD solution (gravity + field), w,x,y,z * 16384
+  // ---- BHI260AP 6-DOF (ARU page 2), aggregated over the ATT period (ImuStats, attitude.h) ----
+  uint8_t  imu_flags;             // 37 ImuFlag
+  int16_t  q_grv[4];              // 38 game rotation vector w,x,y,z * 16384 (latest), n/a 0x7FFF
+  uint8_t  imu_nwin;              // 46 valid 1 s windows aggregated (0 = none), saturates at 255
+  uint16_t vib_rms_dmg;           // 47 0.1 mg: RMS of the windows' vibration RMS, n/a 0xFFFF
+  uint16_t vib_peak_mg;           // 49 1 mg: largest window peak deviation, n/a 0xFFFF
+  int16_t  rate_mean_cdps[3];     // 51 0.01 deg/s: mean of the window mean rates, n/a 0x7FFF
+  uint16_t rate_peak_ddps;        // 57 0.1 deg/s: largest window peak |omega|, n/a 0xFFFF
 };
 
 struct EnvPacket {                // APID 0x023, 24 octets (Nicla Sense ME only, PB-1.11)
@@ -280,7 +298,7 @@ static const size_t kRfLen       = 49;
 static const size_t kCmdVerLen   = 8;
 static const size_t kTimeCorrLen = 10;
 static const size_t kMagLen      = 46;
-static const size_t kAttLen      = 37;
+static const size_t kAttLen      = 59;
 static const size_t kEnvLen      = 24;
 static const size_t kEvrHdrLen   = 3;     // severity u8 | event_id u16
 static const size_t kEvrTextMax  = 80;    // characters (pack_evr truncates)

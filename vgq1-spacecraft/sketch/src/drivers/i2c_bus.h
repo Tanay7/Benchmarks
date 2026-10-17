@@ -1,9 +1,12 @@
 // =============================================================================
 //  I2C bus access with error accounting and bus recovery (the FDIR "I2C_BUS"
-//  response). All instruments have distinct addresses, so there is no
-//  multiplexer: one bus on the UNO Q header pins (Wire2 = I2C3, A4 SDA / A5 SCL,
-//  3.3 V) carries everything; only the AS7265X may instead sit on the Qwiic connector
-//  (Wire1 = I2C4, a second I2cBus without GPIO bus clear: its pins are not Arduino pins).
+//  response). One I2cBus per sensor bus (D-73, fsw/sensor_bus.h): the NICLA bus
+//  (Wire2 = I2C3, header A4 SDA / A5 SCL, 3.3 V: Nicla Sense ME, AS7265X) with the GPIO
+//  bus clear below, and the MAG bus (Wire1 = I2C4, the Qwiic socket: the boom RM3100s)
+//  without one - its pins PD12/PD13 have no Arduino pin number and the cores' devicetree
+//  gives the i2c4 node no scl-gpios / sda-gpios (config.h), so its recovery is the
+//  controller re-initialisation of recover() alone. All addresses are distinct, so there
+//  is no multiplexer and any instrument may be found on either bus.
 //
 //  Bus clear (AS-T6, Phase B spec F-03). A target that was interrupted in the
 //  middle of a read (MCU reset, glitch, a hung AS72651) can hold SDA low for ever;
@@ -30,9 +33,9 @@
 //  pinMode(pin, OUTPUT), which configures and drives low at once. digitalWrite(HIGH)
 //  is never used on SDA/SCL, so the MCU never drives a bus line high against a target.
 //  The MCU's own weak pull-up (RPU, about 40 kOhm, STM32U585 datasheet) is on while a
-//  line is released: an empty bus (nothing on A4/A5, the AS7265X on Qwiic) has no other
-//  pull-up, read LOW with plain INPUT and raised EVR 0x060A at every re-probe (D-67); a
-//  target holding a line low still reads LOW against it.
+//  line is released: an empty bus (nothing on A4/A5) has no other pull-up, read LOW with
+//  plain INPUT and raised EVR 0x060A at every re-probe (D-67); a target holding a line low
+//  still reads LOW against it.
 //  Bound: <= 9 x 2 half periods of ~6 us + START/STOP, about 0.12 ms plus begin()/setClock().
 // =============================================================================
 #pragma once
@@ -58,6 +61,7 @@ class I2cBus {
   // Returns false when SDA is still low at the end (or SCL was stuck low): the caller
   // raises EVR 0x060A. Resets the consecutive-error count either way.
   bool recover();
+  bool has_bus_clear() const { return sda_ >= 0 && scl_ >= 0; }   // begin() was given both pins
   uint32_t errors() const { return errors_; }
   uint8_t consecutive_errors() const { return consec_; }
   uint32_t recoveries() const { return recoveries_; }

@@ -232,15 +232,18 @@ Tenths tenths(int32_t v) {
   return t;
 }
 
-// Nicla Sense ME health bits from the ARU page flags (motion b0..b3, environment b0..b1).
-const uint16_t kMeBits = SNS_ME_QUAT | SNS_ME_ACC | SNS_ME_GYRO | SNS_ME_MAG | SNS_ME_BARO | SNS_ME_BSEC;
+// Nicla Sense ME health bits from the ARU page flags (motion b0..b3, environment b0..b1,
+// IMU 6-DOF b0 = game rotation vector, D-75).
+const uint16_t kMeBits =
+    SNS_ME_QUAT | SNS_ME_ACC | SNS_ME_GYRO | SNS_ME_MAG | SNS_ME_BARO | SNS_ME_BSEC | SNS_ME_GRV;
 // `bit` when `on`, else 0 (keeps enumerators and plain integers out of one ?: expression).
 inline unsigned bit_if(bool on, unsigned bit) { return on ? bit : 0u; }
 
-uint16_t me_bits(uint8_t mf, uint8_t ef) {
+uint16_t me_bits(uint8_t mf, uint8_t ef, uint8_t imf) {
   return (uint16_t)(bit_if(mf & 1u, SNS_ME_QUAT) | bit_if(mf & 2u, SNS_ME_ACC) |
                     bit_if(mf & 4u, SNS_ME_GYRO) | bit_if(mf & 8u, SNS_ME_MAG) |
-                    bit_if(ef & 1u, SNS_ME_BARO) | bit_if(ef & 2u, SNS_ME_BSEC));
+                    bit_if(ef & 1u, SNS_ME_BARO) | bit_if(ef & 2u, SNS_ME_BSEC) |
+                    bit_if(imf & ARU_IMU_GRV, SNS_ME_GRV));
 }
 
 MagVector mag_vec(const MagStats& s, bool ok) {
@@ -484,24 +487,25 @@ void Flight::report_tcxo() {
 }
 
 void Flight::init_sensors() {
-  // Bus clear first (AS-T6): a target left mid-transfer by the previous run cannot hold SDA.
-  bus_.begin(SENSOR_WIRE, kI2cClockHz, kPinSensorSda, kPinSensorScl);
-  bus_clear_failed_ = !bus_.begin_clear_ok();   // retried by reprobe_instruments()
-  if (bus_clear_failed_)
-    evr(3, 0x060A, "I2C bus clear: SDA or SCL still low after %u clocks", (unsigned)kI2cClearMaxPulses);
-  // The Qwiic connector: no bus clear (PD12/PD13 are not Arduino pin numbers).
-  qwiic_.begin(QWIIC_WIRE, kI2cClockHz);
+  // NICLA bus: bus clear first (AS-T6), so a target left mid-transfer by the previous run
+  // cannot hold SDA. MAG bus (Qwiic): controller initialisation only (config.h, D-73).
+  nicla_bus_.begin(NICLA_WIRE, kI2cClockHz, kPinSensorSda, kPinSensorScl);
+  bus_clear_failed_[SBUS_NICLA] = !nicla_bus_.begin_clear_ok();   // retried by reprobe_instruments()
+  if (bus_clear_failed_[SBUS_NICLA])
+    evr(3, 0x060A, "I2C bus clear on %s: SDA or SCL still low after %u clocks", sensor_bus_name(SBUS_NICLA),
+        (unsigned)kI2cClearMaxPulses);
+  mag_bus_.begin(MAG_WIRE, kI2cClockHz);
   reprobe_.begin(millis());
   uint16_t h = 0;
-  if (aru_.begin(bus_)) {
+  if (probe_nicla()) {                                       // A4/A5 first, then Qwiic
     h |= SNS_NICLA_ME;
     if (aru_.read_motion(aru_last_)) aru_valid_ = true;
   }
   // Bounded boot identification (<= ~2 s, as7265x.h begin()); lamps off afterwards.
-  const bool spec_ok = spec_.begin(bus_, kPinSpecInt, &qwiic_);   // A4/A5 first, then Qwiic
+  const bool spec_ok = spec_.begin(nicla_bus_, kPinSpecInt, &mag_bus_);   // A4/A5 first, then Qwiic
   if (spec_ok) h |= SNS_AS7265X;
-  if (mag_ob_.begin(bus_, kRm3100ObAddr)) h |= SNS_RM3100_OB;
-  if (mag_ib_.begin(bus_, kRm3100IbAddr)) h |= SNS_RM3100_IB;     // optional second unit
+  if (probe_rm3100(0, mag_cc_)) h |= SNS_RM3100_OB;         // Qwiic first, then A4/A5
+  if (probe_rm3100(1, mag_cc_)) h |= SNS_RM3100_IB;         // optional second unit
   sensor_health_ = h;
   run_boot_bist();
   if (spec_ok) {
@@ -518,9 +522,42 @@ void Flight::init_sensors() {
 
 void Flight::report_spec_identity() {
   const As7265x::Info& i = spec_.info();
+  const uint8_t bus = spec_.on_alt_bus() ? (uint8_t)SBUS_MAG : (uint8_t)SBUS_NICLA;
   evr(1, 0x0706, "AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s", (unsigned)i.hw_type,
       (unsigned)i.hw_version, (unsigned)i.fw_major, (unsigned)i.fw_patch, (unsigned)i.fw_build,
-      spec_device_names(i.dev_mask), spec_.on_alt_bus() ? "Qwiic" : "A4/A5");
+      spec_device_names(i.dev_mask), sensor_bus_name(bus));
+  // D-73: the AS7265X is recommended on A4/A5; on the Qwiic socket it shares the boom bus
+  // with the RM3100s. Warned once per change of bus, not at every re-identification.
+  if (bus != SBUS_NICLA && bus != spec_bus_reported_)
+    evr(2, 0x060D, "%s found on %s; the recommended bus is %s (docs/03)", "AS7265X", sensor_bus_name(bus),
+        sensor_bus_name(SBUS_NICLA));
+  spec_bus_reported_ = bus;
+}
+
+// D-73: every acquisition names its bus; a bus other than the preferred one is used, with
+// a WARN (the bus roles keep the boom cable isolated from the attitude reference).
+void Flight::report_acquired(const char* name, uint8_t bus, uint8_t preferred) {
+  evr(1, 0x060B, "instrument acquired: %s on %s", name, sensor_bus_name(bus));
+  if (bus != preferred)
+    evr(2, 0x060D, "%s found on %s; the recommended bus is %s (docs/03)", name, sensor_bus_name(bus),
+        sensor_bus_name(preferred));
+}
+
+bool Flight::probe_nicla() {
+  aru_bus_ = probe_preferred(SBUS_NICLA, [this](uint8_t b) { return aru_.begin(bus_of(b)); });
+  if (aru_bus_ == kSensorBusNone) return false;
+  report_acquired("Nicla Sense ME", aru_bus_, SBUS_NICLA);
+  return true;
+}
+
+bool Flight::probe_rm3100(uint8_t unit, uint16_t cc) {
+  Rm3100& m = unit ? mag_ib_ : mag_ob_;
+  const uint8_t addr = unit ? kRm3100IbAddr : kRm3100ObAddr;
+  mag_bus_of_[unit] = probe_preferred(SBUS_MAG, [&](uint8_t b) { return m.begin(bus_of(b), addr, cc); });
+  if (mag_bus_of_[unit] == kSensorBusNone) return false;
+  mag_loss_[unit].reset();
+  report_acquired(unit ? "RM3100 inboard" : "RM3100 outboard", mag_bus_of_[unit], SBUS_MAG);
+  return true;
 }
 
 // RM3100 self-test of the fitted units at boot (contract 24.5), never while an AS7265X
@@ -1636,7 +1673,7 @@ void Flight::gen_hk(bool beacon) {
   p.radio_fault_reports = radio_fault_reports_;
   p.loop_max_ms = loop_max_ms_;
   p.loop_overruns = loop_overruns_;
-  p.i2c_errors = sat16(bus_.errors() + qwiic_.errors());
+  p.i2c_errors = sat16(nicla_bus_.errors() + mag_bus_.errors());   // both sensor buses (D-73)
   p.ssr_fill_permille = ssr_.fill_permille();
   // C-06: overwrite drops (beacon) + export-pause drops, saturated.
   const uint64_t drops = (uint64_t)ssr_.dropped() + ssr_.paused_drops();
@@ -1799,6 +1836,27 @@ void Flight::gen_att() {
     p.q_triad[2] = clamp_i16(q.y * 16384.0f);
     p.q_triad[3] = clamp_i16(q.z * 16384.0f);
   }
+  // ATT v4 (D-75): the BHI260AP 6-DOF part. q_grv is the latest page 2 (paired with q_fus
+  // when both come from one ARU rebuild); the window statistics cover the ATT period.
+  for (uint8_t i = 0; i < 4; ++i) p.q_grv[i] = kNaI16;
+  if (aru_imu_valid_) {
+    const AruImu& m = aru_imu_;
+    if (m.flags & ARU_IMU_GRV) {                    // norm-gated: every component < 18023, never 0x7FFF
+      p.imu_flags |= IMU_F_GRV;
+      for (uint8_t i = 0; i < 4; ++i) p.q_grv[i] = m.q_grv[i];
+      if (aru_imu_paired_ && aru_valid_ && (aru_last_.motion_flags & 1u)) p.imu_flags |= IMU_F_PAIRED;
+    }
+    if (m.flags & ARU_IMU_GRV_PRESENT) p.imu_flags |= IMU_F_GRV_PRESENT;
+  }
+  const ImuStats& s = imu_stats_;
+  p.imu_nwin = s.windows();
+  p.imu_flags |= (uint8_t)(bit_if(s.windows() != 0, IMU_F_STATS) | bit_if(s.acc_sat(), IMU_F_ACC_SAT) |
+                           bit_if(s.gyro_sat(), IMU_F_GYRO_SAT) | bit_if(s.gap(), IMU_F_GAP));
+  p.vib_rms_dmg = s.vib_rms_dmg();
+  p.vib_peak_mg = s.vib_peak_mg();
+  for (uint8_t i = 0; i < 3; ++i) p.rate_mean_cdps[i] = s.rate_mean_cdps(i);
+  p.rate_peak_ddps = s.rate_peak_ddps();
+  imu_stats_.reset();                               // the next ATT period starts empty
   uint8_t b[kAttLen];
   (void)emit(APID_ATT, b, pack_att(p, b), VC_RT_SCI);
 }
@@ -1893,26 +1951,20 @@ void Flight::fdir_1hz(uint32_t now) {
   }
   // --- instruments missing since boot (or a failed bus clear): re-probe with back-off ---
   reprobe_instruments(now);
-  // --- I2C bus: bus clear + re-initialisation, at most once per 10 s ---
-  if (bus_.consecutive_errors() > kI2cFdirErrors && (fdir_mask_ & FDIR_I2C_BUS) &&
-      (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs)) {
+  // --- I2C buses (D-73): per bus, at most one recovery per 10 s on THAT bus; the NICLA bus
+  //     gets bus clear + re-initialisation, the MAG bus (Qwiic) re-initialisation only ---
+  for (uint8_t b = 0; b < kSensorBuses; ++b) {
+    I2cBus& bus = bus_of(b);
+    if (bus.consecutive_errors() <= kI2cFdirErrors || !(fdir_mask_ & FDIR_I2C_BUS) ||
+        !recover_[b].allowed(now, kBusRecoverMinMs))
+      continue;
     fdir_flags_ |= FDIR_I2C_BUS;
-    evr(3, 0x0605, "I2C bus fault (%u consecutive errors) - bus clear + re-init",
-        (unsigned)bus_.consecutive_errors());
-    bus_recover(now, "FDIR");
-  }
-  // The same for the Qwiic connector (AS7265X only): controller re-initialisation.
-  if (qwiic_.consecutive_errors() > kI2cFdirErrors && (fdir_mask_ & FDIR_I2C_BUS) &&
-      (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs)) {
-    fdir_flags_ |= FDIR_I2C_BUS;
-    evr(3, 0x0605, "Qwiic I2C bus fault (%u consecutive errors) - re-init",
-        (unsigned)qwiic_.consecutive_errors());
-    recovered_once_ = true;
-    last_recover_ms_ = now;
-    (void)qwiic_.recover();
+    evr(3, 0x0605, "I2C bus fault on %s (%u consecutive errors) - %s", sensor_bus_name(b),
+        (unsigned)bus.consecutive_errors(), bus.has_bus_clear() ? "bus clear + re-init" : "re-init");
+    bus_recover(b, now, "FDIR");
   }
   // F-25: FDIR I2C_BUS clears after kI2cBusHealthyS seconds without a new bus error.
-  const uint32_t errs = bus_.errors() + qwiic_.errors();
+  const uint32_t errs = nicla_bus_.errors() + mag_bus_.errors();
   if (errs != i2c_err_snapshot_) {
     i2c_err_snapshot_ = errs;
     i2c_quiet_s_ = 0;
@@ -1930,7 +1982,7 @@ void Flight::fdir_1hz(uint32_t now) {
     // No temperature any more (bus_temp_c_ is NAN): the avionics over-temperature flag
     // cannot be judged and is not kept latched on a stale reading (C22).
     fdir_flags_ &= (uint16_t)~FDIR_AVI_OVERTEMP;
-    evr(3, 0x0606, "Nicla Sense ME stopped responding");
+    evr(3, 0x0606, "Nicla Sense ME stopped responding on %s", sensor_bus_name(aru_bus_));
   } else if (aru_fail_count_ == 0 && (fdir_flags_ & FDIR_SENSOR_LOST) && (sensor_health_ & SNS_NICLA_ME)) {
     fdir_flags_ &= (uint16_t)~FDIR_SENSOR_LOST;
     evr(1, 0x0607, "Nicla Sense ME responding again");
@@ -1952,46 +2004,46 @@ void Flight::fdir_1hz(uint32_t now) {
   if (loop_overruns_) fdir_flags_ |= FDIR_LOOP_OVERRUN;
 }
 
-void Flight::bus_recover(uint32_t now, const char* why) {
-  recovered_once_ = true;
-  last_recover_ms_ = now;
-  LOGF("WARN", "I2C bus recovery (%s)", why);
-  bus_clear_failed_ = !bus_.recover();
-  if (bus_clear_failed_)
-    evr(3, 0x060A, "I2C bus clear: SDA or SCL still low after %u clocks", (unsigned)kI2cClearMaxPulses);
+// One bus's recovery (D-73): bus clear (NICLA bus) + controller re-initialisation, counted
+// against that bus's own rate limiter only. EVR 0x060A when the bus clear left a line low.
+void Flight::bus_recover(uint8_t b, uint32_t now, const char* why) {
+  recover_[b].note(now);
+  LOGF("WARN", "I2C bus recovery on %s (%s)", sensor_bus_name(b), why);
+  bus_clear_failed_[b] = !bus_of(b).recover();      // always true on a bus without a bus clear
+  if (bus_clear_failed_[b])
+    evr(3, 0x060A, "I2C bus clear on %s: SDA or SCL still low after %u clocks", sensor_bus_name(b),
+        (unsigned)kI2cClearMaxPulses);
 }
 
 // C28: a Nicla Sense ME or RM3100 that missed its one probe at boot (a transient NACK, a
 // glitch during REVID / CMM / BIST / CC, a bus clear that failed) was lost until the next
-// reboot. Enabled units that are not ok() are probed again, paced like the AS7265X driver
-// (ReprobeTimer: 30 s doubling to 10 min), only in a quiet window: PA off, no sample or
-// self-test pending, every lamp dark. A failed bus clear is retried first.
+// reboot. Enabled units that are not ok() - missing since boot, or an RM3100 declared lost
+// at run time (note_mag_sample) - are probed again on their preferred bus, then the other
+// (D-73), paced like the AS7265X driver (ReprobeTimer: 30 s doubling to 10 min), only in a
+// quiet window: PA off, no sample or self-test pending, every lamp dark. A failed bus clear
+// is retried first.
 void Flight::reprobe_instruments(uint32_t now) {
   if (!reprobe_.due(now)) return;
   if (tx_state_ != TX_IDLE || mag_phase_ != MAG_IDLE || mag_sample_pending_ || bist_pending_ != 0 ||
       spec_.lamps_lit() || spec_.lamp_state_unknown())
     return;
-  if (bus_clear_failed_ && (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs))
-    bus_recover(now, "re-probe");
+  for (uint8_t b = 0; b < kSensorBuses; ++b)
+    if (bus_clear_failed_[b] && recover_[b].allowed(now, kBusRecoverMinMs)) bus_recover(b, now, "re-probe");
   bool acquired = false;
-  if ((sensor_enable_ & SNS_NICLA_ME) && !aru_.ok()) {
-    if (aru_.begin(bus_)) {
-      acquired = true;
-      aru_fail_count_ = 0;
-      sensor_health_ |= SNS_NICLA_ME;
-      evr(1, 0x060B, "instrument acquired: %s", "Nicla Sense ME");
-    }
+  if ((sensor_enable_ & SNS_NICLA_ME) && !aru_.ok() && probe_nicla()) {
+    acquired = true;
+    aru_fail_count_ = 0;
+    sensor_health_ |= SNS_NICLA_ME;
   }
   for (uint8_t u = 0; u < kMagUnits; ++u) {
     Rm3100& m = u ? mag_ib_ : mag_ob_;
     const uint16_t bit = u ? (uint16_t)SNS_RM3100_IB : (uint16_t)SNS_RM3100_OB;
     if (!(sensor_enable_ & bit) || m.ok()) continue;
-    if (m.begin(bus_, u ? kRm3100IbAddr : kRm3100ObAddr, mag_cc_)) {
+    if (probe_rm3100(u, mag_cc_)) {
       acquired = true;
       sensor_health_ |= bit;
       bist_pending_ = (uint8_t)(bist_pending_ | (1u << u));   // self-test in the next quiet window
       bist_wait_t0_ = now;
-      evr(1, 0x060B, "instrument acquired: %s", u ? "RM3100 inboard" : "RM3100 outboard");
     }
   }
   reprobe_.done(now, acquired);
@@ -2126,16 +2178,12 @@ void Flight::spec_health(uint32_t now) {
   if (recovered) evr(2, 0x0705, "AS7265X recovered by soft reset");
   if (recovered || became_ok) report_spec_identity();
   // PB-8.6 item 9 (AS-T6): a hung AS72651 may hold SDA; the FAULT path escalates to the
-  // bus clear when the bus itself is failing (rate-limited with the FDIR response).
-  if (entered_fault && (!recovered_once_ || now - last_recover_ms_ >= kBusRecoverMinMs)) {
-    if (!spec_.on_alt_bus()) {
-      if (bus_.consecutive_errors() >= kSpecFaultBusErrors) bus_recover(now, "AS7265X FAULT");
-    } else if (qwiic_.consecutive_errors() >= kSpecFaultBusErrors) {
-      recovered_once_ = true;                       // the Qwiic bus: re-initialisation only
-      last_recover_ms_ = now;
-      (void)qwiic_.recover();
-    }
-  }
+  // recovery of the bus it is on when that bus itself is failing (rate-limited with that
+  // bus's FDIR response): A4/A5 bus clear + re-init, Qwiic re-initialisation only.
+  const uint8_t sb = spec_.on_alt_bus() ? (uint8_t)SBUS_MAG : (uint8_t)SBUS_NICLA;
+  if (entered_fault && recover_[sb].allowed(now, kBusRecoverMinMs) &&
+      bus_of(sb).consecutive_errors() >= kSpecFaultBusErrors)
+    bus_recover(sb, now, "AS7265X FAULT");
 }
 
 // Attitude for the SPEC boresight: the Nicla fusion quaternion (device -> ENU world),
@@ -2199,21 +2247,40 @@ void Flight::service_mag(uint32_t now) {
   }
 }
 
-// Starts both RM3100 conversions, then reads the two Nicla Sense ME pages while they
-// convert (~2 x 3 ms of I2C at 100 kHz), so the ~6.8 ms conversion is hidden.
+// Starts both RM3100 conversions (MAG bus), then reads the Nicla Sense ME pages (NICLA
+// bus, one loop thread) while they convert - page 0, page 2 right after it (D-75 pairing:
+// the same ARU rebuild as page 0, else page 0 once more), then page 1: ~3 x 3 ms of I2C at
+// 100 kHz, longer than the ~6.8 ms conversion, which the collect in later passes absorbs.
 void Flight::start_mag_sample() {
   const uint16_t en = sensor_enable_;
-  const bool ob = (en & SNS_RM3100_OB) && mag_ob_.ok();
-  const bool ib = (en & SNS_RM3100_IB) && mag_ib_.ok();
-  mag_pending_[0] = ob && mag_ob_.start();
-  mag_pending_[1] = ib && mag_ib_.start();
-  if (!mag_pending_[0]) rm_fresh_[0] = false;       // disabled, absent or POLL failed
-  if (!mag_pending_[1]) rm_fresh_[1] = false;
+  for (uint8_t u = 0; u < kMagUnits; ++u) {
+    Rm3100& m = u ? mag_ib_ : mag_ob_;
+    const uint16_t bit = u ? (uint16_t)SNS_RM3100_IB : (uint16_t)SNS_RM3100_OB;
+    const bool want = (en & bit) && m.ok();
+    mag_pending_[u] = want && m.start();
+    if (!mag_pending_[u]) rm_fresh_[u] = false;     // disabled, absent or POLL failed
+    if (want && !mag_pending_[u]) note_mag_sample(u, false);   // a refused POLL is a failed sample
+  }
   if ((en & SNS_NICLA_ME) && aru_.ok()) {
     AruReading r = aru_last_;
     if (aru_.read_motion(r)) {
       aru_valid_ = true;
       aru_fail_count_ = 0;
+      AruImu imu;
+      aru_imu_valid_ = aru_.read_imu(imu);          // false: bus error, bad CRC or v3 ARU firmware
+      if (aru_imu_valid_ && imu.seq != r.seq) {
+        // The ARU rebuilt its pages between the two reads: page 0 once more, which now
+        // comes from page 2's rebuild unless the ARU rebuilt yet again.
+        AruReading r2 = r;
+        if (aru_.read_motion(r2)) r = r2;
+      }
+      if (aru_imu_valid_) {
+        aru_imu_ = imu;
+        aru_imu_paired_ = imu.seq == r.seq;
+        (void)imu_stats_.add(imu);                  // a window is counted once (win_seq)
+      } else {
+        aru_imu_paired_ = false;
+      }
       if (r.motion_flags & 8u) {                    // BMM150 through the BHI260
         for (uint8_t k = 0; k < 3; ++k) last_mag_ut_[k] = (float)r.mag_raw[k] * kAruMagUtPerLsb;
         mstat_body_.add(last_mag_ut_[0], last_mag_ut_[1], last_mag_ut_[2]);
@@ -2224,16 +2291,34 @@ void Flight::start_mag_sample() {
       bus_temp_c_ = (aru_env_valid_ && (r.env_flags & 4u)) ? r.t_c : NAN;
       aru_last_ = r;
       sensor_health_ = (uint16_t)((sensor_health_ & ~kMeBits) | SNS_NICLA_ME |
-                                  me_bits(r.motion_flags, aru_env_valid_ ? r.env_flags : 0u));
+                                  me_bits(r.motion_flags, aru_env_valid_ ? r.env_flags : 0u,
+                                          aru_imu_valid_ ? aru_imu_.flags : 0u));
     } else {
-      aru_valid_ = aru_env_valid_ = false;
+      aru_valid_ = aru_env_valid_ = aru_imu_valid_ = aru_imu_paired_ = false;
       bus_temp_c_ = NAN;
       if (aru_fail_count_ < 255u) ++aru_fail_count_;
     }
   } else {
-    aru_valid_ = aru_env_valid_ = false;            // disabled: no stale attitude or environment
+    // Disabled: no stale attitude, 6-DOF or environment.
+    aru_valid_ = aru_env_valid_ = aru_imu_valid_ = aru_imu_paired_ = false;
     bus_temp_c_ = NAN;
   }
+}
+
+// D-73: an RM3100 that answered once and then fails kRm3100LossSamples samples in a row is
+// declared lost - HK bit cleared, not ok() (no more POLLs), WARN EVR - and the re-probe
+// path takes over, its timer restarted so the first attempt comes kMinMs (30 s) later. Its
+// re-acquisition reports EVR 0x060B. Disabled units (SENSORS) are never counted.
+void Flight::note_mag_sample(uint8_t unit, bool ok) {
+  if (!mag_loss_[unit].note(ok, kRm3100LossSamples)) return;
+  Rm3100& m = unit ? mag_ib_ : mag_ob_;
+  m.mark_lost();
+  mag_pending_[unit] = false;
+  rm_fresh_[unit] = false;
+  sensor_health_ &= (uint16_t)~(unit ? (uint16_t)SNS_RM3100_IB : (uint16_t)SNS_RM3100_OB);
+  evr(2, 0x060E, "RM3100 %s stopped responding (%u failed samples on %s)", unit ? "ib" : "ob",
+      (unsigned)kRm3100LossSamples, sensor_bus_name(mag_bus_of_[unit]));
+  reprobe_.begin(millis());
 }
 
 void Flight::finish_mag_unit(uint8_t unit, Rm3100& m) {
@@ -2241,6 +2326,7 @@ void Flight::finish_mag_unit(uint8_t unit, Rm3100& m) {
   const bool ok = m.collect(x, y, z, 0);            // one STATUS read, never a wait
   mag_pending_[unit] = false;
   rm_fresh_[unit] = ok;
+  note_mag_sample(unit, ok);                        // a timeout or a failed read counts too
   if (!ok) return;
   rm_ut_[unit][0] = x;
   rm_ut_[unit][1] = y;

@@ -916,20 +916,21 @@ same for the T33D and the T37S):
 
 | Profile | SF / BW | Busy per CADU | Frame period SAFE / CRUISE / ENCOUNTER, TEST | Capacity SAFE / CRUISE / ENCOUNTER, TEST (octets/s) | Stretch SAFE / CRUISE / ENCOUNTER / TEST |
 |---|---|---|---|---|---|
-| 0 | SF12 / 31.25 kHz | 34636 ms | 138.5 / 86.6 / 69.3 s | 1.14 / 1.82 / 2.28 | x4.79 / x4.47 / x19.44 / x24.55 |
-| 1 (default) | SF12 / 62.5 kHz | 17318 ms | 69.3 / 43.3 / 34.6 s | 2.28 / 3.65 / 4.56 | x2.40 / x2.24 / x9.72 / x12.28 |
-| 2 | SF12 / 125 kHz | 8659 ms | 34.6 / 21.6 / 17.3 s | 4.56 / 7.30 / 9.12 | x1.20 / x1.12 / x4.86 / x6.14 |
-| 3 | SF11 / 125 kHz | 4740 ms | 18.96 / 11.85 / 9.48 s | 8.33 / 13.33 / 16.67 | none / none / x2.66 / x3.36 |
-| 4 | SF10 / 125 kHz | 2165 ms | 8.66 / 5.41 / 4.33 s | 18.2 / 29.2 / 36.5 | none / none / x1.22 / x1.54 |
+| 0 | SF12 / 31.25 kHz | 34636 ms | 138.5 / 86.6 / 69.3 s | 1.14 / 1.82 / 2.28 | x4.79 / x4.74 / x21.04 / x26.16 |
+| 1 (default) | SF12 / 62.5 kHz | 17318 ms | 69.3 / 43.3 / 34.6 s | 2.28 / 3.65 / 4.56 | x2.40 / x2.37 / x10.52 / x13.08 |
+| 2 | SF12 / 125 kHz | 8659 ms | 34.6 / 21.6 / 17.3 s | 4.56 / 7.30 / 9.12 | x1.20 / x1.19 / x5.26 / x6.54 |
+| 3 | SF11 / 125 kHz | 4740 ms | 18.96 / 11.85 / 9.48 s | 8.33 / 13.33 / 16.67 | none / none / x2.88 / x3.58 |
+| 4 | SF10 / 125 kHz | 2165 ms | 8.66 / 5.41 / 4.33 s | 18.2 / 29.2 / 36.5 | none / none / x1.32 / x1.64 |
 | 5 | SF9 / 125 kHz | 1185 ms | 4.74 / 2.96 / 2.37 s | 33.3 / 53.3 / 66.7 | none |
 | 6 | SF8 / 125 kHz | 665 ms | 2.66 / 1.66 / 1.50 s | 59.4 / 95.1 / 105.3 | none |
 | 7 | SF7 / 125 kHz | 373 ms | 1.50 s (floor) | 105.3 | none |
 
 Offered periodic load of the cadence table (whole packets, `kPeriodicPktLen` 90 / 61 / 22 /
-58 / 49 / 141 / 36 octets): SAFE 4.09, CRUISE 6.11, ENCOUNTER 33.24, TEST 41.99 octets/s. At
-2.4 kbit/s TEST therefore uses 67 % of the TM + AE capacity (69.5 % with USLP + AE, the
-worst E22 case, Phase B PB-3.3) and nothing is stretched. Reference points the host test prints
-and asserts: "E22 with PA over-temperature: largest stretch x1.86"; "SX126x profile 1 SAFE,
+58 / 71 / 141 / 36 octets; ATT v4 with the BHI260AP 6-DOF part is 59 octets of user data, D-75):
+SAFE 4.09, CRUISE 6.48, ENCOUNTER 35.99, TEST 44.74 octets/s. At 2.4 kbit/s TEST therefore uses
+71.8 % of the TM + AE capacity (74.1 % with USLP + AE, the worst E22 case, Phase B PB-3.3) and
+nothing is stretched. Reference points the host test prints and asserts: "E22 with PA
+over-temperature: largest stretch x1.98"; "SX126x profile 1 SAFE,
 USLP + AE: busy 17318 ms, stretch 247, EVR 5 milli/s, capacity 132 B/min" (re-run on the final
 tree for this check). Stretched SAFE at profile 1 means an HK packet
 every 72 s instead of 30 s. Air-time formulas and per-profile sensitivities:

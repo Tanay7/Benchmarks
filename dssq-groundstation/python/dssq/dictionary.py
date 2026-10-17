@@ -128,12 +128,48 @@ FDIR_TX_INHIBIT = 1 << 11
 FDIR_CLEARED_BY_RSTCNT = sum(1 << FDIR_BITS.index(n) for n in ("CMD_LOSS", "LOOP_OVERRUN", "RATE_REVERT",
                                                                "SDLS_AUTH"))
 SENSOR_BITS = ["NICLA_ME", "ME_QUAT", "ME_ACC", "ME_GYRO", "ME_MAG", "ME_BARO", "ME_BSEC",
-               "AS7265X", "RM3100_OB", "RM3100_IB"]
+               "AS7265X", "RM3100_OB", "RM3100_IB", "ME_GRV"]
 SENSOR_INSTRUMENT_MASK = 0x0381     # SENSORS enable mask: b0 NICLA_ME, b7, b8, b9
 MAG_FLAG_BITS = ["PA_KEYED", "OB", "IB", "BMM150", "LAMP", "CAL"]
 ATT_FLAG_BITS = ["QUAT", "ACCEL", "GYRO", "BMM150", "TRIAD", "MAG_SCALE", "TRIAD_RM3100"]
+# ATT.imu_flags (ATT v4, D-75: BHI260AP 6-DOF from the Nicla ARU page 2), flight enum ImuFlag.
+IMU_FLAG_BITS = ["GRV", "STATS", "PAIRED", "ACC_SAT", "GYRO_SAT", "GAP", "GRV_PRESENT"]
 ENV_FLAG_BITS = ["BARO", "BSEC", "TEMP_RH", "GAS"]
 RF_FLAG_BITS = ["RX_BOOST", "LBT"]
+
+# Sensor-bus event reports (D-73; flight fsw/flight.cpp, literal formats - the cross-check test
+# compares them with the flight source). The bus is "A4/A5" (NICLA bus, Wire2) or "Qwiic"
+# (MAG bus, Wire1); evr_instrument_bus() gives the instrument and its bus named by a text.
+SENSOR_BUSES = ("A4/A5", "Qwiic")
+SENSOR_BUS_EVRS: dict[int, str] = {
+    0x0605: "I2C bus fault on %s (%u consecutive errors) - %s",
+    0x0606: "Nicla Sense ME stopped responding on %s",
+    0x060A: "I2C bus clear on %s: SDA or SCL still low after %u clocks",
+    0x060B: "instrument acquired: %s on %s",
+    0x060D: "%s found on %s; the recommended bus is %s (docs/03)",
+    0x060E: "RM3100 %s stopped responding (%u failed samples on %s)",
+    0x0706: "AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s",
+}
+EVR_INSTRUMENT_ACQUIRED = 0x060B
+EVR_WRONG_BUS = 0x060D
+EVR_RM3100_LOST = 0x060E
+
+
+def evr_instrument_bus(event_id: int, text: str) -> tuple[str, str] | None:
+    """(instrument, bus) named by a sensor-bus EVR text, else None: 0x060B "instrument
+    acquired: <name> on <bus>", 0x060D "<name> found on <bus>; ...", 0x0706 "AS7265X ... on
+    <bus>". Untrusted text: only the two bus names are accepted."""
+    if event_id == EVR_INSTRUMENT_ACQUIRED and text.startswith("instrument acquired: "):
+        name, sep, bus = text[len("instrument acquired: "):].rpartition(" on ")
+    elif event_id == EVR_WRONG_BUS:
+        name, sep, rest = text.partition(" found on ")
+        bus = rest.partition(";")[0]
+    elif event_id == 0x0706 and text.startswith("AS7265X "):
+        name = "AS7265X"
+        _head, sep, bus = text.rpartition(" on ")
+    else:
+        return None
+    return (name, bus) if sep and name and bus in SENSOR_BUSES else None
 
 
 def decode_bits(value: int | None, names: list[str]) -> list[str]:
@@ -284,15 +320,30 @@ PACKETS: dict[int, dict[str, Any]] = {
         *_mag("body", "Body BMM150 (Nicla Sense ME)"),
         ("rm3100_cc", "H", None, "", "RM3100 cycle count", None),
     ]},
-    APID_ATT: {"name": "ATT", "desc": "Attitude determination (Nicla Sense ME + TRIAD)", "fields": [
+    APID_ATT: {"name": "ATT", "desc": "Attitude determination (Nicla Sense ME + TRIAD + BHI260AP 6-DOF), v4",
+               "fields": [
         ("flags", "B", None, "", ("b0 fusion quaternion, b1 accel, b2 gyro, b3 BMM150, b4 TRIAD, "
                                   "b5 BMM150 scale read, b6 TRIAD used the RM3100"), None),
         *_vec("acc", "h", 1e-3, "g", "Acceleration"),
         *_vec("gyro", "h", 0.1, "deg/s", "Angular rate"),
-        *_vec("mag", "h", 0.1, "uT", "BMM150 field (latest)"),
-        *_vec("q_fus", "h", 1 / 16384, "", "BHI260 fusion quaternion", n=4, axes="wxyz"),
+        *_vec("mag", "h", 0.1, "uT", "BMM150 field, magnetometer corrected by the BHI260 (BSX), latest"),
+        *_vec("q_fus", "h", 1 / 16384, "", "BHI260 fusion quaternion (9-DOF rotation vector)", n=4, axes="wxyz"),
         ("q_fus_acc", "H", 1e-3, "rad", "BHI260 fusion accuracy estimate", None),
         *_vec("q_triad", "h", 1 / 16384, "", "TRIAD quaternion", n=4, axes="wxyz"),
+        # ATT v4 (D-75): BHI260AP 6-DOF, Nicla ARU page 2, aggregated over the ATT period.
+        ("imu_flags", "B", None, "", ("b0 game rotation vector valid, b1 >= 1 window aggregated, b2 q_grv "
+                                      "and q_fus from one ARU rebuild, b3 accel near full scale, b4 gyro "
+                                      "near full scale, b5 windows or samples missed, b6 game rotation "
+                                      "vector present in the BHI260AP firmware (IMU_FLAG_BITS)"), None),
+        *_vec("q_grv", "h", 1 / 16384, "", "BHI260AP game rotation vector (6-DOF, no magnetometer; "
+                                            "heading relative), latest", n=4, axes="wxyz"),
+        ("imu_nwin", "B", None, "", "1 s IMU windows aggregated (0 = none)", None),
+        ("vib_rms", "H", 0.1, "mg", "Vibration: RMS of the windows' acceleration RMS (mean removed, 25 Hz "
+                                    "samples)", None),
+        ("vib_peak", "H", None, "mg", "Largest deviation of one acceleration sample from its window mean",
+         None),
+        *_vec("rate_mean", "h", 0.01, "deg/s", "Angular rate, mean of the window means"),
+        ("rate_peak", "H", 0.1, "deg/s", "Largest |angular rate| of one sample", None),
     ]},
     APID_SPEC: {"name": "SPEC", "desc": "AS7265X spectrometer (SPEC v3.1)",
                 "fields": list(SPEC_V31_FIELDS)},
