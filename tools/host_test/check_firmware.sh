@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Host-side compile check of all Arduino firmware in this repository.
 #
-# Arduino toolchains for the UNO Q / VENTUNO Q (Zephyr) are large; this
+# Arduino toolchains for the UNO Q (Zephyr) are large; this
 # script instead compiles every translation unit with the host g++
 # against tools/host_test/arduino_stub (Arduino API declarations as the
 # arduino:zephyr core exposes them). It catches syntax, type and API-signature
@@ -20,20 +20,22 @@
 # is fetched into a temporary directory (needs github.com). A bundled copy in a
 # sketch that does not verify is a failure (stale: re-run radiolib.py fetch). With
 # the patched copy:
-#   * every RadioLib translation unit (arduino-cli compiles them all), UNO Q and
-#     VENTUNO Q, -Wall -Wextra (the library is not held to -Wshadow);
+#   * every RadioLib translation unit (arduino-cli compiles them all), UNO Q,
+#     -Wall -Wextra (the library is not held to -Wshadow);
 #   * flight drivers/sx126x.cpp with VGQ_RADIO=3 for the SX1268 and the SX1262, with
 #     the SX126x wiring and module constants from config.h (a missing definition fails);
-#   * the station sketch with DSSQ_RADIO_SX126X=1, VENTUNO Q, both chips;
+#   * the station sketch with DSSQ_RADIO_SX126X=1, UNO Q, both chips;
 #   * the flight build matrix below with VGQ_RADIO=3 (SX1268, SX1262).
 # Flight build matrix (PB-8.5): sketch.ino and fsw/flight.cpp for every build switch
 # (VGQ_RADIO 2 / 3, USLP downlink, SDLS TC AUTH, SDLS off, a generated key header,
 # the debug monitor); the keyed build uses a temporary key, never the tree.
-# Negative control: the stock 7.8.1 tag (fetched with --unpatched, or
-# $LIBS_DIR/RadioLib when that is the stock tag) must FAIL to compile its
-# ArduinoHal.cpp for the VENTUNO Q with the core's PinMode / PinStatus errors -
-# the proof that the stub is strict enough to see what the patch fixes.
-# Without network access the RadioLib checks are reported as skipped.
+# Negative control (D-79): RadioLib's ArduinoHal.cpp must FAIL to compile for a Zephyr
+# board RadioLib does not know (-DARDUINO_ARCH_ZEPHYR without a board macro: the
+# "Unknown Arduino" branch of src/BuildOpt.h, empty cast macros) with the core's
+# PinMode / PinStatus errors, while the UNO Q build above passes - the proof that the
+# stub models the core's typed pin API strictly enough to see a missing platform
+# entry. The project patch does not touch the platform selection, so the patched copy
+# serves. Without network access the RadioLib checks are reported as skipped.
 #
 # Arduino_RouterBridge (both sketches, contract 41): the sketches are type-checked
 # against the stub arduino_stub/Arduino_RouterBridge.h (its Zephyr / MsgPack
@@ -58,9 +60,9 @@ CXX="${CXX:-g++}"
 FLAGS=(-std=gnu++17 -fsyntax-only -Wall -Wextra -Wshadow -Wno-unused-parameter)
 LIBFLAGS=(-std=gnu++17 -fsyntax-only -Wall -Wextra)
 UNOQ=(-DARDUINO=10607 -DARDUINO_UNO_Q -DARDUINO_ARCH_ZEPHYR)
-VENTUNOQ=(-DARDUINO=10607 -DARDUINO_VENTUNO_Q -DARDUINO_ARCH_ZEPHYR)
-SK="$ROOT/vgq1-spacecraft/sketch"                     # UNO Q flight sketch (App vgq1-spacecraft)
-FP="$ROOT/dssq-groundstation/sketch/sketch.ino"       # VENTUNO Q station sketch (App dssq-groundstation)
+UNKNOWN_ZEPHYR=(-DARDUINO=10607 -DARDUINO_ARCH_ZEPHYR)    # negative control: no board macro
+SK="$ROOT/vgq1-spacecraft/sketch"                     # spacecraft UNO Q flight sketch (App vgq1-spacecraft)
+FP="$ROOT/dssq-groundstation/sketch/sketch.ino"       # ground UNO Q station sketch (App dssq-groundstation)
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 LOG="$TMP/log"
@@ -105,7 +107,6 @@ check_library() {   # $1 = RadioLib src dir, $2 = board label, rest = board flag
 
 # ---- RadioLib copies -------------------------------------------------------------
 RADIOLIB=""   # src/ of the verified patched copy
-STOCK=""      # src/ of the verified stock tag (negative control)
 if [[ -n "${LIBS_DIR:-}" ]]; then
   for d in "$LIBS_DIR"/*/src; do
     if [[ -d "$d" && "$d" != "$LIBS_DIR/RadioLib/src" ]]; then INC+=(-isystem "$d"); fi
@@ -130,8 +131,6 @@ else
   if [[ -n "${LIBS_DIR:-}" && -d "$LIBS_DIR/RadioLib" ]]; then
     if "$PY" "$TOOL" check "$LIBS_DIR/RadioLib" >"$LOG" 2>&1; then
       RADIOLIB="$LIBS_DIR/RadioLib/src"; echo "ok   $(cat "$LOG")"
-    elif "$PY" "$TOOL" check --unpatched "$LIBS_DIR/RadioLib" >"$LOG" 2>&1; then
-      STOCK="$LIBS_DIR/RadioLib/src"; echo "ok   $(cat "$LOG") (negative control)"
     else
       echo "note $LIBS_DIR/RadioLib is not a copy written by tools/radiolib.py: not used"
     fi
@@ -147,9 +146,6 @@ else
   done
   if [[ -z "$RADIOLIB" ]]; then
     if fetch_copy "patched copy" "$TMP/patched/RadioLib"; then RADIOLIB="$TMP/patched/RadioLib/src"; fi
-  fi
-  if [[ -n "$RADIOLIB" && -z "$STOCK" ]]; then
-    if fetch_copy "stock tag" "$TMP/stock/RadioLib" --unpatched; then STOCK="$TMP/stock/RadioLib/src"; fi
   fi
 fi
 
@@ -201,7 +197,6 @@ if [[ -n "$RADIOLIB" ]]; then
       -isystem "$RADIOLIB"
   done
   check_library "$RADIOLIB" "UNO Q" "${UNOQ[@]}"
-  check_library "$RADIOLIB" "VENTUNO Q" "${VENTUNOQ[@]}"
 fi
 
 # ---- Flight build matrix (Phase B specification PB-8.5, "WS2 extra") ------------------------
@@ -256,28 +251,28 @@ else
   echo "ok   unkeyed build has no key header"
 fi
 
-# ---- Station I/O sketch (VENTUNO Q) ---------------------------------------------------
+# ---- Station I/O sketch (ground UNO Q) --------------------------------------------------
 if [[ -f "$FP" ]]; then
-  check "$FP" "" "${VENTUNOQ[@]}"
+  check "$FP" "" "${UNOQ[@]}"
   if [[ -n "$RADIOLIB" ]]; then
     for chip in 1268 1262; do
-      check "$FP" " [DSSQ_RADIO_SX126X=1, SX$chip]" "${VENTUNOQ[@]}" -DDSSQ_RADIO_SX126X=1 -DDSSQ_SX_CHIP=$chip \
+      check "$FP" " [DSSQ_RADIO_SX126X=1, SX$chip]" "${UNOQ[@]}" -DDSSQ_RADIO_SX126X=1 -DDSSQ_SX_CHIP=$chip \
         -isystem "$RADIOLIB"
     done
   fi
 fi
 
-# ---- Negative control: the stock tag must not build for the VENTUNO Q --------------------
-if [[ -n "$STOCK" ]]; then
+# ---- Negative control: RadioLib must not build for a Zephyr board it does not know ------
+if [[ -n "$RADIOLIB" ]]; then
   # LC_ALL=C: GCC quotes types with ASCII ' only in the C locale (UTF-8 locales, as on the CI
   # runner, give U+2018 / U+2019), and the diagnostics are matched below.
-  if LC_ALL=C "$CXX" "${LIBFLAGS[@]}" "${VENTUNOQ[@]}" -I"$STUB" -I"$STOCK" -x c++ "$STOCK/hal/Arduino/ArduinoHal.cpp" \
-       >"$LOG" 2>&1; then
-    echo "FAIL negative control: stock RadioLib 7.8.1 ArduinoHal.cpp compiled for the VENTUNO Q -"
+  if LC_ALL=C "$CXX" "${LIBFLAGS[@]}" "${UNKNOWN_ZEPHYR[@]}" -I"$STUB" -I"$RADIOLIB" -x c++ \
+       "$RADIOLIB/hal/Arduino/ArduinoHal.cpp" >"$LOG" 2>&1; then
+    echo "FAIL negative control: RadioLib 7.8.1 ArduinoHal.cpp compiled for an unknown Zephyr board -"
     echo "     the stub no longer models the core's typed pinMode / digitalWrite / attachInterrupt"
     fail=1
   elif grep -q "to 'PinMode'" "$LOG" && grep -q "to 'PinStatus'" "$LOG"; then
-    echo "ok   negative control: stock RadioLib 7.8.1 ArduinoHal.cpp fails for the VENTUNO Q" \
+    echo "ok   negative control: RadioLib 7.8.1 ArduinoHal.cpp fails for an unknown Zephyr board" \
          "($(grep -c 'error:' "$LOG") PinMode / PinStatus errors, as with the real core)"
   else
     echo "FAIL negative control: unexpected diagnostics"; cat "$LOG"; fail=1

@@ -19,7 +19,9 @@
 #
 #  Evidence was produced with the real arduino:zephyr toolchain (arduino-cli 1.5.2 as
 #  App Lab embeds it, Zephyr SDK 1.0.1 arm-zephyr-eabi-g++ 14.3, ArduinoCore-zephyr
-#  b08a650, -Os) for the UNO Q flight sketch and the VENTUNO Q station sketch.
+#  b08a650, -Os) for the UNO Q flight sketch and the station sketch (the latter then
+#  built for the earlier ground board); CI re-checks the stack bound of hunk 1 for both
+#  sketches, both built for the UNO Q, on every build (ci.yml "Bridge thread stack bound").
 #
 #  Hunk 1  src/bridge.h - bridge thread stack 500 -> 1536 octets
 #    Defect:   Bridge.begin() starts the "bridge" thread (update() every millisecond,

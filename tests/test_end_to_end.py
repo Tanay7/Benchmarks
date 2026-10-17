@@ -147,9 +147,14 @@ def test_v3_telemetry_beacon_and_sdls_ae_both_ways(world):
     assert w.sim.tc_ok >= 2 and w.sim.sdls.failures == 0                          # AE accepted on board
     assert s["link"]["sdls"]["tc_next_sn"] >= 3 and (Path(w.cfg["gds"]["archive_dir"]) / "sdls_sn.txt").exists()
     assert gs.panel_status()["beacon"] == 0
-    from dssq.display.frontpanel import status_lines
+    from dssq.display.frontpanel import matrix_line, status_lines
     line, q = status_lines(gs.panel_status())
     assert line.startswith("S|1|") and line.endswith("|0") and q == "Q|-1"     # AOS, beacon NOMINAL, none pending
+    m = gs.panel_status()["matrix"]                                             # D-78 LED matrix
+    assert m["sync"] in ("LOCK", "FLYWHEEL") and m["rssi_recent"] and isinstance(m["rssi_dbm"], float)
+    assert m["lost_10m"] == 0 and (m["margin_db"], m["clock_synced"], m["rssi_overload"]) == (None, None, None)
+    ml = matrix_line(gs.panel_status())
+    assert ml.startswith(("M|L|", "M|F|")) and ml.endswith("|?|0|?") and ml.split("|")[3].lstrip("-").isdigit()
     json.dumps(json_safe(s), allow_nan=False)                                    # web-serialisable
 
 

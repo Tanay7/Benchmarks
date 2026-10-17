@@ -2,7 +2,7 @@
 #  Continuous integration for the VGQ-1 spacecraft / DSS-Q ground station.
 #
 #  The repository is the two Arduino App Lab Apps (vgq1-spacecraft: UNO Q flight
-#  software + EGSE; dssq-groundstation: VENTUNO Q station sketch + ground data
+#  software + EGSE; dssq-groundstation: UNO Q station sketch + ground data
 #  system), the Nicla firmware, tools/ and tests/. Runs on every push and pull request:
 #    lint           ruff (every .py) and mypy (station, EGSE and tool code), versions
 #                   pinned in requirements-dev.txt, settings in pyproject.toml; shellcheck
@@ -28,10 +28,10 @@
 #                   RouterBridge host test against the platform's Arduino_RPClite /
 #                   MsgPack, the bridge-thread stack bound of the patched library and
 #                   the loader symbol check (tools/llext_check.py: the board's loader
-#                   must resolve every undefined symbol of each sketch). Last, the UNO Q
-#                   flight sketch again on arduino:zephyr 0.90.0, the newest core before
-#                   1.0.0 (Zephyr SDK 0.16.8 toolchain), which older App Lab installations
-#                   still use.
+#                   must resolve every undefined symbol of each sketch). Last, both UNO Q
+#                   sketches (flight and station, both radio options) again on
+#                   arduino:zephyr 0.90.0, the newest core before 1.0.0 (Zephyr SDK 0.16.8
+#                   toolchain), which older App Lab installations still use.
 #
 #  Actions are pinned to full commit hashes (version in the comment).
 # =============================================================================
@@ -122,8 +122,8 @@ jobs:
           done
 
       # Every translation unit of both sketches against the Arduino stubs, every build
-      # switch (radio models, USLP, SDLS modes, keyed, debug monitor), RadioLib for both
-      # boards and its negative control (the stock tag must fail for the VENTUNO Q).
+      # switch (radio models, USLP, SDLS modes, keyed, debug monitor), RadioLib for the
+      # UNO Q and its negative control (it must fail for a Zephyr board it does not know).
       - name: Firmware compile check (check_firmware.sh)
         run: bash tools/host_test/check_firmware.sh
 
@@ -173,7 +173,7 @@ jobs:
             fi
           done
 
-      # "Arduino Q Boards" = arduino:zephyr (UNO Q and VENTUNO Q; ArduinoCore-zephyr
+      # "Arduino Q Boards" = arduino:zephyr (both sketches: UNO Q; ArduinoCore-zephyr
       # extra/artifacts/zephyr_unoq.json). A profile that names the platform without a
       # version uses the installed one, as App Lab does, so install it first.
       - name: Install the Arduino Q Boards platform
@@ -223,7 +223,7 @@ jobs:
           }
           EOF
 
-      - name: VENTUNO Q station sketch (default radio, E22 via the RCU)
+      - name: UNO Q station sketch (default radio, E22; Radio Control Unit optional)
         run: |
           source "$RUNNER_TEMP/build.sh"
           build dssq-groundstation/sketch station
@@ -235,7 +235,7 @@ jobs:
           source "$RUNNER_TEMP/build.sh"
           build vgq1-spacecraft/sketch flight
 
-      - name: VENTUNO Q station sketch, SX126x radio option (SX1268)
+      - name: UNO Q station sketch, SX126x radio option (SX1268)
         run: |
           source "$RUNNER_TEMP/build.sh"
           build dssq-groundstation/sketch station-sx126x \
@@ -289,17 +289,18 @@ jobs:
         run: |
           source "$RUNNER_TEMP/build.sh"
           baseline unoq unoq
-          baseline ventunoq ventunoq
           llext flight unoq
           llext flight-sx126x unoq
-          llext station ventunoq
-          llext station-sx126x ventunoq
+          llext station unoq
+          llext station-sx126x unoq
 
       # Boards whose App Lab has not been updated build with arduino:zephyr 0.90.0 or older
       # (Zephyr SDK 0.16.8 toolchain, GCC 12.2): the sketch is linked with newlib-nano libm,
-      # which needs __errno (src/libc_compat.cpp), compiled without -fno-extern-tls-init and
-      # loaded by a Zephyr 4.2 loader (src/fsw/rpc_mailbox.h, current_thread()). The UNO Q
-      # flight sketch must build and load there too; no core before 1.0.0 has the VENTUNO Q.
+      # which needs __errno (src/libc_compat.cpp), without libgcc's __aeabi_f2ulz (no float
+      # -> 64-bit integer conversion in the sketches), compiled without -fno-extern-tls-init
+      # and loaded by a Zephyr 4.2 loader (src/fsw/rpc_mailbox.h and the station sketch:
+      # k_sched_current_thread_query(), never k_current_get()). Both UNO Q sketches must
+      # build and load there too (D-71: the ground station is a UNO Q as well).
       # This replaces the platform installed above, so these steps come last.
       - name: Install arduino:zephyr 0.90.0 (the last core before 1.0.0)
         run: |
@@ -330,3 +331,14 @@ jobs:
           baseline unoq unoq-legacy
           llext flight-legacy unoq-legacy
           llext flight-legacy-sx126x unoq-legacy
+
+      - name: UNO Q station sketch on the older core (both radio options, loader symbol check)
+        if: env.LEGACY_CORE != ''
+        run: |
+          source "$RUNNER_TEMP/build.sh"
+          build dssq-groundstation/sketch station-legacy
+          build dssq-groundstation/sketch station-legacy-sx126x \
+            --build-property "compiler.cpp.extra_flags=-DDSSQ_RADIO_SX126X=1 -DDSSQ_SX_CHIP=1268"
+          [[ -d "$RUNNER_TEMP/build-baseline-unoq-legacy" ]] || baseline unoq unoq-legacy
+          llext station-legacy unoq-legacy
+          llext station-legacy-sx126x unoq-legacy

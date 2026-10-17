@@ -15,17 +15,25 @@ Model differences handled here (contract 2.1):
   * Power code -> dBm: T33D 33 / 30 / 27 / 24 dBm (VERIFY, docs/08 T-RF-07),
     T37S 37 dBm for every code.
 
-Ground wiring: the module's UART reaches Linux through a 3.3 V-logic USB-UART adapter
-(T33D) or the E22-400TBH-02 board's CH340X (T37S). With the Radio Control Unit (VENTUNO Q
-MCU on M0/M1/AUX) the GDS switches modes itself (radioctl.py). Without it, set the
-mode pins by hand (M1 = 1, M0 = 0) and run, in the App's python/ folder:
+Ground wiring: the module's UART reaches Linux through a USB-UART on a port of the ground
+UNO Q's USB-C hub (D-71): the EBYTE E15-USB-T2 (CP2102, 3.3 V logic) for the T33D, the
+E22-400TBH-02 board's own CH340X for the T37S; both appear as /dev/ttyUSBn - name the
+port by its stable /dev/serial/by-id/... link in station.toml. With the Radio Control
+Unit (station UNO Q MCU D2 / D3 / D7 on M0 / M1 / AUX, [gds] rcu = true) the GDS
+switches modes itself (radioctl.py). Without it, put the module into configuration mode
+by hand (M1 = 1, M0 = 0: on the E15-USB-T2 the M0 jumper fitted, M1 removed; on the
+TBH-02 the M0 cap on header pins 9-10 fitted, the M1 cap on pins 7-8 removed) and run,
+in the App's python/ folder:
     python -m dssq.radio.e22 --port /dev/ttyUSB0 --write --config config/station.toml
+The tool sends nothing before the operator confirms configuration mode (--mode2-confirmed
+or the prompt): in normal mode 0 the module transmits every octet it receives (D-77).
 Register layout mirror: vgq1-spacecraft/sketch/src/drivers/e22.h.
 
 Serial transport (SerialPort): standard library only (termios / fcntl / select; no
 pyserial, contract section 23 rule 2), POSIX ttys such as /dev/ttyUSB0 or /dev/ttyACM0.
 The App Lab container bind-mounts /dev, runs in group dialout and allows ttyUSB / ttyACM
-(contract section 23), so the same code serves the App and the systemd service.
+(contract section 23; seen on the earlier ground board, VERIFY on the UNO Q), so the same
+code serves the App and the systemd service.
 """
 from __future__ import annotations
 
@@ -82,7 +90,9 @@ def regs_from_cfg(c: Mapping[str, object], model: str | RadioModel | None = None
     m = _e22_model(model if model is not None else c.get("model"))       # type: ignore[arg-type]
     addr = _field(c, "address", 0, 0xFFFF)
     reg0 = (_field(c, "uart_code", 3, 7) << 5) | (_field(c, "parity", 0, 3) << 3) | _field(c, "air_rate", 2, 7)
-    fault_log = bool(c.get("fault_log", True)) and m.has_fault_log
+    # fault_log absent: on for the T37S, the only model with the log (= config.merge's
+    # default for [radio] model = "E22-400T37S", D-77); never written to a T33D.
+    fault_log = bool(c.get("fault_log", m.has_fault_log)) and m.has_fault_log
     reg1 = (_field(c, "subpacket", 0, 3) << 6) | (int(bool(c.get("rssi_noise", True))) << 5) | \
            (REG1_FAULT_LOG if fault_log else 0) | _field(c, "power", 0, 3)
     reg3 = (int(bool(c.get("rssi_byte", True))) << 7) | (int(bool(c.get("fixed", False))) << 6) | \
@@ -123,7 +133,8 @@ def describe(regs: bytes, model: str | RadioModel | None = None) -> dict:
 
 # ------------------------------------------------------------------ serial transport
 _ERRNO_HINTS = {
-    errno.ENOENT: " (no such device: check the USB-UART, ls /dev/serial/by-id/)",
+    errno.ENOENT: " (no such device: check the USB-UART, the USB-C hub and its power supply, "
+                  "ls /dev/serial/by-id/)",
     errno.EACCES: " (permission denied: the user needs group 'dialout')",
     errno.EAGAIN: " (port locked by another process)",
     errno.EBUSY: " (port busy)",
@@ -397,23 +408,50 @@ def _cmd(port: SerialPort, data: bytes, reply_len: int, timeout_s: float = 1.5) 
     return buf
 
 
+MODE2_HINT = ("configuration mode = mode 2: M1 = 1, M0 = 0 (E15-USB-T2: M0 jumper fitted, M1 jumper "
+              "removed; E22-400TBH-02: M0 cap on header pins 9-10 fitted, M1 cap on pins 7-8 removed)")
+
+
+def confirm_mode2(model: RadioModel, confirmed: bool, ask: bool) -> bool:
+    """D-77: in normal mode (0) the module transmits every octet it receives on its UART
+    (T33D / T37S manuals ch. 6), so a command of this tool would go out on air - at
+    37 dBm on the T37S. Nothing is sent until the operator confirms configuration mode:
+    --mode2-confirmed, or "mode2" typed at the prompt (`ask`: stdin is a terminal)."""
+    if confirmed:
+        return True
+    if not ask:
+        return False
+    print(f"Is the {model.name} in {MODE2_HINT}?\nIn normal mode it would transmit this tool's commands "
+          f"on air ({power_dbm(model, 0):.0f} dBm).")
+    try:
+        return input("Type mode2 to continue, anything else to stop: ").strip().lower() == "mode2"
+    except EOFError:
+        return False
+
+
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="E22 configuration tool (module in CONFIG mode: M1 = 1, M0 = 0)")
+    ap = argparse.ArgumentParser(description=f"E22 configuration tool (module in {MODE2_HINT})")
     ap.add_argument("--port", required=True)
     ap.add_argument("--config", help="station.toml with a [radio] table")
     ap.add_argument("--model", help="E22-400T33D (default) or E22-400T37S; default: [radio] model")
     ap.add_argument("--write", action="store_true", help="write (save) the configuration")
     ap.add_argument("--volatile", action="store_true", help="use C2 (not saved) instead of C0")
+    ap.add_argument("--mode2-confirmed", action="store_true",
+                    help="the module IS in configuration mode (mode 2); without it the tool asks on a terminal "
+                         "and otherwise sends nothing")
     a = ap.parse_args(argv)
     cfg: dict = {}
-    if a.config or a.write:
-        from ..config import load_config
-        cfg = load_config(a.config)["radio"]
     try:
+        if a.config or a.write:
+            from ..config import load_config
+            cfg = load_config(a.config, radio_model=a.model)["radio"]    # model-dependent defaults follow --model
         model = _e22_model(a.model if a.model else cfg.get("model"))
     except ValueError as e:
         sys.exit(str(e))
     print(f"model: {model.name}")
+    if not confirm_mode2(model, a.mode2_confirmed, sys.stdin.isatty()):
+        sys.exit("not confirmed: nothing sent. Put the module into configuration mode (M1 = 1, M0 = 0) and run "
+                 "again with --mode2-confirmed, or answer the prompt.")
     try:
         ser = SerialPort(a.port, CONFIG_BAUD, timeout_s=0.2)
     except OSError as e:

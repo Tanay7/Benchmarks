@@ -104,6 +104,7 @@ FRAME_PERIOD_FACTOR = 4.0           # flight kModePeriodX10 SAFE (40) / 10: the 
 MIN_FRAME_PERIOD_S = 1.5            # flight kMinFramePeriodMs
 E22_UART_CADU_S = (CADU_LEN + 1) * 10 / 9600.0   # ground E22 -> USB: one CADU + RSSI octet at 9600 8N1
 STATION_IO_STALE_S = 12.0
+PANEL_TX_HOLD_S = 1.0                # LED-matrix uplink row: held one status-line period (frontpanel TX_PERIOD_S)
 SDLS_SN_FILE = "sdls_sn.txt"          # <archive_dir>/: last SDLS TC sequence number used (F-64)
 MISMATCH_FRAMES = 3                 # consecutive BAD_SPI / BAD_IV data frames -> service mismatch
 STAGE_LOG_EVERY_S = 60.0
@@ -446,6 +447,7 @@ class GroundStation:
         # clock step back must not hold the LOS identification and the radio jobs, SteadyClock).
         self.mono: Callable[[], float] = SteadyClock()
         self._uplink_busy_until = -math.inf
+        self._uplink_tx_until = -math.inf            # planned end of the last transmission handed to the radio
         self._last_window_ert = -math.inf                 # ERT (steady clock) of the last window opened
         self._last_wake = -math.inf                       # when the last WAKE was radiated (steady clock)
         self._job_wait: tuple[tuple[str, Any], float] | None = None   # (head radio job, waiting since)
@@ -515,8 +517,13 @@ class GroundStation:
         self.seq_file: dict[str, Any] | None = None
         self.seq_uplink_state: dict[str, Any] = {"pending_confirm_id": None, "queued_ids": [], "first_slot": None}
         # ---- station I/O MCU (display/frontpanel.py) ----
-        self.station_io: dict[str, Any] = {"connected_t": None, "fw": "", "rcu": False, "kb": False, "input": "",
-                                           "last_status_line": None, "beacon_sent": None}
+        # RCU (D-78): rcu_configured = [gds] rcu; rcu_last / rcu_last_t = what the MCU reports
+        # in its hello about its last rcu_mode() call ("OK" / "FAILED" at that time, "NEVER"
+        # since its boot; None = no hello yet, or a sketch that does not report it).
+        self.station_io: dict[str, Any] = {"connected_t": None, "fw": "", "kb": False, "input": "",
+                                           "last_status_line": None, "beacon_sent": None,
+                                           "rcu_configured": bool(cfg["gds"]["rcu"]), "rcu_last": None,
+                                           "rcu_last_t": None}
         # ---- alarm ----
         self.alarm = "NONE"
         self.alarm_reasons: list[str] = []
@@ -1151,6 +1158,8 @@ class GroundStation:
         sent += id_sent
         unused_id_s = self._tx_cost_s(id_octets) if id_booked and not id_sent else 0.0
         self._uplink_busy_until = start + plan.used_s - unused_id_s
+        if sent:
+            self._uplink_tx_until = max(self._uplink_tx_until, self._uplink_busy_until)
         for r in self.fop.all[-12:]:
             if r.history and r.history[-1][0] == now and r.state == "RADIATED":
                 self.console(f"#{r.id} {r.cmd.text}: RADIATED ({r.detail})")
@@ -1234,6 +1243,8 @@ class GroundStation:
         if reason is None:
             return 0
         self.outbox.append(self.station_id.payload)
+        self._uplink_tx_until = max(self._uplink_tx_until,
+                                    self.mono() + self._tx_cost_s(len(self.station_id.payload)))
         self.station_id.sent(now, reason)
         self.event("INFO", "IDENT", f"station identification ({reason}): {self.station_id.text}", now)
         return 1
@@ -1297,10 +1308,10 @@ class GroundStation:
 
     def _radio_rejection(self, d: str) -> str:
         if self.settings.model.packet_mode:
-            return (f"{d} needs the station SX126x radio (VENTUNO Q MCU sketch built with DSSQ_RADIO_SX126X = 1, "
+            return (f"{d} needs the station SX126x radio (station UNO Q MCU sketch built with DSSQ_RADIO_SX126X = 1, "
                     "connected through the Router Bridge)")
-        return (f"{d} needs the Radio Control Unit (VENTUNO Q MCU wired to the {self.settings.model.name} M0/M1/AUX, "
-                "[gds] rcu = true)")
+        return (f"{d} needs the Radio Control Unit (station UNO Q MCU D2/D3/D7 wired to the "
+                f"{self.settings.model.name} M0/M1/AUX, [gds] rcu = true)")
 
     def _ground_directive(self, toks: list[str], source: str) -> dict[str, Any]:
         d = toks[0].upper()
@@ -2063,9 +2074,18 @@ class GroundStation:
             return False
 
     # -------------------------------------------------------- station I/O MCU
-    def station_hello(self, fw: str, rcu: bool, kb: bool) -> None:
+    def station_hello(self, fw: str, kb: bool, rcu_last: str | None = None, rcu_age_s: float | None = None) -> None:
+        """The MCU's hello (display/frontpanel.py parse_hello). The time of its last RCU mode
+        change is the hello time minus the reported age (whole seconds), kept while the
+        report stays the same so it does not jitter by a second between hellos."""
         with self.lock:
-            self.station_io.update(connected_t=time.time(), fw=fw, rcu=rcu, kb=kb)
+            now = time.time()
+            io = self.station_io
+            t = None if rcu_age_s is None else now - rcu_age_s
+            if t is not None and rcu_last == io["rcu_last"] and io["rcu_last_t"] is not None and \
+                    abs(t - io["rcu_last_t"]) < 2.0:
+                t = io["rcu_last_t"]
+            io.update(connected_t=now, fw=fw, kb=kb, rcu_last=rcu_last, rcu_last_t=t)
 
     def station_input(self, text: str) -> None:
         with self.lock:
@@ -2079,13 +2099,40 @@ class GroundStation:
                 re.fullmatch(r"-?[0-9]", parts[4]) else None
 
     def panel_status(self) -> dict[str, Any]:
-        """The five values of the station annunciator S/Q lines (cheap, no snapshot)."""
+        """The values of the station annunciator S/Q lines and of the LED-matrix M line
+        (cheap, no snapshot)."""
         with self.lock:
             f = self.fop
             return {"los": self.rx.los, "alarm": self.alarm,
                     "uplink": bool(f.sent or f.bypass_q or f.queue),
                     "beacon": self.beacon["level"],
-                    "pending_ids": [k for k, p in self.pending_confirm.items() if not p["confirmed"]]}
+                    "pending_ids": [k for k, p in self.pending_confirm.items() if not p["confirmed"]],
+                    "matrix": self._matrix_status(time.time())}
+
+    def _matrix_status(self, now: float) -> dict[str, Any]:
+        """The station MCU's LED-matrix fields (D-78; frontpanel.matrix_line). Only what this
+        GDS measures; None = not produced, and the MCU leaves that row blank:
+          tx            the GDS handed CLTUs or the identification to the radio and their
+                        planned air time is not over, held PANEL_TX_HOLD_S (one status line)
+                        so a short burst shows (the SX126x sketch adds its own TX state)
+          rssi_dbm      the last reception's calibrated RSSI, rssi_recent = within the LOS
+                        timeout
+          rssi_overload receiver overload of that reading: not classified yet (None)
+          margin_db, margin_floor  margin against the worst-case sensitivity and whether
+                        it is only an upper bound (noise floor): not produced yet (None)
+          lost_10m      frames lost in the last 10 minutes of reception (the link-manager
+                        FER window: a LOS gap is not counted)
+          clock_synced  station clock synchronisation: not produced yet (None)"""
+        rx = self.rx
+        t = rx.last_rx.get("t")
+        los_s = rx.los_timeout_s if rx.los_timeout_s is not None else float(self.cfg["gds"]["los_timeout_s"])
+        return {"sync": "PACKET" if self.settings.model.packet_mode else self.sync.state,
+                "tx": self.mono() < self._uplink_tx_until + PANEL_TX_HOLD_S,
+                "rssi_dbm": rx.last_rx.get("rssi_dbm"),
+                "rssi_recent": t is not None and 0.0 <= now - t <= los_s,
+                "rssi_overload": None, "margin_db": None, "margin_floor": None,
+                "lost_10m": int(math.fsum(rx.fer_lost.values(now))),
+                "clock_synced": None}
 
     # -------------------------------------------------------------- snapshot
     def _radio_link_snapshot(self) -> dict[str, Any]:

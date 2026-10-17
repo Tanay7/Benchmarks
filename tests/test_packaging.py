@@ -402,7 +402,7 @@ def test_package_layout(template_repo: Path, built: Path) -> None:
             assert all(rel.startswith("sketch/libraries/") for rel in packaged), packaged
         assert not any(name.split("/")[-1] == "requirements.txt" for name in names)
         assert not any("__pycache__" in name or name.startswith(f"{top}/data/") for name in names)
-    host = zip_names(built / "dssq-groundstation-ventunoq.zip")
+    host = zip_names(built / "dssq-groundstation-unoq.zip")
     assert "dssq-groundstation/host/install_station.sh" in host
 
 
@@ -528,7 +528,7 @@ def test_verify_exit_status_for_key_material_is_4(built: Path, tmp_path: Path) -
     rewrite_zip(out / "vgq1-spacecraft-unoq.zip", _add_key)
     proc = run_packager(ROOT, "--verify", "--out", str(out))
     assert proc.returncode == pa.EXIT_SECRET, proc.stdout + proc.stderr
-    assert "SECRET" in proc.stdout and "ok   dssq-groundstation-ventunoq.zip" in proc.stdout
+    assert "SECRET" in proc.stdout and "ok   dssq-groundstation-unoq.zip" in proc.stdout
 
 
 def test_verify_rejects_stale_sums_and_missing_packages(built: Path, tmp_path: Path) -> None:
@@ -538,10 +538,10 @@ def test_verify_rejects_stale_sums_and_missing_packages(built: Path, tmp_path: P
     lines = sums.read_text().splitlines()
     lines = [("0" * 64 + line[64:]) if line.endswith("  vgq1-spacecraft-unoq.zip") else line for line in lines]
     sums.write_text("\n".join(lines) + "\n")
-    (out / "dssq-groundstation-ventunoq.zip").unlink()
+    (out / "dssq-groundstation-unoq.zip").unlink()
     proc = run_packager(ROOT, "--verify", "--out", str(out))
     assert proc.returncode == pa.EXIT_FAIL, proc.stdout + proc.stderr
-    assert "FAIL dssq-groundstation-ventunoq.zip: missing" in proc.stdout
+    assert "FAIL dssq-groundstation-unoq.zip: missing" in proc.stdout
     assert "SHA256SUMS: vgq1-spacecraft-unoq.zip has a different SHA-256" in proc.stdout
 
 

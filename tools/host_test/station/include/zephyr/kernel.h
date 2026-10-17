@@ -26,6 +26,9 @@ inline k_tid_t k_current_get() {
   thread_local k_thread self;
   return &self;
 }
+// The scheduler's query the sketch uses (it loads on arduino:zephyr 0.90.0, whose loader
+// refuses k_current_get()'s TLS init reference): the same per-thread identity here.
+inline k_tid_t k_sched_current_thread_query() { return k_current_get(); }
 
 struct k_sem {
   std::mutex m;

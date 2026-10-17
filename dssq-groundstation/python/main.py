@@ -1,4 +1,4 @@
-"""DSS-Q ground station - Arduino App Lab entry point (VENTUNO Q Linux side; Phase B PB-6.2).
+"""DSS-Q ground station - Arduino App Lab entry point (ground UNO Q Linux side; Phase B PB-6.2).
 
 The App runs the whole ground data system in App Lab's Python container: the radio
 receiver chain, telecommanding, the archive, and the operator web dashboard on port 8080

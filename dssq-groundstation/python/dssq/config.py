@@ -1,15 +1,18 @@
 """Station configuration: loader, defaults, validation and App Lab path rules.
 
 The configuration is TOML (config/station.toml), parsed with the standard library's
-tomllib (Python >= 3.11; the station runs 3.12, the App Lab container 3.13), so no
-package is needed (contract section 23 rule 2).
+tomllib (Python >= 3.11: the host Python of the ground UNO Q's Debian - release VERIFY on
+the board - or of a Linux PC; the App Lab container runs 3.13), so no package is needed
+(contract section 23 rule 2).
 
 Merge rule (Phase B specification PB-3.2): the user file is laid over DEFAULTS table by
 table and key by key, and the nested tables ([radio.sx126x], [radio.sensitivity_measured],
 [spectral.classifier]) are merged the same way one level down, so a partial table keeps
 every default it does not mention. DEFAULTS mirrors config/station.toml except [radio]
 model: the file names the station's model explicitly, while an ABSENT key means "auto"
-(contract 33: an E22 station that follows the radio model the spacecraft reports).
+(contract 33: an E22 station that follows the radio model the spacecraft reports). One
+default depends on another key: an absent [radio] fault_log is true for an explicit
+model = "E22-400T37S" and false otherwise (fault_log_default(), D-77).
 
 load_config() then calls validate(), which raises ValueError naming the offending key: a
 typo or an out-of-range value stops the station at start-up instead of being silently
@@ -98,8 +101,9 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "gds": {"archive_dir": "archive", "http_host": "127.0.0.1", "http_port": 8080, "http_token": "",
             "http_allowed_hosts": [],
             "los_timeout_s": 90.0, "frontpanel": True, "rcu": False, "router_address": "",
-            "console_interval_s": 10.0, "archive_keep_days": 180, "archive_max_gb": 16.0,
-            "archive_min_free_mb": 2048.0},
+            "console_interval_s": 10.0, "archive_keep_days": 180,
+            # D-80: sized for the ground UNO Q 4 GB's 32 GB eMMC, shared with Debian and App Lab
+            "archive_max_gb": 8.0, "archive_min_free_mb": 2048.0},
     "commanding": {"t1_s": 45.0, "tx_limit": 3, "window": 5, "verify_timeout_s": 300.0,
                    "require_two_person_for_hazardous": False, "auth_token": ""},
 }
@@ -135,18 +139,40 @@ def merge(user: Mapping[str, Any], where: str = "station.toml") -> dict[str, Any
                 cfg[section][key] = {**cfg[section][key], **copy.deepcopy(dict(value))}
             else:
                 cfg[section][key] = copy.deepcopy(value)
+    radio = user.get("radio", {})
+    if isinstance(radio, Mapping) and "fault_log" not in radio:
+        cfg["radio"]["fault_log"] = fault_log_default(cfg["radio"]["model"])
     return cfg
 
 
-def load_config(path: str | Path | None = None) -> dict[str, Any]:
+def fault_log_default(model: object) -> bool:
+    """[radio] fault_log when the file does not set it (D-77): true for an explicit
+    model = "E22-400T37S", the only model with the abnormal-status log (T37S manual v1.5
+    5.7: FF FF FF 01..04 reports, REG1 b2), false otherwise - "auto" keeps the T33D
+    register rules for the station's own module (gds._follow_sc_model)."""
+    if link.is_auto_model(model) or not isinstance(model, str):
+        return False
+    try:
+        return link.get_model(model).name == link.E22_T37S
+    except ValueError:                              # validate() names the bad model
+        return False
+
+
+def load_config(path: str | Path | None = None, radio_model: str | None = None) -> dict[str, Any]:
     """DEFAULTS merged with the TOML file at `path` (default: config/station.toml; a missing
-    file yields the defaults), then validated. Raises tomllib.TOMLDecodeError (a ValueError)
-    on bad TOML and ValueError naming the key on an invalid value."""
+    file yields the defaults), then validated. radio_model (the E22 configuration tool's
+    --model) replaces [radio] model before the merge, so the defaults that depend on the
+    model follow it. Raises tomllib.TOMLDecodeError (a ValueError) on bad TOML and
+    ValueError naming the key on an invalid value."""
     p = Path(path) if path else DEFAULT_PATH
     user: dict[str, Any] = {}
     if p.exists():
         with open(p, "rb") as f:
             user = tomllib.load(f)
+    if radio_model is not None:
+        radio = user.get("radio", {})
+        if isinstance(radio, Mapping):
+            user = {**user, "radio": {**radio, "model": radio_model}}
     cfg = merge(user, str(p))
     for warning in validate(cfg):
         log.warning("%s: %s", p, warning)

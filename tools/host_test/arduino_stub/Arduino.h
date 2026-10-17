@@ -9,8 +9,8 @@
 // and digitalWrite() live in namespace arduino (api/Compat.h), made visible to
 // unqualified calls by the core's `using namespace arduino;`. A ::-qualified call
 // therefore sees only the typed functions - the reason RadioLib's ArduinoHal needs
-// its PinMode / PinStatus casts on a platform it does not know (VENTUNO Q), which a
-// looser stub would hide. Classes (String, Print, Stream, serial) are simplified.
+// its PinMode / PinStatus casts on a Zephyr board it does not know (check_firmware.sh's
+// negative control), which a looser stub would hide. Classes (String, Print, Stream, serial) are simplified.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>

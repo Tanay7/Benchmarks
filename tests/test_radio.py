@@ -16,6 +16,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -235,6 +236,81 @@ def test_register_encoding_rejects_bad_values_and_packet_models():
         regs_from_cfg({"model": SX126X})
     with pytest.raises(ValueError):
         describe(bytes(6))
+
+
+# ------------------------------- D-77: fault_log default and the configuration tool's mode-2 guard
+def test_fault_log_defaults_to_on_for_the_t37s_only(tmp_path):
+    from dssq.config import fault_log_default, load_config, merge, validate
+    assert merge({"radio": {"model": E22_T37S}})["radio"]["fault_log"] is True
+    for model in (E22_T33D, "auto", SX126X, "no-such-model"):
+        assert merge({"radio": {"model": model}})["radio"]["fault_log"] is False
+    assert merge({})["radio"]["fault_log"] is False and fault_log_default(None) is False
+    assert merge({"radio": {"model": E22_T37S, "fault_log": False}})["radio"]["fault_log"] is False
+    cfg = merge({"radio": {"model": E22_T37S}})
+    assert validate(cfg) == [] and regs_from_cfg(cfg["radio"])[4] & 0x04
+    # regs_from_cfg without the key: the same rule (on for the T37S, never on a T33D).
+    assert regs_from_cfg({"model": E22_T37S})[4] & 0x04 and not regs_from_cfg({"model": E22_T33D})[4] & 0x04
+    # station.toml names no fault_log: it follows the model there too, also through --model.
+    assert load_config()["radio"]["fault_log"] is False
+    assert load_config(radio_model=E22_T37S)["radio"]["fault_log"] is True
+    toml = tmp_path / "station.toml"
+    toml.write_text(f'[radio]\nmodel = "{E22_T37S}"\n')
+    assert load_config(toml)["radio"]["fault_log"] is True
+    toml.write_text(f'[radio]\nmodel = "{E22_T37S}"\nfault_log = false\n')
+    assert load_config(toml)["radio"]["fault_log"] is False
+
+
+class _FakeConfigPort:
+    """SerialPort stand-in for the configuration tool: records what it would send."""
+    opened: ClassVar[list["_FakeConfigPort"]] = []
+
+    def __init__(self, path, baud, timeout_s=0.2):
+        self.path, self.sent = path, []
+        _FakeConfigPort.opened.append(self)
+
+    def reset_input_buffer(self):
+        pass
+
+    def write(self, data):
+        self.sent.append(bytes(data))
+
+    def flush(self):
+        pass
+
+    def read(self, n, timeout_s=0.0):
+        return b""                                   # no module answering
+
+    def close(self):
+        pass
+
+
+def test_config_tool_sends_nothing_before_mode2_is_confirmed(monkeypatch):
+    import io
+    from dssq.radio import e22 as e22mod
+    monkeypatch.setattr(e22mod, "SerialPort", _FakeConfigPort)
+    _FakeConfigPort.opened = []
+    monkeypatch.setattr(e22mod.sys, "stdin", io.StringIO(""))          # not a terminal: no prompt
+    with pytest.raises(SystemExit, match="not confirmed: nothing sent"):
+        e22mod.main(["--port", "/dev/e22-test", "--model", E22_T37S])
+    assert _FakeConfigPort.opened == []
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+    monkeypatch.setattr(e22mod.sys, "stdin", Tty(""))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "no")
+    with pytest.raises(SystemExit, match="not confirmed"):
+        e22mod.main(["--port", "/dev/e22-test", "--model", E22_T33D])
+    assert _FakeConfigPort.opened == []
+    monkeypatch.setattr("builtins.input", lambda prompt="": " Mode2 ")
+    with pytest.raises(SystemExit, match="no reply"):
+        e22mod.main(["--port", "/dev/e22-test", "--model", E22_T33D])
+    assert [p.sent for p in _FakeConfigPort.opened] == [[bytes([0xC1, 0x80, 0x07])]]
+    _FakeConfigPort.opened = []
+    monkeypatch.setattr(e22mod.sys, "stdin", io.StringIO(""))
+    with pytest.raises(SystemExit, match="no reply"):
+        e22mod.main(["--port", "/dev/e22-test", "--model", E22_T37S, "--mode2-confirmed"])
+    assert [p.sent for p in _FakeConfigPort.opened] == [[bytes([0xC1, 0x80, 0x07])]]
 
 
 # ---------------------------------------------------- E22 control via the RCU

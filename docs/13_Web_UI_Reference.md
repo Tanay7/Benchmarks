@@ -2861,16 +2861,17 @@ description), the COP-1 directives (BC) and the ground directives (GDS), from
 
 ### 13.8 Station I/O panel
 
-The VENTUNO Q MCU (the App's sketch, [06_Displays.md](06_Displays.md)) runs the CardKB
-keyboard, the AOS / ALARM / UPLINK lamps, the buzzer and the Radio Control Unit. Key
-`station_io`.
+The station UNO Q MCU (the App's sketch, [06_Displays.md](06_Displays.md)) runs the CardKB
+keyboard, the AOS / ALARM / UPLINK lamps, the buzzer, the LED-matrix link status and the
+Radio Control Unit. Key `station_io`.
 
 | Row | Key | Meaning |
 |---|---|---|
 | MCU link | `station_io.connected`, `station_io.connected_t` | CONNECTED when a hello (H line, every 5 s) arrived within 12 s; else "no hello (station I/O off or MCU not running)" |
-| Firmware | `station_io.fw` | sketch version text ("DSSQ-IO 3.1", "DSSQ-IO 3.1 SX126x") |
+| Firmware | `station_io.fw` | sketch version text ("DSSQ-IO 4.0", "DSSQ-IO 4.0 SX126x") |
 | CardKB | `station_io.kb` | present at I2C address 0x5F on the header Wire bus |
-| Radio Control Unit | `station_io.rcu` | the MCU drives the E22 M0 / M1 and reads AUX |
+| Radio Control Unit | `station_io.rcu_configured` | `[gds] rcu` in station.toml: "enabled in station.toml" (the MCU drives the E22 M0 / M1 and reads AUX) or "disabled in station.toml" |
+| RCU last mode change | `station_io.rcu_last`, `station_io.rcu_last_t` | what the MCU reports in its hello about its last `rcu_mode` call since it started (D-78): "OK at <time>" (AUX high afterwards), "FAILED at <time>" (AUX stayed low for 1 s, or a mode outside 0..3), "never"; "unknown" without a hello. AUX has the MCU's pull-up, so OK proves the mode pins were driven, not that a module is wired |
 | Typing on the CardKB | `station_io.input` | the line being typed (K lines), shown as "> TEXT_" |
 | Last annunciator line | `station_io.last_status_line` | the newest S line sent: `S\|aos\|alarm\|uplink\|beacon` |
 | Beacon level sent | `station_io.beacon_sent` | its beacon field (-1 = unknown) |
@@ -3118,7 +3119,7 @@ document.
 | `events` | list of t, level, source, text | [14](#14-health-events-and-logs) |
 | `anomalies` | list of t, param, value, mean, sigma, z | [7.11](#711-anomaly-detector) |
 | `console` | list of [t, text] | [13.4](#134-console) |
-| `station_io` | connected_t, fw, rcu, kb, input, last_status_line, beacon_sent, connected | [13.8](#138-station-io-panel) |
+| `station_io` | connected_t, fw, kb, input, last_status_line, beacon_sent, rcu_configured, rcu_last, rcu_last_t, connected | [13.8](#138-station-io-panel) |
 | `cmd_stages`, `cmd_errors`, `cmd_sources` | code -> name | [7.9](#79-other-packets-cmdver-timecorr-rfscan) |
 
 `/api/science`: `spectral`, `spectral_history`, `spectral_burst`, `spectral_skymap`,

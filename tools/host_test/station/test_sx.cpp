@@ -5,7 +5,9 @@
 //   * C25: a TX fault (DIO1 without TxDone, BUSY stuck high, the TX deadline) dequeues
 //     the frame exactly once and reports T|0;
 //   * I3: the S| status line carries 20 fields + the compiled chip + the TCXO supply in mV,
-//     with worst-case counters not truncated.
+//     with worst-case counters not truncated;
+//   * pin plan H (D-72): the SX126x pins clear of every other station pin; the time on air;
+//   * D-78: the LED-matrix uplink row follows the radio's own TX state.
 // SKETCH (a -D from run.sh) is the sketch file, compiled into this translation unit.
 #include "runtime.h"
 #include SKETCH
@@ -119,6 +121,29 @@ int main() {
   snprintf(want_chip, sizeof want_chip, "%d", DSSQ_SX_CHIP);
   CHECK(f.size() == 23 && f[0] == "S" && f[20] == "-50000" && f[21] == want_chip && f[22] == "1800",
         "S| line: 20 fields + chip + tcxo_mv, worst-case counters not truncated");
+  // ---- Pin plan H (D-72) and the time on air ---------------------------------------------
+  const int pins[] = {PIN_RCU_M0, PIN_RCU_M1, PIN_RCU_AUX, PIN_LED_AOS, PIN_LED_ALARM, PIN_LED_UPLINK, PIN_BUZZER,
+                      PIN_SX_NSS, PIN_SX_BUSY, PIN_SX_DIO1, PIN_SX_NRST, PIN_SX_RXEN, PIN_SX_TXEN, A0};
+  bool distinct = true;
+  for (size_t i = 0; i < sizeof pins / sizeof pins[0]; ++i)
+    for (size_t j = i + 1; j < sizeof pins / sizeof pins[0]; ++j) distinct = distinct && pins[i] != pins[j];
+  CHECK(distinct && PIN_SX_NRST == A4, "SX126x pins clear of the RCU, lamps, buzzer (A1) and A0; NRST on A4");
+  prepare(kSxRx, 0);
+  // Profile 1 (SF12 / 62.5 kHz, LDRO), preamble 12, 236 octets: ceil((8 x 236 - 48 + 28 + 16) /
+  // (4 x (12 - 2))) = 48 blocks, (12 + 4.25 + 8 + 48 x 5) x 65.536 ms = 17 317.888 ms, rounded
+  // up (the bandwidth converted with 32 bits, not __aeabi_f2ulz).
+  CHECK(airtime_ms(236) == 17318, "time on air of one CADU at profile 1: 17 318 ms");
+  // ---- D-78: the matrix uplink row also shows the radio's own TX state ----------------------
+  fp_line_exec("S|1|0|0|0");                         // the handler body (no setup(): no mailbox here)
+  fp_line_exec("M|P|0|-90|?|0|?");
+  uint8_t mx[kMxCols * kMxRows];
+  sx_set_state(kSxTx);
+  matrix_frame(mx, g_last_rx_ms + 1);
+  const bool tx_row = mx[2 * kMxCols] == kMxBright && mx[2 * kMxCols + 12] == kMxBright;
+  sx_set_state(kSxRx);
+  matrix_frame(mx, g_last_rx_ms + 1);
+  CHECK(tx_row && mx[2 * kMxCols] == 0 && mx[1 * kMxCols] == 0,
+        "matrix: uplink row lit while the SX126x is in TX (GDS tx 0); packet radio = no frame-sync row");
   printf("%s [SX%d]: %d failure(s)\n", SKETCH, DSSQ_SX_CHIP, g_failures);
   return g_failures ? 1 : 0;
 }

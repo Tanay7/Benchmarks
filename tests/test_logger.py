@@ -76,7 +76,7 @@ class FakeDisk:
 def test_config_defaults_validation_and_documentation():
     cfg = station_config.load_config()
     g = cfg["gds"]
-    assert (g["archive_keep_days"], g["archive_max_gb"], g["archive_min_free_mb"]) == (180, 16.0, 2048.0)
+    assert (g["archive_keep_days"], g["archive_max_gb"], g["archive_min_free_mb"]) == (180, 8.0, 2048.0)   # D-80
     assert station_config.merge({})["gds"]["archive_keep_days"] == 180              # DEFAULTS mirror the file
     text = station_config.DEFAULT_PATH.read_text()
     for key in ("archive_keep_days", "archive_max_gb", "archive_min_free_mb", "VERIFY", "ArduinoApps"):

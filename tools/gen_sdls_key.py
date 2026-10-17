@@ -11,8 +11,8 @@ commit or share them):
                  [sdls] key_file is an absolute path (Phase B PB-3.2 / PB-6.2)
 Those are the defaults, inside this repository. The App Lab zips never contain a key, so
 after importing the Apps generate the key straight into the imported App folders:
-  --flight-header ~/ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h      (UNO Q)
-  --ground-key    ~/ArduinoApps/dssq-groundstation/data/sdls_key.hex       (VENTUNO Q)
+  --flight-header ~/ArduinoApps/vgq1-spacecraft/sketch/src/sdls_key.h      (spacecraft UNO Q)
+  --ground-key    ~/ArduinoApps/dssq-groundstation/data/sdls_key.hex       (ground UNO Q)
 The two Apps run on two boards, but there is ONE key: run this script ONCE, on one
 machine, and copy each of the two files it writes to its board's path above (e.g. scp).
 Running it again (on the other board) makes a DIFFERENT key, and the ends no longer

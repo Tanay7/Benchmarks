@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One-time setup of the DSS-Q ground data system in HOST mode (systemd), the documented
 # fallback / always-on alternative to running the App in App Lab (contract 18). Run ON THE
-# BOARD (VENTUNO Q Linux side) from a terminal; it works from any directory and for the App
-# folder it lives in (imported by App Lab, or a repository checkout):
+# BOARD (the ground UNO Q's Linux side, Debian) from a terminal; it works from any
+# directory and for the App folder it lives in (imported by App Lab, or a repository
+# checkout):
 #
 #     ~/ArduinoApps/dssq-groundstation/host/install_station.sh             # setup only
 #     ~/ArduinoApps/dssq-groundstation/host/install_station.sh --service   # + start at boot
@@ -12,8 +13,9 @@
 # radio talk to the station MCU through arduino.router_bridge (PyPI arduino-router-bridge,
 # which brings msgpack). App Lab's Python container image has it; the board's host Python
 # does not (the arduino-app-cli Debian package depends only on the arduino-router service),
-# and Ubuntu 24.04 does not allow pip into the system Python. Without it the GDS still runs
-# but logs "router bridge unavailable" and disables those three functions.
+# and a virtual environment keeps pip away from the Debian system Python (which may refuse
+# it as "externally managed"; the board's Debian release: VERIFY). Without it the GDS still
+# runs but logs "router bridge unavailable" and disables those three functions.
 # The environment lives OUTSIDE the App folder ($DSSQ_VENV, default ~/.venvs/dssq-gds):
 # App Lab mounts the App folder into its container and an exported App must not carry it.
 #

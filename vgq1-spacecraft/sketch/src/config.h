@@ -252,7 +252,10 @@ static const size_t kHeapReserveBytes = 32768;
 
 // ---- Timing ----------------------------------------------------------------------------------
 static const uint32_t kMinFramePeriodMs  = 1500;  // fsw/datalink.cpp frame_period_ms()
-static const uint16_t kMaxTxDutyPermille = 500;   // PA thermal limit: transmit <= 50 % of the time
+static const uint16_t kMaxTxDutyPermille = 500;   // project limit, every radio model (D-77): transmit
+                                                  // <= 50 % of the time. Not an EBYTE requirement:
+                                                  // neither E22 manual states a duty limit
+                                                  // (T37S: RF off above 120 C, manual v1.5 5.7)
 static const uint32_t kNoiseSampleMs     = 15000; // ambient-noise sampling interval
 static const uint32_t kDefaultCmdLossS   = 86400; // command-loss timer (24 h), 0 = off
 
