@@ -148,11 +148,11 @@ def worlds(tmp_path_factory):
     out = []
     with pytest.MonkeyPatch.context() as mp:
         out.append(_world(tmp_path_factory.mktemp("docs_e22"), mp, {"air_rate": 7},
-                          {"loss": 0.03, "max_errors": 3, "rssi_mean": -100.0, "fading_db": 2.0, "seed": 11},
+                          {"loss": 0.03, "rssi_mean": -100.0, "fading_db": 2.0, "seed": 11},
                           E22_SCRIPT))
     with pytest.MonkeyPatch.context() as mp:
         out.append(_world(tmp_path_factory.mktemp("docs_sx"), mp, {"model": "SX126x", "air_rate": 7},
-                          {"loss": 0.02, "max_errors": 3, "rssi_mean": -110.0, "fading_db": 2.0, "seed": 5,
+                          {"loss": 0.02, "rssi_mean": -110.0, "fading_db": 2.0, "seed": 5,
                            "crc_fail_prob": 0.05, "static_offset_hz": 1200.0, "doppler_rate_hz_s": 0.2},
                           SX_SCRIPT))
     with pytest.MonkeyPatch.context() as mp:

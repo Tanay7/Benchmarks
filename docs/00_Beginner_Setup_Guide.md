@@ -295,7 +295,7 @@ with the date added. To replace an App, follow part 16 first: deleting an App al
    The spacecraft then starts by itself at every power-up, without a PC.
 
 The flight software also reports **events** (EVR lines such as
-`EGSE INFO EVR 0x0001 INFO BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio=E22-400T33D TM TC NONE TM NONE`).
+`EGSE INFO EVR 0x0001 INFO BOOT VGQ-1 FSW 3.1 rst=0 POWER-ON radio=E22-400T33D TM TC NONE TM NONE`).
 Its start-up events reach this console only if the EGSE was already listening when the MCU
 started, and at most 8 per second are forwarded (config.h `kEvrNotifyMaxPerS`). On the owner's
 board the MCU started about 4 s before the EGSE, so they were missed (`8 EVRs not forwarded`). All of them

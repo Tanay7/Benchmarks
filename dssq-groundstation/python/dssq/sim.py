@@ -308,7 +308,7 @@ class SimSpacecraft(link.RadioBackend):
     link.RadioBackend packet interface plus the Sx126xBridge control calls the GDS uses
     (configure, noise_dbm, wake, get_config, rf_foff, snapshot, connected)."""
 
-    def __init__(self, cfg: dict[str, Any], *, loss: float = 0.02, max_errors: int = 3, rssi_mean: float = -112.0,
+    def __init__(self, cfg: dict[str, Any], *, loss: float = 0.02, rssi_mean: float = -112.0,
                  fading_db: float = 3.0, seed: int | None = None, clock: Callable[[], float] = time.time,
                  packet_mode: bool | None = None, sdls_key: bytes | None = None, epoch: int = 1,
                  framing: str = "TM", crc_fail_prob: float = 0.0, static_offset_hz: float = 0.0,
@@ -319,9 +319,6 @@ class SimSpacecraft(link.RadioBackend):
         self.imu_rng = random.Random(None if seed is None else seed * 7919 + 75)
         self.clock = clock
         self.base_loss = loss
-        # max_errors: accepted for existing callers (--sim-errors) and ignored since the E22
-        # stopped receiving octet errors (D-76, module docstring); packet mode uses RS_RESCUE_ERRORS.
-        del max_errors
         self.rssi_mean = rssi_mean
         self.fading_db = fading_db
         self.crc_fail_prob = crc_fail_prob
@@ -362,7 +359,7 @@ class SimSpacecraft(link.RadioBackend):
         self.dl = SimDownlink(self.framing, self.sec)
         self.farm = Farm1Model()
         self._reset_state(clock())
-        self._boot_evrs(f"BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio={self.model.name} {self.framing} (SIMULATOR)")
+        self._boot_evrs(f"BOOT VGQ-1 FSW 3.1 rst=0 POWER-ON radio={self.model.name} {self.framing} (SIMULATOR)")
 
     def _reset_state(self, now: float) -> None:
         self.t0 = now
@@ -935,7 +932,7 @@ class SimSpacecraft(link.RadioBackend):
         self.dl = SimDownlink(self.framing, self.sec)
         if self.sec is not None:
             self.sec.set_epoch(part)
-        self._boot_evrs(f"BOOT VGQ-1 FSW 3.0 rst=2 SOFTWARE radio={self.model.name} (SIMULATOR)")
+        self._boot_evrs(f"BOOT VGQ-1 FSW 3.1 rst=2 SOFTWARE radio={self.model.name} (SIMULATOR)")
 
     # ------------------------------------------------------------- CFDP
     def _cfdp_put(self, source: int, max_kib: int, now: float, sclk: int) -> int:

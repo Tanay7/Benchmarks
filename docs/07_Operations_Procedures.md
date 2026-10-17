@@ -45,7 +45,7 @@ Conventions used in every procedure:
    **Check:** the page loads. If it does not but `curl http://localhost:8080/api/state` works on
    the board, App Lab does not publish the port on your LAN: use host mode (§1.2).
 5. **Check (OVERVIEW, Latest events):**
-   * `GDS DSS-Q ground station 3.0.0 started (applab), radio E22-400T33D CH23 code 2; SDLS TC AE / TM AE; ...`
+   * `GDS DSS-Q ground station 3.1.0 started (applab), radio E22-400T33D CH23 code 2; SDLS TC AE / TM AE; ...`
      - model, channel, rate code and SDLS services are what you intend;
    * `WEB dashboard on http://0.0.0.0:8080/ (LAN-exposed, token required for commanding)`;
    * `RADIO ground E22-400T33D: ch 23 (433.125 MHz) rate 2.4k pwr 0 LBT/CAD False - matches station.toml`
@@ -100,7 +100,7 @@ Bridge names).
    `flight computer boot (reset cause <n> <NAME>)`, then the EGSE status board every 10 s and
    the boot EVRs in this order: 0x0308 radio model, 0x0306 `radio E22-400T33D OK: ch 23 code 2
    pwr 33 dBm ...`, 0x0910 / 0x0911 RM3100 self-test, 0x0706 AS7265X identity, 0x0011
-   `MODE BOOT -> SAFE (boot)`, 0x0001 `BOOT VGQ-1 FSW 3.0 ...`, 0x0003 `SSR capacity 256 KiB`
+   `MODE BOOT -> SAFE (boot)`, 0x0001 `BOOT VGQ-1 FSW 3.1 ...`, 0x0003 `SSR capacity 256 KiB`
    (less only when the heap is short; minimum 16 KiB), 0x0004, 0x0002 `DE <callsign>` (it
    must show **your** callsign, not `N0CALL`: set `VGQ_CALLSIGN` in `config.h` and rebuild,
    §2.8), and with SDLS AE 0x0120 `SDLS TM epoch <n>: downlink protected` once the EGSE has

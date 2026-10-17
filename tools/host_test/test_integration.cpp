@@ -531,7 +531,7 @@ std::vector<std::string> build_stream(const std::string& out, const char* file, 
   uint8_t ud[kMaxPayload];
 
   // ---- boot EVR; the null-SA stream waits for its epoch first ----
-  const char* boot = "BOOT VGQ-1 FSW 3.0 rst=4 BROWNOUT radio=SX126x TM TC AE TM AE";
+  const char* boot = "BOOT VGQ-1 FSW 3.1 rst=4 BROWNOUT radio=SX126x TM TC AE TM AE";
   size_t n = pack_evr(1, 0x0001, boot, ud);
   e->emit(APID_EVR, ud, n, VC_RT_ENG, "EVR", "severity_code=1,event_id=1");
   if (sec == 2) {

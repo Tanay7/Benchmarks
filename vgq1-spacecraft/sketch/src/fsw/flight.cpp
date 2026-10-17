@@ -318,7 +318,7 @@ void Flight::setup(const char* bridge_failures) {
   note_valid_tc(millis());              // command-loss timer and HK cmd_loss_timer_s start at boot
   set_mode(MODE_SAFE, "boot");          // like a real spacecraft: come up safe, wait for the ground
   safe_by_fdir_ = true;
-  evr(1, 0x0001, "BOOT VGQ-1 FSW 3.0 rst=%u %s radio=%s %s TC %s TM %s", (unsigned)reset_cause_,
+  evr(1, 0x0001, "BOOT VGQ-1 FSW 3.1 rst=%u %s radio=%s %s TC %s TM %s", (unsigned)reset_cause_,
       reset_cause_name(reset_cause_), radio_.name(), VGQ_DOWNLINK_FRAMING == 1 ? "USLP" : "TM",
       sdls_service_name(sdls_tc_.service()), sdls_service_name(sdls_tm_.service()));
   evr(1, 0x0003, "SSR capacity %lu KiB", (unsigned long)(ssr_.capacity() / 1024u));

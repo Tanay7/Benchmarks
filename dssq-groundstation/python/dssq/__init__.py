@@ -26,4 +26,4 @@ sim          Software spacecraft + RF channel + ground radio simulator (no hardw
 cltu         Hardline CLTU generator (EGSE uplink without RF)
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"

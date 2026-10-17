@@ -74,7 +74,7 @@ class World:
         self.cfg = cfg = _config(tmp_path, key=key, sn_known=sn_known, **(radio or {"air_rate": 7}))
         cfg["sdls"].update(sdls or {})
         self.gs = gs = GroundStation(cfg, archive=archive)
-        kw = {"loss": 0.0, "max_errors": 4, "rssi_mean": -95.0, "fading_db": 1.0, "seed": 7}
+        kw = {"loss": 0.0, "rssi_mean": -95.0, "fading_db": 1.0, "seed": 7}
         kw.update(simkw)
         self.sim = sim = SimSpacecraft(cfg, clock=clk, framing=framing,
                                        sdls_key=gs.sdls_tc.key if sim_key == "same" else sim_key, **kw)
@@ -128,7 +128,7 @@ def test_v3_telemetry_beacon_and_sdls_ae_both_ways(world):
     w, gs = world, world.gs
     w.run(60)
     s = gs.snapshot()
-    assert s["schema"] == 4 and s["version"] == "3.0.0" and s["sync"]["state"] == "LOCK"
+    assert s["schema"] == 4 and s["version"] == "3.1.0" and s["sync"]["state"] == "LOCK"
     assert s["rx"]["frames"]["ok"] > 15 and s["rx"]["decoder"]["uncorrectable"] == 0
     # The E22 delivers only packets whose CRC passed: no octet errors, no RS corrections (D-76; the
     # RS path is exercised in the packet-mode world below)

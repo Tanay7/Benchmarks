@@ -353,7 +353,7 @@ means "each element of this list": `cfdp.transactions[].progress`.
 | Top-level key | What it holds | Section |
 |---|---|---|
 | `schema` | snapshot schema version (4) | [13.7](#137-gds-health-panel) |
-| `version` | GDS software version (`dssq.__version__`, 3.0.0) | [13.7](#137-gds-health-panel) |
+| `version` | GDS software version (`dssq.__version__`, 3.1.0) | [13.7](#137-gds-health-panel) |
 | `utc` | station time when the snapshot was built (UNIX s) | [2](#2-header-bar-and-beacon-banner) |
 | `station` | station name, `[station] name` | [2](#2-header-bar-and-beacon-banner) |
 | `spacecraft` | spacecraft name, `[spacecraft] name` | [2](#2-header-bar-and-beacon-banner) |
@@ -409,7 +409,7 @@ by `renderHeader()` from `/api/state`.
 +------------------------------------------------------------------------------------------+
 | DSS-Q1 GROUND STATION  S/C VGQ-1  [AOS] [LOCK] [ALARM NONE]  MODE CRUISE  UTC ...          |
 | CLOCK ...  RSSI ...  SNR ...  MARGIN ...  FER 10m ...  FRAMES ...  SCLK ...  COP-1 ...     |
-| SDLS TM ...  FRAMING ...                                 GDS 3.0.0 applab   [TOKEN]       |
+| SDLS TM ...  FRAMING ...                                 GDS 3.1.0 applab   [TOKEN]       |
 +------------------------------------------------------------------------------------------+
 | OVERVIEW  RECEIVER  LINK & SECURITY  FRAMES & PACKETS  SPACECRAFT  ...  COMMANDING         |
 | [pending confirmation strip: #id text, CONFIRM, 2nd-OP AUTH, CANCEL]                       |
@@ -435,7 +435,7 @@ by `renderHeader()` from `/api/state`.
 | COP-1 | `cop.vs`, `cop.nr`, `cop.lockout`, `cop.uplink_blocked`, `cop.suspended`, `cop.outstanding` | "V(S)=4 N(R)=4 OK out=1" | uplink protocol state: next frame number to send, the spacecraft's next expected number, and LOCKOUT / BLOCKED / SUSPENDED / OK ([5.5](#55-cop-1-fop)) |
 | SDLS TM | `link.sdls.spacecraft_tm_state`, `link.sdls.tm_service` | "PROTECTED (AE)" | downlink security: the spacecraft's TM state from HK and the ground's TM service ([5.2](#52-sdls)) |
 | FRAMING | `link.tm_framing_seen` | "TM TM 344 / USLP 0" | format of the last frame, then the count of TM and USLP frames seen |
-| GDS 3.0.0 applab | `version`, `mode` | grey; red "GDS LINK DOWN (n s)" when no answer for > 5 s; amber "connecting…" before the first answer | the GDS software version and run mode (`host`, `applab`, `sim`). LINK DOWN: the browser cannot reach the GDS (network, App stopped) |
+| GDS 3.1.0 applab | `version`, `mode` | grey; red "GDS LINK DOWN (n s)" when no answer for > 5 s; amber "connecting…" before the first answer | the GDS software version and run mode (`host`, `applab`, `sim`). LINK DOWN: the browser cannot reach the GDS (network, App stopped) |
 | TOKEN | (browser) | "TOKEN" or "TOKEN ✓" | the commanding token kept for this browser session ([1.2](#12-opening-the-dashboard)) |
 | display error line | (browser) | red text under the tabs | a rendering failure in the page ("data shown may be incomplete"); reload the page and report it |
 
@@ -2196,7 +2196,7 @@ copies from the recorder (VC2) are marked " (SSR playback)". `EVRLEVEL <n>` sets
 severity the spacecraft downlinks. The complete catalogue (every id, severity, text and the
 operator action) is in [14_Troubleshooting_and_Event_Response.md](14_Troubleshooting_and_Event_Response.md).
 
-Example (E22 sim): "0x0001 BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON radio=E22-400T33D TM
+Example (E22 sim): "0x0001 BOOT VGQ-1 FSW 3.1 rst=0 POWER-ON radio=E22-400T33D TM
 (SIMULATOR)", "0x0012 MODE SAFE -> CRUISE (command)", "0x0302 RF survey CH20..CH29 starting
 (downlink paused)", "0x0303 RF survey done in 2500 ms: quietest CH20 (-118 dBm)". (The
 simulator's texts are close to, not identical with, the flight's.)
@@ -3028,7 +3028,7 @@ description), the COP-1 directives (BC) and the ground directives (GDS), from
 
 | Row | Key | Meaning |
 |---|---|---|
-| GDS version / mode | `version`, `mode` | software version (3.0.0) and run mode: `host` (systemd or a terminal), `applab` (the App Lab App), `sim` (software spacecraft) |
+| GDS version / mode | `version`, `mode` | software version (3.1.0) and run mode: `host` (systemd or a terminal), `applab` (the App Lab App), `sim` (software spacecraft) |
 | Snapshot schema | `schema` | 4 (D-76: `rx.frames.lost` without the AOS jump, `rx.rf.packet.crc_ok` null on the E22, the noise-floor margin, `time.owlt_s` null without a distance, `station_clock`); a client written for another schema must not trust the keys |
 | GDS uptime | `uptime_s` | time since the GDS started |
 | Snapshot time | `utc` | the station clock |
@@ -3074,7 +3074,7 @@ Radio Control Unit. Key `station_io`.
 | Row | Key | Meaning |
 |---|---|---|
 | MCU link | `station_io.connected`, `station_io.connected_t` | CONNECTED when a hello (H line, every 5 s) arrived within 12 s; else "no hello (station I/O off or MCU not running)" |
-| Firmware | `station_io.fw` | sketch version text ("DSSQ-IO 4.0", "DSSQ-IO 4.0 SX126x") |
+| Firmware | `station_io.fw` | sketch version text ("DSSQ-IO 3.1-UNOQ", "DSSQ-IO 3.1-UNOQ SX126x") |
 | CardKB | `station_io.kb` | present at I2C address 0x5F on the header Wire bus |
 | Radio Control Unit | `station_io.rcu_configured` | `[gds] rcu` in station.toml: "enabled in station.toml" (the MCU drives the E22 M0 / M1 and reads AUX) or "disabled in station.toml" |
 | RCU last mode change | `station_io.rcu_last`, `station_io.rcu_last_t` | what the MCU reports in its hello about its last `rcu_mode` call since it started (D-78): "OK at <time>" (AUX high afterwards), "FAILED at <time>" (AUX stayed low for 1 s, or a mode outside 0..3), "never"; "unknown" without a hello. AUX has the MCU's pull-up, so OK proves the mode pins were driven, not that a module is wired |

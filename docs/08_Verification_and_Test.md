@@ -398,7 +398,7 @@ the reduced power code 2 (EVR 0x0608 WARN) and the ground raises a YELLOW alarm.
 UNO Q's backup domain loses power at power-off is **VERIFY**: ABX00162 says the board's coin
 input powers only the PMIC's real-time clock, not the MCU.
 
-1. Remove all power for 10 s, power up. **Pass:** EVR 0x0001 `BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON ...`,
+1. Remove all power for 10 s, power up. **Pass:** EVR 0x0001 `BOOT VGQ-1 FSW 3.1 rst=0 POWER-ON ...`,
    no EVR 0x0608.
 2. Send `REBOOT 0xB007` (hazardous, confirm). **Pass:** the MCU restarts on its own, `rst=2
    SOFTWARE`, the EGSE issues a new SCLK partition.

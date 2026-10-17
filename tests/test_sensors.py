@@ -178,7 +178,7 @@ def test_unknown_until_the_acquisition_events_arrive():
     assert snap["separated"] is None and snap["separation"] == sn.UNKNOWN_NO_EVENTS
     assert snap["separation"] == "unknown (no acquisition events received since the ground started)"
     assert all(e["bus"] is None and e["state"] is None for e in snap["instruments"].values())
-    assert s.on_evr(0x0001, "BOOT VGQ-1 FSW 3.0 rst=0 POWER-ON", 1.0) is False      # not a bus report
+    assert s.on_evr(0x0001, "BOOT VGQ-1 FSW 3.1 rst=0 POWER-ON", 1.0) is False      # not a bus report
     _, snap = _bus(BOOT[:1])
     assert snap["separated"] is None and "RM3100" in snap["separation"]
 

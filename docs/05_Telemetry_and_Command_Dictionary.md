@@ -569,7 +569,7 @@ Extracted from the flight sources. `+n` = base id plus a code (e.g. the TC rejec
 
 | Event id | Severity | Text (printf format) |
 |---|---|---|
-| 0x0001 | INFO | `BOOT VGQ-1 FSW 3.0 rst=%u %s radio=%s %s TC %s TM %s` |
+| 0x0001 | INFO | `BOOT VGQ-1 FSW 3.1 rst=%u %s radio=%s %s TC %s TM %s` |
 | 0x0002 | INFO | `DE %s` |
 | 0x0003 | INFO | `SSR capacity %lu KiB` |
 | 0x0004 | INFO | `stored sequence table and MAGCAL are RAM only: empty after boot` |

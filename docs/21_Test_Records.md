@@ -62,7 +62,7 @@ Fill once per test session; every record refers to it by its session ID.
 | Site(s) and weather (temperature, rain, wind) | |
 | Repository commit or release (zip names in `dist/`) | |
 | Flight software version (EVR 0x0001 `BOOT VGQ-1 FSW ...`) | |
-| Ground software version (dashboard header, e.g. `GDS 3.0.0`) | |
+| Ground software version (dashboard header, e.g. `GDS 3.1.0`) | |
 | Station I/O firmware (COMMANDING tab, Station I/O, e.g. `DSSQ-IO 3.1`) | |
 | Spacecraft radio model (RF packet `radio_model`) and strap state (EVR 0x0308) | |
 | Ground radio model (`[radio] model`) | |

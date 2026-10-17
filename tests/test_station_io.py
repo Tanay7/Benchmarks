@@ -48,13 +48,13 @@ def test_matrix_line_fields_stay_inside_the_sketch_parser_ranges():
 # Hello line: the RCU state the MCU reports
 # =============================================================================
 @pytest.mark.parametrize(("fields", "want"), [
-    (["DSSQ-IO 4.0", "1", "1", "42"], ("DSSQ-IO 4.0", True, "OK", 42.0)),
-    (["DSSQ-IO 4.0", "0", "0", "0"], ("DSSQ-IO 4.0", False, "FAILED", 0.0)),
-    (["DSSQ-IO 4.0 SX126x", "-1", "1", "-1"], ("DSSQ-IO 4.0 SX126x", True, "NEVER", None)),
+    (["DSSQ-IO 3.1-UNOQ", "1", "1", "42"], ("DSSQ-IO 3.1-UNOQ", True, "OK", 42.0)),
+    (["DSSQ-IO 3.1-UNOQ", "0", "0", "0"], ("DSSQ-IO 3.1-UNOQ", False, "FAILED", 0.0)),
+    (["DSSQ-IO 3.1-UNOQ SX126x", "-1", "1", "-1"], ("DSSQ-IO 3.1-UNOQ SX126x", True, "NEVER", None)),
     (["DSSQ-IO 3.1", "1", "1"], ("DSSQ-IO 3.1", True, None, None)),          # older sketch: a constant 1
-    (["DSSQ-IO 4.0", "1", "0", "-5"], ("DSSQ-IO 4.0", False, None, None)),   # unreadable age: unknown
-    (["DSSQ-IO 4.0", "2", "0", "5"], ("DSSQ-IO 4.0", False, None, None)),    # unknown result
-    (["DSSQ-IO 4.0", "1", "0", str(2**31)], ("DSSQ-IO 4.0", False, None, None)),
+    (["DSSQ-IO 3.1-UNOQ", "1", "0", "-5"], ("DSSQ-IO 3.1-UNOQ", False, None, None)),   # unreadable age: unknown
+    (["DSSQ-IO 3.1-UNOQ", "2", "0", "5"], ("DSSQ-IO 3.1-UNOQ", False, None, None)),    # unknown result
+    (["DSSQ-IO 3.1-UNOQ", "1", "0", str(2**31)], ("DSSQ-IO 3.1-UNOQ", False, None, None)),
 ])
 def test_parse_hello(fields, want):
     assert fp.parse_hello(fields) == want
@@ -83,9 +83,9 @@ def test_front_panel_passes_the_hello_on_and_sends_the_m_line():
 
     gs = _Gs()
     panel = fp.FrontPanel(gs, fp.BridgeLink(Bridge(), "test"))
-    panel._handle("H|DSSQ-IO 4.0|1|1|7")
+    panel._handle("H|DSSQ-IO 3.1-UNOQ|1|1|7")
     panel._handle("H|DSSQ-IO 3.1|1|0")
-    assert gs.hellos == [("DSSQ-IO 4.0", True, "OK", 7.0), ("DSSQ-IO 3.1", False, None, None)]
+    assert gs.hellos == [("DSSQ-IO 3.1-UNOQ", True, "OK", 7.0), ("DSSQ-IO 3.1", False, None, None)]
 
     class Status:
         def __init__(self):
@@ -122,15 +122,15 @@ def test_station_io_reports_the_rcu_state_never_a_constant(tmp_path, monkeypatch
     io = gs.snapshot()["station_io"]
     assert "rcu" not in io and io["rcu_configured"] is True
     assert (io["rcu_last"], io["rcu_last_t"], io["connected"]) == (None, None, False)
-    gs.station_hello("DSSQ-IO 4.0", False, "NEVER", None)
+    gs.station_hello("DSSQ-IO 3.1-UNOQ", False, "NEVER", None)
     io = gs.snapshot()["station_io"]
     assert (io["rcu_last"], io["rcu_last_t"], io["connected"]) == ("NEVER", None, True)
-    gs.station_hello("DSSQ-IO 4.0", False, "OK", 7.0)
+    gs.station_hello("DSSQ-IO 3.1-UNOQ", False, "OK", 7.0)
     assert gs.snapshot()["station_io"]["rcu_last_t"] == now[0] - 7.0
     now[0] += 5.4
-    gs.station_hello("DSSQ-IO 4.0", False, "OK", 12.0)       # whole seconds: no one-second jitter
+    gs.station_hello("DSSQ-IO 3.1-UNOQ", False, "OK", 12.0)       # whole seconds: no one-second jitter
     assert gs.snapshot()["station_io"]["rcu_last_t"] == now[0] - 5.4 - 7.0
-    gs.station_hello("DSSQ-IO 4.0", True, "FAILED", 0.0)
+    gs.station_hello("DSSQ-IO 3.1-UNOQ", True, "FAILED", 0.0)
     io = gs.snapshot()["station_io"]
     assert (io["rcu_last"], io["rcu_last_t"], io["kb"]) == ("FAILED", now[0], True)
     gs.station_hello("DSSQ-IO 3.1", True)                     # an older sketch: unknown again

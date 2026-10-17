@@ -105,7 +105,7 @@ int main() {
     CHECK(dark && bar(f0, 7, 13, kMxBright), "matrix before the first line from the GDS: only the link-down row");
   }
   clear_notes();
-  CHECK(hello_now() == "H|DSSQ-IO 4.0|-1|0|-1", "hello before any rcu_mode(): RCU never used (-1), age -1");
+  CHECK(hello_now() == "H|DSSQ-IO 3.1-UNOQ|-1|0|-1", "hello before any rcu_mode(): RCU never used (-1), age -1");
   // ---- C51: KEYTEST can be left -----------------------------------------------------
   type("KEYTEST\r");
   CHECK(g_keytest, "KEYTEST + Enter enters key-test mode");
@@ -173,18 +173,18 @@ int main() {
 
   // ---- D-78: the hello reports the last rcu_mode() result and its age -----------------
   clear_notes();
-  CHECK(hello_now() == "H|DSSQ-IO 4.0|1|0|0", "hello after a mode change with AUX high: OK (1), age 0 s");
+  CHECK(hello_now() == "H|DSSQ-IO 3.1-UNOQ|1|0|0", "hello after a mode change with AUX high: OK (1), age 0 s");
   g_rcu_t_ms -= 7000;
   const std::string h7 = hello_now();
   g_rcu_t_ms -= 3000;
-  CHECK(h7 == "H|DSSQ-IO 4.0|1|0|7" && hello_now() == "H|DSSQ-IO 4.0|1|0|10",
+  CHECK(h7 == "H|DSSQ-IO 3.1-UNOQ|1|0|7" && hello_now() == "H|DSSQ-IO 3.1-UNOQ|1|0|10",
         "the RCU age grows across hellos (re-anchored, never wraps with millis())");
   g_pins.level[PIN_RCU_AUX] = LOW;
   const int busy = rpc_rcu_mode(3);
-  CHECK(busy == 0 && hello_now() == "H|DSSQ-IO 4.0|0|0|0", "AUX stuck low for 1 s: FAILED (0), age restarts");
+  CHECK(busy == 0 && hello_now() == "H|DSSQ-IO 3.1-UNOQ|0|0|0", "AUX stuck low for 1 s: FAILED (0), age restarts");
   g_pins.level[PIN_RCU_AUX] = HIGH;
   (void)rpc_rcu_mode(1);
-  CHECK(rpc_rcu_mode(7) == 0 && hello_now() == "H|DSSQ-IO 4.0|0|0|0", "a mode outside 0..3 is a FAILED change");
+  CHECK(rpc_rcu_mode(7) == 0 && hello_now() == "H|DSSQ-IO 3.1-UNOQ|0|0|0", "a mode outside 0..3 is a FAILED change");
 
   // ---- D-78: LED matrix ------------------------------------------------------------------
   uint8_t f[kMxCols * kMxRows];

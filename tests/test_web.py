@@ -50,7 +50,7 @@ AUTH = "second-operator"
 # Stub station and HTTP helper
 # =============================================================================
 def base_snapshot():
-    return {"schema": 4, "version": "3.0.0", "utc": 1.8e9, "station": "DSS-Q1", "spacecraft": "VGQ-1",
+    return {"schema": 4, "version": "3.1.0", "utc": 1.8e9, "station": "DSS-Q1", "spacecraft": "VGQ-1",
             "alarm": "NONE", "alarm_reasons": [], "beacon": {"level": 1, "name": "INTERESTING"},
             "rx": {"state": {"los": False, "passes": 1, "hibernating": False},
                    "rf": {"rssi_dbm": -101.5, "sensitivity_dbm": -132.0, "noise_bw_hz": 125000.0, "nan": float("nan"),
@@ -628,7 +628,7 @@ def sim_station(tmp_path_factory):
         cfg["radio"]["air_rate"] = 7
         cfg["science"]["field_ut"] = 50.0
         gs = GroundStation(cfg, archive=True)
-        sim = SimSpacecraft(cfg, clock=clk, sdls_key=gs.sdls_tc.key, loss=0.0, max_errors=4, rssi_mean=-95.0,
+        sim = SimSpacecraft(cfg, clock=clk, sdls_key=gs.sdls_tc.key, loss=0.0, rssi_mean=-95.0,
                             fading_db=1.0, seed=7)
         gs.attach_radio(sim, RadioManager(sim, _SimRcu(sim), clock=clk, sleep=clk.sleep, model=gs.settings.model.name),
                         None)

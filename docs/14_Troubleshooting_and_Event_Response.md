@@ -217,7 +217,7 @@ texts of [`fsw/autonomy.cpp`](../vgq1-spacecraft/sketch/src/fsw/autonomy.cpp),
 
 | Id | Sev | Text | When | Operator action |
 |---|---|---|---|---|
-| 0x0001 | INFO | `BOOT VGQ-1 FSW 3.0 rst=%u %s radio=%s %s TC %s TM %s` | Boot: reset cause, radio model, framing (TM / USLP), SDLS services | Check reset cause, model and services are what you expect (2.5) |
+| 0x0001 | INFO | `BOOT VGQ-1 FSW 3.1 rst=%u %s radio=%s %s TC %s TM %s` | Boot: reset cause, radio model, framing (TM / USLP), SDLS services | Check reset cause, model and services are what you expect (2.5) |
 | 0x0002 | INFO | `DE %s` | Boot and every `kCallsignPeriodS` (600 s): station identification | None; it must show your callsign |
 | 0x0003 | INFO | `SSR capacity %lu KiB` | Boot: recorder heap obtained (256 KiB normally) | Less than 256 KiB: report (heap tight) |
 | 0x0004 | INFO | `stored sequence table and MAGCAL are RAM only: empty after boot` | Boot | Re-load sequences and re-uplink MAGCAL after every boot (07 §4, §5.1) |

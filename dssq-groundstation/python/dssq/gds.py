@@ -2518,7 +2518,7 @@ class Runner:
     """The GDS main loop for the host CLI and App Lab (PB-8.4)."""
 
     def __init__(self, cfg: dict[str, Any], *, bridge: Any = None, mode: str = "host", sim: bool = False,
-                 sim_loss: float = 0.05, sim_errors: int = 3, archive: bool = True, web: bool = True) -> None:
+                 sim_loss: float = 0.05, archive: bool = True, web: bool = True) -> None:
         self.cfg = cfg
         self.mode = "sim" if sim else mode
         # Checked before anything starts: a refused address must not leave threads behind.
@@ -2550,7 +2550,7 @@ class Runner:
         if sim:
             from .sim import SimSpacecraft
             sim_framing = "USLP" if str(cfg["link"]["tm_framing"]).upper() == "USLP" else "TM"
-            self.radio = SimSpacecraft(cfg, loss=sim_loss, max_errors=sim_errors, sdls_key=gs.sdls_tc.key,
+            self.radio = SimSpacecraft(cfg, loss=sim_loss, sdls_key=gs.sdls_tc.key,
                                        framing=sim_framing)
             gs.event("INFO", "GDS", "SIMULATION MODE - software spacecraft, no RF")
             if not model.packet_mode:
@@ -2868,8 +2868,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", help="override [radio] port (E22 models)")
     ap.add_argument("--sim", action="store_true", help="use the software spacecraft simulator")
     ap.add_argument("--sim-loss", type=float, default=0.05, help="simulated packet loss probability")
-    ap.add_argument("--sim-errors", type=int, default=3,
-                    help="no effect: the simulated E22 sends no octet errors (D-76); kept for existing scripts")
     ap.add_argument("--no-archive", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
@@ -2885,7 +2883,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if a.port:
         cfg["radio"]["port"] = a.port
-    runner = Runner(cfg, mode="host", sim=a.sim, sim_loss=a.sim_loss, sim_errors=a.sim_errors,
+    runner = Runner(cfg, mode="host", sim=a.sim, sim_loss=a.sim_loss,
                     archive=not a.no_archive)
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())

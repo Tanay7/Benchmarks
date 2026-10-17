@@ -122,7 +122,7 @@
 #if !RADIOLIB_STATIC_ONLY
 #error "use the bundled RadioLib patched by tools/radiolib.py (RADIOLIB_STATIC_ONLY must be 1)"
 #endif
-static const char* kFw = "DSSQ-IO 4.0 SX126x";
+static const char* kFw = "DSSQ-IO 3.1-UNOQ SX126x";
 
 // Types that appear in function signatures. They must precede the first function of
 // the sketch: the Arduino builder inserts its generated prototypes there.
@@ -133,7 +133,7 @@ struct SxConfig {
   int32_t foff_hz;                                    // RF offset from the channel centre (rf_foff)
 };
 #else
-static const char* kFw = "DSSQ-IO 4.0";
+static const char* kFw = "DSSQ-IO 3.1-UNOQ";
 #endif
 
 // ---------------------------------------------------------------- pin map (plan H, D-72)
