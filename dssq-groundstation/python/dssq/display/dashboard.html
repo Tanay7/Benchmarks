@@ -280,6 +280,12 @@ input[type=number]{width:90px}
     <div class="panel wide"><h3>Magnetometers <small>RM3100 outboard / inboard (boom) and BMM150 body; dual-sensor separation of the spacecraft field assumes a 1/r&#179; dipole (est.)</small></h3><div class="tw"><table id="si-mag"></table></div></div>
     <div class="panel"><h3>Attitude <small>BHI260 fusion vs TRIAD, both converted to body&#8594;NED; Euler ZYX (yaw, pitch, roll)</small></h3><div class="tw"><table id="si-att"></table></div></div>
     <div class="panel"><h3>IMU (6-DOF) <small>BHI260AP game rotation vector and 1 s window statistics (ATT v4); source: on board = measured on the spacecraft, ground = derived by the GDS</small></h3><div class="tw"><table id="si-imu"></table></div></div>
+    <div class="panel wide"><h3>IMU (6-DOF) over the session <small>real-time ATT packets since the ground started, one time axis (UTC), one y axis per quantity; recorder playback ATT is not drawn (its receive times are not session times); a line stops at an n/a value or a missing packet, a lone value is a dot</small></h3>
+      <div class="sub" id="si-imuh-note"></div>
+      <div class="sub">Tilt (&#176;) <span class="badge b-dim">ground</span> derived on ground from the game rotation vector</div><canvas id="si-imuh-tilt" class="short"></canvas>
+      <div class="sub">|&#969;| of the mean rate (&#176;/s) <span class="badge b-dim">ground</span> derived on ground from the on-board mean rate vector</div><canvas id="si-imuh-rate" class="short"></canvas>
+      <div class="sub">Vibration RMS (mg) <span class="badge b-info">on board</span> measured on board (1 s windows of 25 Hz samples)</div><canvas id="si-imuh-vib" class="short"></canvas>
+    </div>
     <div class="panel"><h3>Environment <small>Nicla Sense ME: BMP390 pressure, BME688 T / RH / gas, BSEC</small></h3><div class="tw"><table id="si-env"></table></div></div>
   </div>
 </section>
@@ -776,9 +782,11 @@ function legend(g, series, x0) {
     x += 22 + g.x.measureText(s.name).width;
   }
 }
-// Line chart. o = {x: [...] | null, xTime: bool, series: [{name, v, color, band: {lo, hi}, dots, step}],
+// Line chart. o = {x: [...] | null, xTime: bool, series: [{name, v, color, band: {lo, hi}, dots, step, lone}],
 //   unit, yMin, yMax, log, zones: [{lo, hi, color}], hlines: [{y, color, label}], flags: [{i, color}],
-//   xfmt, yfmt, decimals, empty}
+//   xfmt, yfmt, decimals, empty, xHide}. A null value or x breaks the line; `lone` draws a dot where a
+//   value has no drawn neighbour (it would be invisible otherwise); `xHide` omits the x tick labels
+//   (strips stacked on one time axis label only the bottom one, D-76).
 function lineChart(id, o) {
   const draw = () => {
     const g = ctx2d(id);
@@ -827,7 +835,7 @@ function lineChart(id, o) {
     // x labels
     x.fillStyle = COL.axis;
     x.textAlign = "center";
-    if (X) {
+    if (X && !o.xHide) {
       const xt = o.xTime ? null : niceTicks(xlo, xhi, Math.max(2, Math.floor(pw / (o.xfmt ? 90 : 70))));   // formatted labels are wider
       const marks = o.xTime ? [0, 0.25, 0.5, 0.75, 1].map(f => xlo + f * (xhi - xlo)) : xt.ticks.filter(v => v >= xlo - 1e-9 && v <= xhi + 1e-9);
       for (const v of marks) {
@@ -873,6 +881,11 @@ function lineChart(id, o) {
         pen = true; lastY = yy;
       }
       x.stroke();
+      if (s.lone) {
+        const ok = i => i >= 0 && i < s.v.length && tf(s.v[i]) !== null && num(px(i));
+        x.fillStyle = s.color;
+        for (let i = 0; i < s.v.length; i++) if (ok(i) && !ok(i - 1) && !ok(i + 1)) { x.beginPath(); x.arc(px(i), py(Math.max(ylo, Math.min(yhi, tf(s.v[i])))), 3, 0, 2 * Math.PI); x.fill(); }
+      }
       if (s.dots) {
         x.fillStyle = s.color;
         for (let i = 0; i < s.v.length; i++) { const t = tf(s.v[i]), xx = px(i); if (t === null || !num(xx)) continue; x.beginPath(); x.arc(xx, py(Math.max(ylo, Math.min(yhi, t))), 3, 0, 2 * Math.PI); x.fill(); }
@@ -2068,6 +2081,49 @@ function renderImu() {
     ["IMU flags", N((m.flags || []).map(b => badge(b, b === "GAP" || b.endsWith("_SAT") ? "warn" : "dim"))), OB],
     ["Packet time", att ? iso(att.ert) : NA, ""]]);
 }
+// D-75 / D-76: the 6-DOF values over the session (SCI.imu_history, gds.ImuHistory): one point
+// per real-time ATT, three strips on one time axis, one y axis each. A value the GDS reports
+// n/a is null and never drawn; a point whose ATT does not directly follow the previous one
+// (join false: a lost or unreceived packet, a new pass, a reboot) starts a new line. Recorder
+// playback ATT is not in the history: its receive times are not session times.
+const IMU_EMPTY = "no 6-DOF data received in this session";
+const IMU_STRIPS = [   // canvas, key, name, unit, decimals (as the IMU table), colour, imu.na groups of the reason
+  ["si-imuh-tilt", "tilt_deg", "tilt", "°", 2, COL.s1, ["grv"]],
+  ["si-imuh-rate", "rate_abs_dps", "|ω|", "°/s", 2, COL.s2, ["stats", "spin"]],
+  ["si-imuh-vib", "vib_rms_mg", "vibration RMS", "mg", 1, COL.s3, ["stats"]]];
+function renderImuHistory() {
+  const hs = SCI ? SCI.imu_history : null;
+  if (!hs || !Array.isArray(hs.t)) {
+    setText("si-imuh-note", SCI ? "no IMU history from this GDS" : "waiting for /api/science");
+    for (const s of IMU_STRIPS) lineChart(s[0], {series: [], empty: SCI ? "n/a (no IMU history from this GDS)" : "waiting for /api/science"});
+    return;
+  }
+  const t = hs.t, n = t.length, join = hs.join || [], col = k => (Array.isArray(hs[k]) ? hs[k] : []);
+  const x = [], vals = IMU_STRIPS.map(() => []), src = [];
+  let breaks = 0;
+  for (let i = 0; i < n; i++) {
+    if (i > 0 && join[i] !== true) { x.push(null); vals.forEach(v => v.push(null)); src.push(-1); breaks++; }
+    x.push(t[i]); src.push(i);
+    IMU_STRIPS.forEach((s, k) => { const v = col(s[1])[i]; vals[k].push(num(v) ? v : null); });
+  }
+  const pb = num(hs.playback_excluded) && hs.playback_excluded > 0
+    ? "; " + fint(hs.playback_excluded) + " recorder playback ATT not drawn (receive times are not session times)" : "";
+  const kept = hs.received > n ? "the newest " + fint(n) + " of " + fint(hs.received) + " (bound " + fint(hs.max_points) + " points)"
+    : fint(n) + " (bound " + fint(hs.max_points) + " points)";
+  setText("si-imuh-note", n ? "Real-time ATT packets: " + kept + ", " + iso(t[0]) + " to " + iso(t[n - 1]) + "; " +
+          fint(breaks) + (breaks === 1 ? " break" : " breaks") + " between ATT packets that do not follow each other (lost or unreceived packet, new pass, reboot)" + pb
+          : IMU_EMPTY + pb);
+  const m = S.imu || {}, na = m.na || {};
+  const fmt = (v, d) => (nil(v) ? "n/a" : fx(v, d));
+  IMU_STRIPS.forEach((s, k) => {
+    // a quantity without any value: n/a with the reason of the newest ATT when that one is n/a too
+    const why = nil(m[s[1]]) ? s[6].map(g => na[g]).find(Boolean) : null;
+    lineChart(s[0], {x: x, xTime: true, xHide: k < IMU_STRIPS.length - 1, unit: s[3], decimals: s[4], vfmt: v => fmt(v, s[4]),
+      series: [{name: s[2], v: vals[k], color: s[5], lone: true}],
+      empty: n ? "n/a in all " + fint(n) + " real-time ATT packets" + (why ? " (newest: " + why + ")" : "") : IMU_EMPTY,
+      extra: j => IMU_STRIPS.filter((o, q) => q !== k).map(o => o[2] + ": " + fmt(col(o[1])[src[j]], o[4]) + (nil(col(o[1])[src[j]]) ? "" : " " + o[3]))});
+  });
+}
 function renderScience() {
   const T = S.tlm || {}, m = (T.MAG || {}).values, a = (T.ATT || {}).values, e = (T.ENV || {}).values;
   const cfg = (SCI && SCI.cfg) || {};
@@ -2104,6 +2160,7 @@ function renderScience() {
       ["Flags", N(fb.map(b => badge(b))), ""], ["Packet time", iso(T.ATT.ert), ""]]);
   } else table("si-att", null, [["no ATT packet yet", ""]]);
   renderImu();
+  renderImuHistory();
   if (e) {
     const fb = bits("ENV_FLAG_BITS", e.flags), bsec = fb.includes("BSEC");
     table("si-env", null, [["Pressure (BMP390)", fu(e.p, 2, "hPa")], ["Temperature (BME688)", fu(e.t, 2, "°C")], ["Relative humidity", fu(e.rh, 0, "%") + " (sensor delivers whole %RH)"],
