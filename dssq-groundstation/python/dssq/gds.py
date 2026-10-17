@@ -58,6 +58,7 @@ from . import __version__, link
 from . import config as station_config
 from . import export as csv_export
 from . import products
+from . import rxstats as rxs
 from .archive import Archive
 from .ccsds import ASM, CADU_LEN, NUM_DATA_VCS, TC_MAX_FRAME_LEN, VC_NAMES
 from .ccsds.cfdp import COMPLETE as CFDP_COMPLETE
@@ -69,6 +70,7 @@ from .ccsds.sdls import (AE_HDR_LEN, AE_TAG_LEN, SDLS_SN_RESTORE_WAIT_S, SERVICE
 from .ccsds.tc import build_cltu, build_tc_frame, cltu_length, parse_tc_frame
 from .ccsds.timecode import SclkCorrelator
 from .ccsds.tm import TransferFrame, decode_codeblock
+from .clocksync import ClockReading, StationClock
 from .cmdparse import (CommandError, ParsedCommand, SequenceError, help_text, pack_seqload, parse,
                        parse_sequence, seqload_commands, tc_packet)
 from .datalog import DataLogger
@@ -92,7 +94,14 @@ from .spectral import LED_CUR_ALLOWED, LED_MAX_CODE, SpectralState
 
 log = logging.getLogger("dssq")
 
-SCHEMA_VERSION = 3
+# 4 (D-76): rx.frames.lost no longer counts the AOS MCFC jump (rx.frames.aos_gap_frames),
+# rx.rf.packet.crc_ok is null on the E22, rx.rf.margin_est_db follows the noise-floor rule,
+# time.owlt_s is null without a configured distance; new blocks station_clock and the FER bounds.
+SCHEMA_VERSION = 4
+# The kernel query behind the station clock state (clocksync.StationClock); None = the real
+# read-only query, looked up at call time. The test suite pins it (tests/conftest.py): the
+# clock state of the machine running the tests must not decide their outcome.
+STATION_CLOCK_QUERY: Callable[[], ClockReading] | None = None
 STAGES = ("register", "radio_read", "ingest", "packets", "outbox", "jobs", "afc", "tdm", "housekeeping", "console")
 CONFIRM_EXPIRY_S = 120.0
 HIBERNATE_LOS_ALARM_S = 7200.0      # two maximum beacon intervals (HIBERNATE beacon_s <= 3600)
@@ -380,7 +389,12 @@ class GroundStation:
         self.anomaly = AnomalyDetector()
         self.events: deque[dict[str, Any]] = deque(maxlen=400)
         self.health: dict[str, Any] = {"stage_errors": {}, "last_error": None, "tdm_rejected": 0,
+                                       "tdm_rejected_clock": 0,
                                        "archive_write_errors": 0, "archive_last_error": None}
+        # Station clock synchronisation (D-76, dssq/clocksync.py): refreshed from the
+        # housekeeping every clocksync.REFRESH_S; None = unknown (never guessed).
+        self.station_clock = StationClock(STATION_CLOCK_QUERY)
+        self._clock_seen: tuple[bool | None, str | None] | None = None
         self._archive_errors_seen = 0
         self._archive_error_t: float | None = None
         self._stage_error_times: deque[float] = deque(maxlen=256)
@@ -472,6 +486,9 @@ class GroundStation:
         self.model_mismatch = False
         self.framing_seen: dict[str, Any] = {"TM": 0, "USLP": 0, "last": None}
         self.ident: dict[str, Any] = {"text": None, "t": None, "count": 0}
+        # APIDs whose sequence-count baseline restarts with the pass (F-P0-4): the first
+        # packet after AOS books its gap as "not received while out of view", not as lost.
+        self._apid_aos: set[int] = set()
         # ---- radio ----
         self.radio_backend: Any = None
         self.radio_mgr: RadioManager | None = None
@@ -645,11 +662,14 @@ class GroundStation:
                 self.sync.expect_noise_reply = False
             for item in self.sync.feed(data, now):
                 if isinstance(item, NoiseReply):
-                    self.rx.on_noise(item.noise_dbm + self.rx.rssi_cal_db, item.ert)
+                    self.rx.on_noise_octet(item.noise_dbm, item.ert)
                 elif isinstance(item, RadioFault):
                     self._on_radio_fault(item)
                 elif isinstance(item, RawCadu):
+                    # The E22 reports no CRC verdict: it delivers only packets whose LoRa CRC
+                    # passed (crc_ok None, F-P0-2).
                     self.rx.on_reception(item.ert, item.rssi_dbm)
+                    self._check_overload(item.ert)
                     self._on_cadu(item.cadu, item.ert, item.rssi_dbm, item.asm_errors)
 
     def ingest_packet(self, p: link.RxPacket) -> None:
@@ -658,6 +678,7 @@ class GroundStation:
         which never bypasses RS / FECF / SDLS."""
         with self.lock:
             self.rx.on_reception(p.ert, p.rssi_dbm, p.snr_db, p.freq_err_hz, p.crc_ok)
+            self._check_overload(p.ert)
             corr = self.afc.on_packet(p.ert, p.freq_err_hz, p.snr_db, p.crc_ok)
             if corr is not None:
                 self.afc_out.append(corr)
@@ -684,14 +705,38 @@ class GroundStation:
         else:
             last["t"] = f.ert
 
+    def _check_overload(self, t: float) -> None:
+        """An RSSI reading at the end of the radio's range (rxstats, D-76): event log and
+        console, at most once a minute (the YELLOW alarm stays while it recurs)."""
+        if self.rx.last_rx["rssi_state"] != "OVERLOAD":
+            return
+        raw = self.rx.last_rx["rssi_raw_dbm"]
+        before = self._limited.get("rssi_overload")
+        self._limited_event("rssi_overload", 60.0, "WARN", "RX", f"{rxs.OVERLOAD_TEXT} (RSSI octet read {raw:.0f} dBm: "
+                            "the top of its scale, not a power; kept out of the statistics and margins)", t)
+        if self._limited.get("rssi_overload") != before:
+            self.console(f"RX WARNING: {rxs.OVERLOAD_TEXT}")
+
     def _tdm_add(self, ert: float, rssi_raw: float | None, snr: float | None, ferr: float | None) -> None:
-        """One TdmRecord per received spacecraft frame; a bad station clock never stops reception."""
+        """One TdmRecord per received spacecraft frame; a bad station clock never stops reception.
+        Refused (counted, one WARN per pass) while the kernel reports the station clock NOT
+        synchronised (D-76): a TDM's time tags are UTC from that clock; "unknown" refuses
+        nothing. An overload RSSI is no received power: the record carries none (D-76)."""
+        if self.station_clock.synced is False:
+            self.health["tdm_rejected"] += 1
+            self.health["tdm_rejected_clock"] += 1
+            if not self._tdm_warned:
+                self._tdm_warned = True
+                self.event("WARN", "TDM", "station clock not synchronised (kernel: "
+                           f"{self.station_clock.reading.reason}): TDM records skipped - their UTC time tags would "
+                           "come from an unsynchronised clock (check NTP: timedatectl)")
+            return
         packet = self.settings.model.packet_mode
         bw = self.rx.noise_bw[0]
         try:
             rec = products.TdmRecord(
                 t_utc=ert - float(self.cfg["radio"]["radio_latency_s"]),
-                rx_power_dbm=self.rx.calibrated(rssi_raw),
+                rx_power_dbm=self.rx.received_power(rssi_raw),
                 snr_db=snr if packet else None,
                 freq_offset_hz=self.afc.residual_hz(ferr) if packet and ferr is not None else None,
                 afc_correction_hz=float(self.afc.correction_hz) if packet else 0.0,
@@ -784,6 +829,7 @@ class GroundStation:
         if was_los and not self.rx.los:                 # AOS: the new pass's TDM starts with THIS frame
             self.tdm.clear()
             self._tdm_warned = False
+            self._apid_aos = set(self.apid_stats)       # sequence baselines restart with the pass
         info["frames"] += 1
         info["last_vcfc"] = f.vcfc
         info["last_ert"] = ert
@@ -803,17 +849,24 @@ class GroundStation:
     def _apid_stats(self, p: SpacePacket, vcid: int, now: float) -> dict[str, Any]:
         st = self.apid_stats.get(p.apid)
         if st is None:
-            st = self.apid_stats[p.apid] = {"count": 0, "seq_gaps": 0, "lost": 0, "last_seq": None,
-                                            "last_ert": None, "iat_s": None, "latency": Window(600.0, 2000),
-                                            "size": len(p.raw), "vcid": vcid}
+            st = self.apid_stats[p.apid] = {"count": 0, "seq_gaps": 0, "lost": 0, "aos_gap_packets": 0,
+                                            "last_seq": None, "last_ert": None, "iat_s": None,
+                                            "latency": Window(600.0, 2000), "size": len(p.raw), "vcid": vcid}
         realtime = vcid != 2
+        # The first real-time packet of a pass: its sequence gap counts packets generated while
+        # out of view (modulo 16384), not packets lost, and the LOS gap is no inter-arrival time.
+        first_in_pass = realtime and p.apid in self._apid_aos
+        if first_in_pass:
+            self._apid_aos.discard(p.apid)
         if realtime and st["last_seq"] is not None:
             gap = (p.seq_count - st["last_seq"] - 1) & 0x3FFF
-            if gap:
+            if gap and first_in_pass:
+                st["aos_gap_packets"] += gap
+            elif gap:
                 st["seq_gaps"] += 1
                 st["lost"] += gap
         if realtime:
-            if st["last_ert"] is not None:
+            if st["last_ert"] is not None and not first_in_pass:
                 dt = now - st["last_ert"]
                 st["iat_s"] = dt if st["iat_s"] is None else st["iat_s"] + 0.2 * (dt - st["iat_s"])
             st["last_seq"], st["last_ert"] = p.seq_count, now
@@ -1844,6 +1897,8 @@ class GroundStation:
         now = time.time() if now is None else now
         with self.lock:
             self._derive_timers()
+            self._station_clock_tick(now)
+            self.rx.set_frame_period(self._frame_period_s())     # rate and link-manager windows (F-P1-1/2)
             self.rx.tick(now, self.los_timeout_s(), self._hibernating(now))
             for t, e in self.rx.pending_events:
                 if e == "AOS":
@@ -1873,13 +1928,31 @@ class GroundStation:
             self._hk_1hz_t = now
             self._housekeeping_1hz(now)
 
+    def _station_clock_tick(self, now: float) -> None:
+        """Station clock synchronisation (D-76): the kernel is asked at most every
+        clocksync.REFRESH_S (StationClock.refresh); a change of state is logged."""
+        r = self.station_clock.refresh(now)
+        seen = (r.synced, r.reason)
+        if seen == self._clock_seen:
+            return
+        first = self._clock_seen is None
+        self._clock_seen = seen
+        if r.synced is True:
+            if not first:
+                self.event("INFO", "CLOCK", f"station clock synchronised (kernel {r.state}, maximum error "
+                           f"{(r.maxerror_us or 0) / 1000:.0f} ms)")
+        elif r.synced is False:
+            self.event("WARN", "CLOCK", f"station clock NOT synchronised (kernel: {r.reason}): ERT, SCET and the "
+                       "TDM time tags come from it - TDM records are refused until it is (check NTP: timedatectl)")
+        else:
+            self.event("INFO", "CLOCK", f"station clock synchronisation unknown: {r.reason}")
+
     def _housekeeping_1hz(self, now: float) -> None:
         if self.link_mgr.mode != "OFF" and now - self.link_mgr.last_eval >= self.link_mgr.period_s:
-            # FER over the margin's 10-minute window without the AOS frame's MCFC jump: the
-            # lifetime ratio counts every inter-pass gap as lost frames (rxstats.fer_window).
-            rx = {"windows": {"10m": {"rssi": self.rx.w["10m"]["rssi"].stats(now)}},
-                  "frames": {"fer": self.rx.fer_window(now)}}
-            rec = self.link_mgr.evaluate(now, rx, self.settings.rate_code, self.rx.sc_rf.get("tx_power_code"))
+            # RSSI, noise and FER over max(600 s, 10 frame periods), without the AOS frame's
+            # MCFC jump (frames sent while out of view are not lost: rxstats.lm_input).
+            rec = self.link_mgr.evaluate(now, self.rx.lm_input(now), self.settings.rate_code,
+                                         self.rx.sc_rf.get("tx_power_code"))
             if rec:
                 self.event("INFO", "LINK", f"link manager AUTO: {rec['action']} {rec.get('value')} - {rec['why']}")
                 if rec["action"] == "LINKRATE" and self.radio_mgr and self.radio_mgr.available:
@@ -2012,6 +2085,10 @@ class GroundStation:
             red.append("frequency offset > 80 % of FERR_L")
         elif fstate == "WARN":
             yellow.append("frequency offset > 50 % of FERR_L")
+        n_over = st.overloads_recent(now)
+        if n_over:                                       # D-76: an RSSI octet at the top of its scale
+            yellow.append(f"receiver overload ({n_over} in {rxs.OVERLOAD_RECENT_S / 60:.0f} min): "
+                          f"{rxs.OVERLOAD_TEXT}")
         gf = self.ground_radio_fault
         if gf and now - gf["t"] < 5:
             red.append(f"ground radio fault: {gf['text']}")
@@ -2116,25 +2193,83 @@ class GroundStation:
                         planned air time is not over, held PANEL_TX_HOLD_S (one status line)
                         so a short burst shows (the SX126x sketch adds its own TX state)
           rssi_dbm      the last reception's calibrated RSSI, rssi_recent = within the LOS
-                        timeout
-          rssi_overload receiver overload of that reading: not classified yet (None)
-          margin_db, margin_floor  margin against the worst-case sensitivity and whether
-                        it is only an upper bound (noise floor): not produced yet (None)
-          lost_10m      frames lost in the last 10 minutes of reception (the link-manager
-                        FER window: a LOS gap is not counted)
-          clock_synced  station clock synchronisation: not produced yet (None)"""
+                        timeout (None for an overload or invalid reading)
+          rssi_overload that reading is an overload (D-76: the RSSI octet at the top of its
+                        scale) and recent; None without a reading
+          margin_db, margin_floor  the margin of that reading against the worst-case
+                        sensitivity (the typical one where the datasheet gives no worst case:
+                        SX126x), after the D-76 noise-floor rule; at the noise floor its upper
+                        bound noise - sensitivity with margin_floor true (the row blinks);
+                        None without a recent usable reading
+          lost_10m      frames lost in the last 10 minutes of reception (the FER window: a
+                        LOS gap is not counted)
+          clock_synced  the kernel's station clock synchronisation (clocksync; None unknown)"""
         rx = self.rx
         t = rx.last_rx.get("t")
         los_s = rx.los_timeout_s if rx.los_timeout_s is not None else float(self.cfg["gds"]["los_timeout_s"])
+        recent = t is not None and 0.0 <= now - t <= los_s
+        state = rx.last_rx.get("rssi_state")
+        a = rx.last_rx_assessment()
+        floor = a["state"] == "NOISE_FLOOR"
+        margin = (a["worst_max_db"] if a["worst_max_db"] is not None else a["max_db"]) if floor \
+            else rxs.margin_colour_db(a)
         return {"sync": "PACKET" if self.settings.model.packet_mode else self.sync.state,
                 "tx": self.mono() < self._uplink_tx_until + PANEL_TX_HOLD_S,
                 "rssi_dbm": rx.last_rx.get("rssi_dbm"),
-                "rssi_recent": t is not None and 0.0 <= now - t <= los_s,
-                "rssi_overload": None, "margin_db": None, "margin_floor": None,
-                "lost_10m": int(math.fsum(rx.fer_lost.values(now))),
-                "clock_synced": None}
+                "rssi_recent": recent,
+                "rssi_overload": None if state is None else (state == "OVERLOAD" and recent),
+                "margin_db": margin if recent else None,
+                "margin_floor": (floor if margin is not None else None) if recent else None,
+                "lost_10m": rx.fer_counts(now)[0],
+                "clock_synced": self.station_clock.synced}
 
     # -------------------------------------------------------------- snapshot
+    def _register_check(self) -> str:
+        """radio.register_check (F-P1-4): whether the station module's registers were read
+        back and match station.toml - with [gds] rcu = false nothing is read back, so the RSSI
+        octet and the noise register are what station.toml says, not verified."""
+        if self.settings.model.packet_mode:
+            return "n/a (SX126x: the station MCU sketch configures the radio; see the SX126x station MCU panel)"
+        rm = self.radio_mgr
+        if rm is None or rm.rcu is None:
+            return ("not read back: no Radio Control Unit ([gds] rcu = false) - RSSI byte and noise enable "
+                    "assumed from station.toml")
+        cfg = self.ground_radio
+        if cfg is None:
+            return "not read back yet (VERIFY / RADIO pending or the module did not answer)"
+        r = self.cfg["radio"]
+        bad = [k for k, want in (("channel", self.settings.channel), ("air_rate_code", self.settings.rate_code),
+                                 ("rssi_byte", bool(r["rssi_byte"])), ("rssi_noise_enable", bool(r["rssi_noise"])))
+               if cfg.get(k) != want]
+        return f"read back: MISMATCH {', '.join(bad)}" if bad else "read back: matches station.toml"
+
+    def _module_answering(self, now: float) -> tuple[bool | None, str]:
+        """(radio.module_answering, radio.module_evidence) (F-P1-4): an open serial port says
+        nothing about the module behind the USB-UART bridge; output of the module - a CADU or
+        a noise reply - within 3 noise-poll periods does. Without such output there is no
+        evidence either way (None): the noise query goes out only after a received frame, so
+        between passes the GDS does not ask (and cannot tell a silent module from a quiet sky)."""
+        rx = self.rx
+        if self.settings.model.packet_mode:
+            b = self.radio_backend
+            snap = b.snapshot() if b is not None and hasattr(b, "snapshot") else {}
+            age = snap.get("mcu_age_s") if isinstance(snap, dict) else None
+            if isinstance(age, (int, float)) and not isinstance(age, bool):
+                ok = age <= 3 * 5.0                      # the station MCU's status line comes every 5 s
+                return ok, f"station MCU status {age:.0f} s ago"
+            return None, "no station MCU status yet"
+        span = 3.0 * float(self.cfg["radio"]["noise_poll_s"])
+        heard = [t for t in (rx.last_rx["t"], rx.noise_reply_t) if t is not None and 0.0 <= now - t <= span]
+        if heard:
+            return True, f"module output {now - max(heard):.0f} s ago (CADU or noise reply)"
+        return None, f"no CADU or noise reply in the last {span:.0f} s (no evidence either way)"
+
+    def _linkrate_refusal(self) -> str | None:
+        """linkmgr.why_not (F-P1-6): why a LINKRATE cannot be executed, None when it can."""
+        if self.radio_mgr is not None and self.radio_mgr.available:
+            return None
+        return self._radio_rejection("LINKRATE") + ": the link manager only advises"
+
     def _radio_link_snapshot(self) -> dict[str, Any]:
         b = self.radio_backend
         if b is None:
@@ -2204,6 +2339,7 @@ class GroundStation:
             sx = self.radio_backend.snapshot() if self.settings.model.packet_mode and \
                 self.radio_backend is not None and hasattr(self.radio_backend, "snapshot") else None
             rm = self.radio_mgr
+            answering, evidence = self._module_answering(now)
             sdls = {**link_snapshot(self.sdls_tc, self.sdls_tm),
                     "spacecraft_tm_state": SDLS_TM_STATES.get(hk.get("sdls_tm_state")),
                     "mismatch_suspected": self.mismatch_suspected,
@@ -2236,6 +2372,8 @@ class GroundStation:
                           "backend_available": self.radio_backend is not None,
                           "backend_error": self.radio_unavailable,
                           "ground_config": self.ground_radio,
+                          "register_check": self._register_check(),
+                          "module_answering": answering, "module_evidence": evidence,
                           "ground_fault": (self.ground_radio_fault if self.ground_radio_fault and
                                            now - self.ground_radio_fault["t"] < 5 else None),
                           "last_scan": rm.last_scan if rm else None,
@@ -2253,6 +2391,7 @@ class GroundStation:
                 "vc": vc,
                 "apids": {self.decom.packet_name(a): {
                     "apid": a, "count": s["count"], "seq_gaps": s["seq_gaps"], "lost": s["lost"],
+                    "aos_gap_packets": s["aos_gap_packets"],
                     "last_seq": s["last_seq"], "age_s": None if s["last_ert"] is None else now - s["last_ert"],
                     "iat_s": s["iat_s"], "latency": s["latency"].stats(now), "size": s["size"], "vcid": s["vcid"]}
                     for a, s in sorted(self.apid_stats.items())},
@@ -2264,7 +2403,9 @@ class GroundStation:
                          # three (a line through two points always fits exactly).
                          "corr_samples": n_corr, "drift_ppm": self.corr.drift_ppm if n_corr >= 2 else None,
                          "residual_rms_ms": self.corr.residual_rms * 1000 if n_corr >= 3 else None,
-                         "owlt_s": self.owlt_s,
+                         # null without a configured distance (F-P0-7): 0 s would be a value; the
+                         # SCET still subtracts 0 s then (_time_correlate)
+                         "owlt_s": self.owlt_s if self.owlt_s > 0 else None,
                          "timecorr_key": self.timecorr_key_name, "sclk_estimate_s": self.sclk_estimate_s(now)},
                 "cop": {**self.fop.state(), "tc_framing": self.fop.framing,
                         "sdls_service": self.sdls_tc.service_name, "sdls_sn": self.sdls_tc.sn,
@@ -2280,7 +2421,7 @@ class GroundStation:
                 "magcal": self._magcal_snapshot(),
                 "health": self.health,
                 "logger": self.logger.health(now),
-                "linkmgr": self.link_mgr.state(),
+                "linkmgr": self.link_mgr.state(self._linkrate_refusal()),
                 "pending_confirm": [{"id": k, "text": v["text"], "kind": v["kind"], "confirmed": v["confirmed"],
                                      "authorized": v["authorized"], "t": v["t"],
                                      "expires_s": max(0.0, CONFIRM_EXPIRY_S - (now - v["t"]))}
@@ -2289,6 +2430,7 @@ class GroundStation:
                 "events": list(self.events)[-80:],
                 "anomalies": list(self.anomaly.recent)[-20:],
                 "console": list(self.console_lines),
+                "station_clock": self.station_clock.snapshot(),     # D-76 (dssq/clocksync.py)
                 "station_io": {**self.station_io,
                                "connected": bool(self.station_io["connected_t"]
                                                  and now - self.station_io["connected_t"] < STATION_IO_STALE_S)},
@@ -2614,15 +2756,18 @@ class Runner:
         gs = self.gs
         with gs.lock:
             r = gs.rx
-            rssi, noise = r.last_rx["rssi_dbm"], r.noise_dbm
+            t = r.last_rx["t"]
+            rssi, noise = r.last_rx["rssi_dbm"], None if t is None else r.noise_for(t)
             snr = None if rssi is None or noise is None else rssi - noise
             sx = gs.settings.model.packet_mode
-            log.info("STATUS %s sync=%s RSSI=%s dBm noise=%s dBm SNRest=%s dB frames=%d lost=%d RScorr=%d alarm=%s",
-                     "LOS" if r.los else "AOS", "PACKET" if sx else gs.sync.state,
-                     at_resolution(rssi, SX126X_RSSI_RESOLUTION_DB if sx else E22_RSSI_RESOLUTION_DB),
+            rssi_txt = "OVERLOAD (too strong to measure)" if r.last_rx["rssi_state"] == "OVERLOAD" else \
+                f"{at_resolution(rssi, SX126X_RSSI_RESOLUTION_DB if sx else E22_RSSI_RESOLUTION_DB)} dBm"
+            log.info("STATUS %s sync=%s RSSI=%s noise=%s dBm SNRest=%s dB frames=%d lost=%d RScorr=%d clock=%s "
+                     "alarm=%s", "LOS" if r.los else "AOS", "PACKET" if sx else gs.sync.state, rssi_txt,
                      at_resolution(noise, 0.1 if sx else E22_RSSI_RESOLUTION_DB),
                      at_resolution(snr, 0.1 if sx else E22_RSSI_RESOLUTION_DB),
-                     r.frames_ok, r.frames_lost, r.sym_corrected, gs.alarm)
+                     r.frames_ok, r.frames_lost, r.sym_corrected,
+                     {True: "synced", False: "NOT-SYNCED", None: "unknown"}[gs.station_clock.synced], gs.alarm)
 
     def step(self) -> None:
         """One bounded iteration. Every stage runs inside its own error boundary."""

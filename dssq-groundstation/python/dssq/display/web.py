@@ -346,37 +346,82 @@ class _Prom:
                 self.gauge(f"{prefix}_{k}", v, f"{help_} {k}")
 
 
+# rx.rf / rx.budget values of the LAST reception: during LOS they are history, not the link,
+# and are not exported as current gauges (F-P1-10; the page hides them too). The counters,
+# the configuration and dssq_state_since_last_frame_s stay.
+LIVE_RF_KEYS = frozenset({"rssi_dbm", "rssi_raw_dbm", "rssi_mw", "snr_est_db", "pr_est_dbm", "cn0_est_dbhz",
+                          "ebn0_est_db", "margin_est_db", "margin_worst_est_db", "margin_max_db",
+                          "margin_worst_max_db", "snr_margin_db"})
+LIVE_BUDGET_KEYS = frozenset({"measured_path_loss_db_est", "measured_path_loss_mean10m_db", "excess_loss_db_est",
+                              "range_at_sensitivity_km_est"})
+
+
 def prometheus(s: Mapping[str, Any]) -> str:
     """Prometheus gauges from a snapshot (PB-5.6). The rx.rf / rx.decoder / rx.frames /
     rx.budget gauges are named after the snapshot keys exactly as v2 did; the v3 renames
-    are dssq_rf_sensitivity_dbm, dssq_rf_noise_bw_hz and dssq_frames_lost."""
+    are dssq_rf_sensitivity_dbm, dssq_rf_noise_bw_hz and dssq_frames_lost. D-76 (F-P1-10):
+    the last-reception gauges are absent during LOS (LIVE_RF_KEYS), the E22 exports no
+    SX126x-only quantity (Doppler block, CRC verdict), every FER has its exact bounds
+    (dssq_frames_fer_ci_*, dssq_frames_fer_10m_ci_*), and the frame synchronizer, the serial
+    link, the station clock, the station MCU link and the link manager are exported. An
+    unknown value is absent (never NaN, never a guess)."""
     p = _Prom()
     rx = s.get("rx") or {}
     st = rx.get("state") or {}
+    los = st.get("los") is True
+    packet_radio = (s.get("radio") or {}).get("packet_mode") is True
     p.gauge("los", st.get("los"), "1 = loss of signal")
     for k in ("passes", "pass_duration_s", "since_last_frame_s", "time_in_lock_pct", "los_timeout_s",
               "hibernating"):
         p.gauge(f"state_{k}", st.get(k), f"receiver state {k}")
     rf = rx.get("rf") or {}
-    p.scalars("rf", rf, "receiver")
-    for sub in ("packet", "snr_db", "freq_err_hz", "doppler", "afc"):
-        p.scalars(f"rf_{sub}", rf.get(sub), f"receiver {sub}")
+    p.scalars("rf", {k: v for k, v in rf.items() if not (los and k in LIVE_RF_KEYS)}, "receiver")
+    # E22: no SNR, frequency error, CRC verdict, Doppler or AFC exists (F-P2-1): no sample, not even n = 0
+    subs = ("packet", "snr_db", "freq_err_hz", "doppler", "afc") if packet_radio else ()
+    for sub in subs:
+        if not (los and sub == "packet"):
+            p.scalars(f"rf_{sub}", rf.get(sub), f"receiver {sub}")
+    if not packet_radio and not los:              # E22: the packet's RSSI, no CRC verdict (F-P0-2)
+        p.gauge("rf_packet_rssi_dbm", (rf.get("packet") or {}).get("rssi_dbm"), "receiver packet rssi_dbm")
     dec = rx.get("decoder") or {}
     p.scalars("decoder", dec, "decoder")
     for verdict, n in (dec.get("sdls_rejected") or {}).items():
         p.gauge("decoder_sdls_rejected", n, "TM frames rejected by SDLS, by verdict", {"verdict": verdict})
     fr = rx.get("frames") or {}
     p.scalars("frames", fr, "frames")
+    for key, what in (("fer_ci", "FER since the GDS started"), ("fer_10m_ci", "FER over the last 10 minutes")):
+        ci = fr.get(key) or {}
+        for k, help_ in (("two_sided_lo", "exact (Clopper-Pearson) two-sided lower bound"),
+                         ("two_sided_hi", "exact (Clopper-Pearson) two-sided upper bound"),
+                         ("one_sided_hi", "exact (Clopper-Pearson) one-sided upper bound"),
+                         ("confidence", "confidence level of the bounds"), ("lost", "frames lost"),
+                         ("received", "frames received")):
+            p.gauge(f"frames_{key}_{k}", ci.get(k), f"{what}: {help_}")
     for fmt, n in (fr.get("by_format") or {}).items():
         p.gauge("frames_by_format", n, "frames by transfer-frame format", {"format": fmt})
     per_vc = fr.get("per_vc") or {}
     for vc, d in per_vc.items():
         p.gauge("frames_vc_frames", (d or {}).get("frames"), "frames per virtual channel", {"vc": vc})
     for vc, d in per_vc.items():
-        p.gauge("frames_vc_lost", (d or {}).get("lost"), "frames lost per virtual channel", {"vc": vc})
+        p.gauge("frames_vc_lost", (d or {}).get("lost"), "frames lost per virtual channel (in passes)", {"vc": vc})
     bud = rx.get("budget") or {}
-    p.scalars("budget", bud, "link budget")
+    p.scalars("budget", {k: v for k, v in bud.items() if not (los and k in LIVE_BUDGET_KEYS)}, "link budget")
     p.scalars("budget_uplink", bud.get("uplink"), "uplink budget")
+    w10 = ((rx.get("windows") or {}).get("10m") or {}).get("rssi") or {}
+    p.gauge("rssi_10m_p10_dbm", w10.get("p10"), "10th percentile of the packet RSSI over the last 10 minutes")
+    sync = s.get("sync") or {}
+    p.scalars("sync", {k: v for k, v in sync.items() if k != "state"}, "frame synchronizer")
+    p.scalars("serial", rx.get("serial"), "station radio serial link")
+    p.gauge("radio_link_connected", (rx.get("radio_link") or {}).get("connected"),
+            "1 = the station radio backend is connected (serial port open / bridge up)")
+    rec = (s.get("linkmgr") or {}).get("recommendation") or {}
+    p.gauge("linkmgr_margin_p10_db", rec.get("margin_p10_db"), "link manager: p10 margin of its last evaluation")
+    p.gauge("linkmgr_executable", (s.get("linkmgr") or {}).get("executable"),
+            "1 = the GDS can execute a LINKRATE (radio control path present)")
+    p.gauge("station_io_connected", (s.get("station_io") or {}).get("connected"),
+            "1 = a hello from the station MCU within 12 s")
+    p.gauge("station_clock_synced", (s.get("station_clock") or {}).get("synced"),
+            "1 = the kernel reports the station clock synchronised (absent: unknown)")
     beacon = s.get("beacon") or {}
     p.gauge("beacon_level", beacon.get("level"), "spacecraft beacon level 0 NOMINAL .. 3 URGENT")
     p.gauge("alarm_level", {"NONE": 0, "YELLOW": 1, "RED": 2}.get(str(s.get("alarm"))), "0 none, 1 yellow, 2 red")
@@ -388,7 +433,9 @@ def prometheus(s: Mapping[str, Any]) -> str:
     health = s.get("health") or {}
     for stage, n in (health.get("stage_errors") or {}).items():
         p.gauge("stage_errors", n, "Runner stage failures (error boundary)", {"stage": stage})
-    p.gauge("tdm_rejected", health.get("tdm_rejected"), "TDM records refused (station clock)")
+    p.gauge("tdm_rejected", health.get("tdm_rejected"), "TDM records refused (station clock or out-of-range value)")
+    p.gauge("tdm_rejected_clock", health.get("tdm_rejected_clock"),
+            "TDM records refused because the station clock was not synchronised")
     p.scalars("logger", s.get("logger"), "receiver data logger")
     apids = s.get("apids") or {}
     for key, help_ in (("count", "packets received"), ("lost", "packets lost (sequence gaps)"),

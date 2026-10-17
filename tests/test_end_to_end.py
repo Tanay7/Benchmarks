@@ -128,7 +128,7 @@ def test_v3_telemetry_beacon_and_sdls_ae_both_ways(world):
     w, gs = world, world.gs
     w.run(60)
     s = gs.snapshot()
-    assert s["schema"] == 3 and s["version"] == "3.0.0" and s["sync"]["state"] == "LOCK"
+    assert s["schema"] == 4 and s["version"] == "3.0.0" and s["sync"]["state"] == "LOCK"
     assert s["rx"]["frames"]["ok"] > 15 and s["rx"]["decoder"]["uncorrectable"] == 0
     assert s["rx"]["decoder"]["symbols_corrected"] > 0                            # RS exercised
     sd = s["link"]["sdls"]
@@ -152,9 +152,14 @@ def test_v3_telemetry_beacon_and_sdls_ae_both_ways(world):
     assert line.startswith("S|1|") and line.endswith("|0") and q == "Q|-1"     # AOS, beacon NOMINAL, none pending
     m = gs.panel_status()["matrix"]                                             # D-78 LED matrix
     assert m["sync"] in ("LOCK", "FLYWHEEL") and m["rssi_recent"] and isinstance(m["rssi_dbm"], float)
-    assert m["lost_10m"] == 0 and (m["margin_db"], m["clock_synced"], m["rssi_overload"]) == (None, None, None)
+    # D-76: the margin against the worst-case sensitivity (sim noise -118 dBm: SIGNAL), the pinned
+    # synchronised clock (tests/conftest.py), no overload
+    worst = gs.settings.sensitivity_worst[0]
+    assert m["lost_10m"] == 0 and (m["clock_synced"], m["rssi_overload"], m["margin_floor"]) == (True, False, False)
+    assert m["margin_db"] == pytest.approx(m["rssi_dbm"] - worst)
     ml = matrix_line(gs.panel_status())
-    assert ml.startswith(("M|L|", "M|F|")) and ml.endswith("|?|0|?") and ml.split("|")[3].lstrip("-").isdigit()
+    assert ml.startswith(("M|L|", "M|F|")) and ml.endswith(f"|{round(m['margin_db'])}|0|1")
+    assert ml.split("|")[3].lstrip("-").isdigit()
     json.dumps(json_safe(s), allow_nan=False)                                    # web-serialisable
 
 
@@ -731,16 +736,46 @@ def test_received_power_text_at_the_radio_resolution():
     assert at_resolution(None, 1.0) is None and at_resolution(float("nan"), 1.0) is None
 
 
-def test_tdm_rejection_names_the_field_not_the_clock(tmp_path):
-    """Record 2026-10-13-A: an E22 RSSI byte of 0x00 (-256 dBm) with a good clock was reported as
-    a clock fault."""
+def test_overload_octet_is_no_power(tmp_path, monkeypatch):
+    """Record 2026-10-13-A: an E22 RSSI byte of 0x00 (-256 dBm; 0xFF -1 dBm alternated with it)
+    with a good clock was reported as a clock fault and entered every statistic. D-76: it is an
+    OVERLOAD - too strong to measure - counted, warned about (event, console, YELLOW alarm) and
+    kept out of the statistics, the margins and the TDM record (which then carries no power)."""
+    from dssq import rxstats
     gs = GroundStation(_config(tmp_path, key=False), archive=False)
-    cadu = encode_cadu(build_frame(0, 0, 0, FHP_ONLY_IDLE_DATA, bytes(188), 0))
-    gs.ingest(cadu + bytes([0]), 1_791_850_000.0)                                # 2026-10-13
+    t = 1_791_850_000.0                                                          # 2026-10-13
+    for i, octet in enumerate((0x00, 0xFF)):
+        gs.ingest(encode_cadu(build_frame(0, i, i, FHP_ONLY_IDLE_DATA, bytes(188), 0)) + bytes([octet]), t + 5 * i)
+    gs.housekeeping(t + 6)
     s = gs.snapshot()
-    assert s["health"]["tdm_rejected"] == 1 and s["rx"]["frames"]["ok"] == 1
-    tdm = [e["text"] for e in s["events"] if e["source"] == "TDM"]
-    assert len(tdm) == 1 and "rx_power_dbm" in tdm[0] and "NTP" not in tdm[0]
+    rf = s["rx"]["rf"]
+    assert s["rx"]["frames"]["ok"] == 2 and s["health"]["tdm_rejected"] == 0 and s["tdm"]["records"] == 2
+    assert (rf["rssi_state"], rf["rssi_dbm"], rf["rssi_raw_dbm"], rf["rssi_overloads"]) == ("OVERLOAD", None, -1, 2)
+    assert rf["margin_est_db"] is None and rf["margin_state"] is None
+    assert s["rx"]["budget"]["measured_path_loss_db_est"] is None
+    assert s["rx"]["windows"]["pass"]["rssi"]["n"] == 0 and sum(s["rx"]["hist"]["rssi"]["bins"]) == 0
+    assert all(r.rx_power_dbm is None for r in gs.tdm.records)
+    warn = [e["text"] for e in s["events"] if e["source"] == "RX" and e["level"] == "WARN"]
+    assert len(warn) == 1 and rxstats.OVERLOAD_TEXT in warn[0]                   # once a minute at most
+    assert any(rxstats.OVERLOAD_TEXT in line for _, line in s["console"])
+    assert any(r.startswith("receiver overload (2 in 10 min)") and r.endswith(rxstats.OVERLOAD_TEXT)
+               for r in s["alarm_reasons"])
+    monkeypatch.setattr(time, "time", lambda: t + 6)
+    m = gs.panel_status()["matrix"]
+    assert m["rssi_overload"] is True and m["rssi_dbm"] is None and m["margin_db"] is None
+    from dssq.display.frontpanel import matrix_line
+    assert matrix_line(gs.panel_status()).split("|")[3:5] == ["O", "?"]
+    gs.housekeeping(t + 6 + rxstats.OVERLOAD_RECENT_S + 1)                       # ten quiet minutes
+    assert not any(r.startswith("receiver overload") for r in gs.snapshot()["alarm_reasons"])
+
+
+def test_noise_octet_at_the_end_of_its_range_is_no_noise_reading(tmp_path):
+    gs = GroundStation(_config(tmp_path, key=False), archive=False)
+    gs.sync.expect_noise_reply = True
+    gs.noise_wait_until = 2e9
+    gs.ingest(bytes([0xC1, 0x00, 0x02, 0x00, 0x90]), 1_791_850_000.0)           # noise octet 0x00
+    rf = gs.snapshot()["rx"]["rf"]
+    assert rf["noise_dbm"] is None and rf["noise_rejected"] == 1 and gs.rx.noise_replies == 1
 
 
 def test_close_is_bounded_with_a_stuck_front_panel(tmp_path):
@@ -892,7 +927,11 @@ def test_pass_windows_and_link_manager_fer_ignore_the_los_gap(tmp_path):
     assert gs.rx.los
     t = _ingest_pass(gs, T0 + 3 * 3600.0, 20 + 112, 20)                          # 2160 frames sent out of view
     rx = gs.rx
-    assert rx.frames_lost == 112 and rx.passes == 2                              # lifetime count unchanged
+    # F-P0-4 (D-76): the MCFC jump at AOS (2160 mod 256 = 112) is not a frame lost
+    assert rx.frames_lost == 0 and rx.aos_gap_frames == 112 and rx.passes == 2
+    fr = gs.snapshot()["rx"]["frames"]
+    assert (fr["lost"], fr["aos_gap_frames"], fr["fer"]) == (0, 112, 0.0)
+    assert (fr["fer_ci"]["lost"], fr["fer_ci"]["received"]) == (0, 40)
     assert rx.w["pass"]["rssi"].stats()["n"] == 20 and rx.w["pass"]["asm"].stats()["n"] == 20
     iat = rx.w["pass"]["iat"].stats()
     assert iat["n"] == 19 and iat["max"] == pytest.approx(5.0)
@@ -916,7 +955,7 @@ def test_link_manager_rate_limits_follow_the_radio_model(tmp_path):
     assert sx.link_mgr.min_rate == 0
     lm = LinkManager(6.0, 0.0, 0.0, None, 4, model="SX126x")
     lm.mode = "ADVISE"
-    rx = {"windows": {"10m": {"rssi": {"n": 20, "p10": -141.0}}}, "frames": {"fer": 0.0}}
+    rx = {"window_s": 600.0, "rssi": {"n": 20, "p10": -141.0}, "noise": {"n": 0}, "frames": 20, "lost": 0, "fer": 0.0}
     lm.evaluate(1.0, rx, 1, None)
     assert lm.recommendation["action"] == "LINKRATE" and lm.recommendation["value"] == 0
     e22 = GroundStation(_config(tmp_path, key=False, air_rate=4), archive=False)

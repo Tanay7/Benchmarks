@@ -651,14 +651,49 @@ def test_link_manager_never_changes_power_and_stops_at_2k4():
     lm = LinkManager(target_margin_db=6.0, period_s=0, holdoff_s=0, min_rate=0, max_rate=4)
     lm.mode = "AUTO"
     assert lm.min_rate == 2                                # codes 0-1 are aliases of 2.4k
-    rx = {"windows": {"10m": {"rssi": {"n": 50, "p10": -125.0}}}, "frames": {"fer": 0.2}}
+    rx = {"window_s": 600.0, "rssi": {"n": 50, "p10": -125.0}, "noise": {"n": 0}, "frames": 50, "lost": 12, "fer": 0.2}
     rec = lm.evaluate(1000.0, rx, rate_code=2, power_code=0)
     assert rec is None and lm.recommendation["action"] == "NONE"       # nothing left to try
     rec = lm.evaluate(2000.0, rx, rate_code=4, power_code=0)
     assert rec["action"] == "LINKRATE" and rec["value"] == 3
-    good = {"windows": {"10m": {"rssi": {"n": 50, "p10": -90.0}}}, "frames": {"fer": 0.0}}
+    good = {"window_s": 600.0, "rssi": {"n": 50, "p10": -90.0}, "noise": {"n": 5, "mean": -118.0}, "frames": 50,
+            "lost": 0, "fer": 0.0}
     rec = lm.evaluate(3000.0, good, rate_code=4, power_code=0)
     assert rec is None or rec["action"] != "TXPWR"
+
+
+def _lm_input(p10, noise=None, n=50, lost=0, window_s=600.0):
+    return {"window_s": window_s, "rssi": {"n": n, "p10": p10},
+            "noise": {"n": 5, "mean": noise} if noise is not None else {"n": 0}, "frames": n, "lost": lost,
+            "fer": lost / (lost + n)}
+
+
+def test_link_manager_margin_against_the_worst_case_and_the_noise_floor():
+    """D-76: the margin is taken against the worst-case sensitivity (T33D 2.4k: -126 dBm, the
+    datasheet "min"); a faster rate is never advised when the p10 RSSI is within 10 dB of the
+    noise or no noise reading checks it; at the noise floor the margin is an upper bound that
+    can still say "low"."""
+    lm = LinkManager(target_margin_db=6.0, period_s=0, holdoff_s=0, model="E22-400T33D")
+    lm.evaluate(1.0, _lm_input(-100.0, noise=-118.0), rate_code=2, power_code=0)
+    rec = lm.recommendation
+    assert (rec["sensitivity_dbm"], rec["sensitivity_basis"], rec["margin_p10_db"]) == (-126.0, "worst case", 26.0)
+    assert rec["action"] == "LINKRATE" and rec["value"] == 3 and rec["noise_state"] == "SIGNAL"
+    lm.evaluate(2.0, _lm_input(-100.0), rate_code=2, power_code=0)               # no noise reading
+    assert lm.recommendation["action"] == "NONE" and "no noise reading" in lm.recommendation["why"]
+    lm.evaluate(3.0, _lm_input(-110.0, noise=-118.0), rate_code=2, power_code=0)  # 8 dB above the noise
+    rec = lm.recommendation
+    assert rec["action"] == "NONE" and rec["noise_state"] == "NEAR_NOISE" and "less than 10 dB" in rec["why"]
+    lm.evaluate(4.0, _lm_input(-121.0, noise=-122.0), rate_code=3, power_code=0)  # at the noise floor
+    rec = lm.recommendation
+    # the upper bound noise - S(code 3) = -122 - (-126 + 3.0) = 1 dB < target - 3: slower
+    assert rec["noise_state"] == "NOISE_FLOOR" and rec["margin_p10_db"] == pytest.approx(1.0)
+    assert rec["action"] == "LINKRATE" and rec["value"] == 2
+    lm.evaluate(4.5, _lm_input(-117.0, noise=-118.0), rate_code=2, power_code=0)  # upper bound 8 dB: not low,
+    assert lm.recommendation["action"] == "NONE"                                  # and never "high"
+    lm.evaluate(5.0, _lm_input(-100.0, noise=-118.0, n=9), rate_code=2, power_code=0)
+    assert lm.recommendation["why"] == "insufficient data (< 10 frames in 600 s)"
+    assert lm.state("LINKRATE needs the Radio Control Unit")["executable"] is False
+    assert lm.state()["executable"] is True and lm.state()["why_not"] is None
 
 
 # ================================================== automatic frequency control (24.8)

@@ -50,7 +50,7 @@ AUTH = "second-operator"
 # Stub station and HTTP helper
 # =============================================================================
 def base_snapshot():
-    return {"schema": 3, "version": "3.0.0", "utc": 1.8e9, "station": "DSS-Q1", "spacecraft": "VGQ-1",
+    return {"schema": 4, "version": "3.0.0", "utc": 1.8e9, "station": "DSS-Q1", "spacecraft": "VGQ-1",
             "alarm": "NONE", "alarm_reasons": [], "beacon": {"level": 1, "name": "INTERESTING"},
             "rx": {"state": {"los": False, "passes": 1, "hibernating": False},
                    "rf": {"rssi_dbm": -101.5, "sensitivity_dbm": -132.0, "noise_bw_hz": 125000.0, "nan": float("nan"),
@@ -58,8 +58,12 @@ def base_snapshot():
                           "afc": {"correction_hz": 5992, "estimate_hz": 6301.0, "state": "TRACK"},
                           "packet": {"crc_ok": True}},
                    "decoder": {"rs_rescued": 3, "rice_errors": 0, "sdls_rejected": {"BAD_MAC": 1, "REPLAY": 0}},
-                   "frames": {"ok": 10, "lost": 1, "by_format": {"TM": 10}, "per_vc": {"0": {"frames": 4, "lost": 0}}},
+                   "frames": {"ok": 10, "lost": 1, "by_format": {"TM": 10}, "per_vc": {"0": {"frames": 4, "lost": 0}},
+                              "fer_10m_ci": {"lost": 1, "received": 10, "fer": 1 / 11, "confidence": 0.95,
+                                             "two_sided_lo": 0.0023, "two_sided_hi": 0.41, "one_sided_hi": 0.36}},
                    "budget": {"fspl_db": 107.1182, "uplink": {"gs_power_dbm": 33.0}}},
+            "radio": {"packet_mode": True},              # an SX126x station: AFC and frequency-error gauges
+            "station_clock": {"synced": False},
             "link": {"sdls": {"tm_frames_ok": 9, "tm_auth_fail": 1, "tm_replay": 0, "tm_unprotected": 0,
                               "tm_epoch_regressed": 0, "tc_service": "AE"},
                      "ident": {"text": XSS, "t": 1.0, "count": 1}},
@@ -508,8 +512,36 @@ def test_prometheus_exposition_format():
     assert 'dssq_stage_errors{stage="ingest"} 2' in text and 'dssq_decoder_sdls_rejected{verdict="BAD_MAC"} 1' in text
     assert 'dssq_tlm{packet="HK",param="bus_temp"} 31.84' in text and "param=\"flag\"" not in text
     assert "dssq_rf_nan" not in text and "dssq_rf_inf" not in text
+    # D-76: FER bounds, the station clock (0 = not synchronised), the SX126x CRC verdict
+    assert "\ndssq_frames_fer_10m_ci_two_sided_hi 0.41\n" in text
+    assert "\ndssq_frames_fer_10m_ci_one_sided_hi 0.36\n" in text
+    assert "\ndssq_station_clock_synced 0\n" in text and "\ndssq_rf_packet_crc_ok 1\n" in text
     escaped = web.prometheus({"tlm": {'a"b\\c\nd': {"values": {"x": 1}}}})
     assert 'dssq_tlm{packet="a\\"b\\\\c\\nd",param="x"} 1' in escaped
+
+
+def test_metrics_follow_what_the_receiver_can_measure():
+    """F-P1-10 (D-76): the last reception's gauges are absent during LOS; an E22 station exports
+    no SX126x-only quantity (Doppler block, CRC verdict); an unknown station clock is absent."""
+    s = json_safe(base_snapshot())
+    s["radio"] = {"packet_mode": False}
+    s["rx"]["rf"].update(margin_est_db=12.0, doppler={"offset_cal_hz": 0.0, "calibrated": False})
+    s["station_clock"] = {"synced": None}
+    text = web.prometheus(s)
+    assert "\ndssq_rf_rssi_dbm -101.5\n" in text and "\ndssq_rf_margin_est_db 12.0\n" in text
+    assert "dssq_rf_packet_crc_ok" not in text and "dssq_rf_doppler" not in text and "dssq_rf_afc" not in text
+    assert "dssq_station_clock_synced" not in text
+    s["rx"]["state"]["los"] = True
+    text = web.prometheus(s)
+    assert "dssq_rf_rssi_dbm" not in text and "dssq_rf_margin_est_db" not in text
+    assert "\ndssq_rf_sensitivity_dbm -132.0\n" in text and "\ndssq_los 1\n" in text           # configuration stays
+
+
+def test_dashboard_overload_text_is_the_gds_text():
+    """The page warns with exactly the GDS's operator text (rxstats.OVERLOAD_TEXT)."""
+    from dssq import rxstats
+    assert f'const OVERLOAD_TEXT = "{rxstats.OVERLOAD_TEXT}";' in _page()[1]
+    assert "+10 dBm" in rxstats.OVERLOAD_TEXT and "too strong to measure" in rxstats.OVERLOAD_TEXT
 
 
 def test_start_web_refuses_a_page_with_a_second_script(tmp_path):
@@ -627,7 +659,7 @@ def test_real_station_through_the_web_server(sim_station):
     port = srv.server_address[1]
     try:
         s = strict_json(request(port, "GET", "/api/state")[2])
-        assert s["schema"] == 3 and "science" not in s and s["rx"]["frames"]["ok"] > 10
+        assert s["schema"] == 4 and "science" not in s and s["rx"]["frames"]["ok"] > 10
         assert s["link"]["sdls"]["tm_frames_ok"] > 0 and s["pending_confirm"][0]["text"] == "SSRCLEAR"
         sci = strict_json(request(port, "GET", "/api/science")[2])
         assert {"spectral", "spectral_history", "spectral_burst", "spectral_skymap", "spectral_library"} <= set(sci)
@@ -651,7 +683,8 @@ NODE_HARNESS = r"""
 // Minimal DOM for the dashboard script: element stubs with text-only content; innerHTML and
 // inline handler attributes throw. Renders every tab twice and reports render errors.
 const fs = require("fs"), vm = require("vm");
-const [htmlPath, statePath, sciPath, dictPath] = process.argv.slice(2);
+const [htmlPath, statePath, sciPath, dictPath, idsJson] = process.argv.slice(2);
+const dumpIds = idsJson ? JSON.parse(idsJson) : [];         // elements whose text and class are reported
 const html = fs.readFileSync(htmlPath, "utf8");
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const fixtures = {"/api/state": statePath, "/api/science": sciPath, "/api/dictionary": dictPath};
@@ -722,7 +755,10 @@ vm.createContext(ctx);
     if (c.nodeType === 3) texts.push(c.textContent); else walk(c); } };
   for (const e of byId.values()) walk(e);
   const leaks = texts.filter(t => /\[object Object\]|\bundefined\b|\bNaN\b/.test(t)).slice(0, 5);
-  console.log(JSON.stringify({tabs: tabs.length, errors, leaks, innerHTMLUsed,
+  const classes = e => [e.className, ...e.childNodes.filter(c => c.nodeType === 1).flatMap(classes)];
+  const ids = Object.fromEntries(dumpIds.map(id => { const e = byId.get(id);
+    return [id, e ? [e.textContent, classes(e).filter(Boolean).join(" ")] : null]; }));
+  console.log(JSON.stringify({tabs: tabs.length, errors, leaks, innerHTMLUsed, ids,
     injected: texts.filter(t => t.includes("<img src=x onerror=alert(1)>")).length}));
 })().catch(e => { console.log(JSON.stringify({fatal: String(e && e.stack || e)})); process.exit(2); });
 """
@@ -801,6 +837,68 @@ def test_dashboard_renders_every_tab_in_node(sim_station, tmp_path):
         assert res["leaks"] == [] and res["innerHTMLUsed"] == 0, (name, res)
         if name == "hostile":
             assert res["injected"] >= 6                                         # shown as text, never parsed
+
+
+def _render(tmp_path, state, sci, ids):
+    harness = tmp_path / "harness.js"
+    harness.write_text(NODE_HARNESS)
+    (tmp_path / "dict.json").write_bytes(web.dump_json(web.dictionary_doc()))
+    (tmp_path / "sci.json").write_text(json.dumps(sci))
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    out = subprocess.run(["node", str(harness), str(web.HTML_PATH), str(tmp_path / "state.json"),
+                          str(tmp_path / "sci.json"), str(tmp_path / "dict.json"), json.dumps(ids)],
+                         capture_output=True, text=True, timeout=120)
+    res = json.loads(out.stdout.strip().splitlines()[-1])
+    assert "fatal" not in res, res
+    assert res["errors"] == [] and res["leaks"] == [] and res["innerHTMLUsed"] == 0, res
+    return res["ids"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
+def test_dashboard_shows_only_what_the_receiver_can_measure(sim_station, tmp_path):
+    """D-76 in the rendered page: an overload is never a number, a margin at the noise floor is an
+    upper bound and never green, the E22 shows no CRC verdict, SER, BER or Doppler, an
+    unsynchronised clock shows in the header, a missing distance is "not configured", every FER
+    carries its exact bounds labelled one- or two-sided, and the SX126x path renders."""
+    _, snap, sci = sim_station
+    ids = ["h-rssi", "h-margin", "h-fer", "h-clock", "ov-tiles", "rx-now", "rx-dec", "rx-dop", "rx-frames", "rx-budget",
+           "ls-time", "cm-health"]
+    st = json.loads(json.dumps(snap))
+    st["rx"]["rf"].update(rssi_state="OVERLOAD", rssi_dbm=None, rssi_raw_dbm=-256, margin_state=None,
+                          margin_est_db=None, margin_worst_est_db=None, rssi_overloads=3)
+    st["station_clock"] = {"synced": False, "state": "TIME_ERROR", "reason": "TIME_ERROR and STA_UNSYNC",
+                           "maxerror_us": 16_000_000, "esterror_us": 16_000_000, "checked_t": st["utc"],
+                           "refresh_s": 10.0}
+    st["time"]["owlt_s"] = None
+    st["rx"]["frames"]["fer_10m_ci"] = {"lost": 0, "received": 178, "fer": 0.0, "confidence": 0.95, "two_sided_lo": 0.0,
+                                        "two_sided_hi": 0.0205, "one_sided_hi": 0.0167}
+    got = _render(tmp_path, st, sci, ids)
+    assert got["h-rssi"] == ["OVERLOAD", "bad"] and "-256" not in got["rx-now"][0].split("reads")[0]
+    assert "too strong to measure" in got["ov-tiles"][0] and got["h-margin"][0] == "n/a"
+    assert got["h-clock"] == ["NOT SYNCED", "warn"] and "TIME_ERROR" in got["cm-health"][0]
+    assert got["h-fer"][0] == "0/178 ≤ 1.67 %"
+    assert "≤ 1.67 % (95 %, one-sided) · two-sided 95 % [0, 2.05 %]" in got["rx-frames"][0]
+    assert "not configured" in got["ls-time"][0]
+    assert "CRC report" in got["rx-now"][0] and "n/a on the E22 path" in got["rx-dec"][0] and "n/a" in got["rx-dop"][0]
+    # the noise floor: an upper bound, amber, never green
+    st = json.loads(json.dumps(snap))
+    st["rx"]["rf"].update(margin_state="NOISE_FLOOR", margin_est_db=None, margin_worst_est_db=None, margin_max_db=10.0,
+                          margin_worst_max_db=8.0, margin_basis="not measurable")
+    got = _render(tmp_path, st, sci, ids)
+    assert got["h-margin"][0] == "≤ 8 dB" and got["h-margin"][1] == "warn"
+    assert "not measurable (at the noise floor)" in got["ov-tiles"][0]
+    # not checked against the noise floor: at most amber
+    st["rx"]["rf"].update(margin_state="NOISE_UNKNOWN", margin_worst_est_db=30.0, margin_est_db=32.0)
+    assert _render(tmp_path, st, sci, ids)["h-margin"] == ["30 dB", "warn"]
+    st["rx"]["rf"]["margin_state"] = "SIGNAL"
+    assert _render(tmp_path, st, sci, ids)["h-margin"] == ["30 dB", "ok"]
+    # an SX126x station: the measured SNR margin, the CRC verdict and the Doppler block
+    st = json.loads(json.dumps(snap))
+    st["radio"]["packet_mode"] = True
+    packet = {**st["rx"]["rf"]["packet"], "crc_ok": True, "snr_db": -7.75}
+    st["rx"]["rf"].update(snr_margin_db=12.25, required_snr_db=-20.0, packet=packet)
+    got = _render(tmp_path, st, sci, ids)
+    assert got["h-margin"][0] == "12.25 dB SNR" and "CRC" in got["rx-now"][0] and "Doppler shift" in got["rx-dop"][0]
 
 
 # =============================================================================
@@ -965,7 +1063,7 @@ def test_app_lab_layout_runs_main_in_a_subprocess(tmp_path):
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
     snap = json.loads(out.read_text())
-    assert snap["schema"] == 3 and snap["mode"] == "sim" and snap["rx"]["frames"]["ok"] >= 2
+    assert snap["schema"] == 4 and snap["mode"] == "sim" and snap["rx"]["frames"]["ok"] >= 2
     assert (app / "data" / "http_token").exists() and (app / "data" / "archive").is_dir()
     # No App installs packages: App Lab would pip-install a python/requirements.txt (internet).
     for folder in (app, GROUND, ROOT / "vgq1-spacecraft"):
