@@ -23,9 +23,9 @@ The App installs **without the internet**. The ground data system uses only the 
 | `sketch/libraries/Arduino_RouterBridge` | (compiled into the sketch) | Arduino_RouterBridge 0.4.3 (the MCU-to-Linux RPC library) with a small documented patch: a larger stack for its thread, and `provide_safe` handlers only on the loop thread |
 | `host/` | Linux side, outside App Lab | `install_station.sh` and the systemd unit `dssq-gds.service`: the optional host mode, which runs the same ground data system on the same `data/` folder (section 6) |
 
-Each library folder holds a `PROVENANCE.txt` (upstream, tag, commit, SHA-256 of the pristine files and of the patch) and its unchanged license file. The patches and the reasons for them: [docs/22](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/22_Bundled_Libraries.md).
+Each library folder holds a `PROVENANCE.txt` (upstream, tag, commit, SHA-256 of the pristine files and of the patch) and its unchanged license file. The patches and the reasons for them: [docs/22](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/22_Bundled_Libraries.md).
 
-**Radio.** The default station radio is an **EBYTE E22-400T33D** on a USB-UART adapter (`/dev/ttyUSB0` by default), with its M0/M1/AUX pins on the station sketch's Radio Control Unit. `[radio] model` in `station.toml` selects `"E22-400T33D"` (default), `"E22-400T37S"` or `"SX126x"`; `"auto"` follows the E22 model the spacecraft reports. The spacecraft selects its 5 W E22-400T37S with a jumper from the UNO Q's A0 to GND; the station has no such jumper: on the VENTUNO Q, A0 drives the buzzer, so never put a jumper there. The SX126x option is also a build switch of the sketch (`#define DSSQ_RADIO_SX126X 1` in `sketch/sketch.ino`). Wiring: [docs/03](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/03_Hardware_Integration.md).
+**Radio.** The default station radio is an **EBYTE E22-400T33D** on a USB-UART adapter (`/dev/ttyUSB0` by default), with its M0/M1/AUX pins on the station sketch's Radio Control Unit. `[radio] model` in `station.toml` selects `"E22-400T33D"` (default), `"E22-400T37S"` or `"SX126x"`; `"auto"` follows the E22 model the spacecraft reports. The spacecraft selects its 5 W E22-400T37S with a jumper from the UNO Q's A0 to GND; the station has no such jumper: on the VENTUNO Q, A0 drives the buzzer, so never put a jumper there. The SX126x option is also a build switch of the sketch (`#define DSSQ_RADIO_SX126X 1` in `sketch/sketch.ino`). Wiring: [docs/03](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/03_Hardware_Integration.md).
 
 ---
 
@@ -51,7 +51,7 @@ scp ~/vgq1-keys/sdls_key.h   arduino@<uno-q-address>:ArduinoApps/vgq1-spacecraft
 - This App reads the key from `data/sdls_key.hex`, under App Lab and in host mode alike, unless `[sdls] key_file` in `data/station.toml` is an absolute path. `data/` exists after the first start; before it, `scp` cannot create it, so either press **Run** once first or create the folder (`mkdir ~/ArduinoApps/dssq-groundstation/data` on the board).
 - Running the tool again, for example once on each board, creates **a different key**: the two ends would then reject each other's frames.
 - Both files are created readable by their owner only (mode 0600). Keep a copy of the pair somewhere safe and never commit, share or package them. The tool refuses to overwrite existing keys unless `--force` is given, and then both ends must get the new pair.
-- The security services must match at both ends: `[sdls] tc_service` / `tm_service` in `data/station.toml` (default `"AE"`, authenticated encryption, for both) and `VGQ_SDLS_TC` / `VGQ_SDLS_TM` in the flight software's `sketch/src/config.h`. Encryption is generally not permitted on amateur frequencies: use `"AUTH"` (telecommand) and `"NONE"` (telemetry) there ([docs/09](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/09_Regulatory_and_Safety.md)).
+- The security services must match at both ends: `[sdls] tc_service` / `tm_service` in `data/station.toml` (default `"AE"`, authenticated encryption, for both) and `VGQ_SDLS_TC` / `VGQ_SDLS_TM` in the flight software's `sketch/src/config.h`. Encryption is generally not permitted on amateur frequencies: use `"AUTH"` (telecommand) and `"NONE"` (telemetry) there ([docs/09](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/09_Regulatory_and_Safety.md)).
 - Without the key file both ends run NONE (unprotected); the dashboard says so with a YELLOW alarm while a service is configured. The App still works for bench tests.
 - ⚠ **A key and its counter belong together.** The telecommand sequence number of a key is kept in `data/archive/sdls_sn.txt`. Never give the key to a second archive or a second station folder without that file, and never put an older copy of it back: with authenticated encryption (AE) a sequence number used twice under the same key reuses an AES-GCM nonce, which breaks the encryption and the authentication of those frames. When the file is missing or corrupt the station does not guess: it holds every telecommand until the spacecraft's housekeeping reports its last accepted number, and then continues on a time floor (4 numbers per second counted from 1 January 2026) that lies above every number the key can have used - so keep the station clock right (section 2.3). To start a fresh archive, generate a new key pair (section 2.2) for both Apps.
 
@@ -67,18 +67,18 @@ At its first start the App:
 - creates `data/` and copies the packaged `python/config/station.toml` to `data/station.toml`. **Edit `data/station.toml`**, never the packaged copy: the App reads `data/station.toml` and never overwrites it;
 - creates the web commanding token `data/http_token` (mode 0600) and prints it once to the console: `DSS-Q web commanding token created in /app/data/http_token: <token> (enter it once in the dashboard)` (`/app` is the App folder inside the container);
 - serves the dashboard on all interfaces, port 8080 (`app.yaml` publishes the port), and logs `DSS-Q ground station running: dashboard on port 8080 (bound to 0.0.0.0); archive /app/data/archive; commanding token in /app/data/http_token`;
-- with a key in `data/sdls_key.hex` and a telecommand service AUTH or AE, but no `data/archive/sdls_sn.txt` yet (the first start with a new key): logs the WARN event `no SDLS TC sequence-number file ...` and holds the uplink (YELLOW alarm `TC uplink BLOCKED: ...`, commands are refused) until the first housekeeping packet that the spacecraft made at least 2 minutes after its boot arrives (earlier ones are ignored without a message). It then starts the telecommand counter on the time floor - 4 numbers per second since 2026-01-01, about 98 million in October 2026 - writes the file and releases the uplink by itself (WARN `SDLS TC sequence number re-synchronised to <n> (the time floor: 4 per second since 2026-01-01; sdls_last_sn 0) ...: TC uplink released`). This is normal ([docs/17](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/17_Security_Model.md) section 7.6).
+- with a key in `data/sdls_key.hex` and a telecommand service AUTH or AE, but no `data/archive/sdls_sn.txt` yet (the first start with a new key): logs the WARN event `no SDLS TC sequence-number file ...` and holds the uplink (YELLOW alarm `TC uplink BLOCKED: ...`, commands are refused) until the first housekeeping packet that the spacecraft made at least 2 minutes after its boot arrives (earlier ones are ignored without a message). It then starts the telecommand counter on the time floor - 4 numbers per second since 2026-01-01, about 98 million in October 2026 - writes the file and releases the uplink by itself (WARN `SDLS TC sequence number re-synchronised to <n> (the time floor: 4 per second since 2026-01-01; sdls_last_sn 0) ...: TC uplink released`). This is normal ([docs/17](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/17_Security_Model.md) section 7.6).
 
 Set at least `[station]` and `[radio]` in `data/station.toml`, then press **Run** again:
 
 - `[station] callsign`: your amateur callsign (default `N0CALL`, a placeholder; while it is set the station logs the WARN event `[station] callsign is the placeholder N0CALL ...` at every start). Section 5 says what the station transmits with it;
 - `[radio]`: the radio `model` and `port`, and the `channel` and `air_rate`, which must match the flight software's `config.h`.
 
-Every key: [docs/15](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/15_Configuration_Reference.md).
+Every key: [docs/15](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/15_Configuration_Reference.md).
 
 ### 2.4 Open the dashboard
 
-From a computer on the same network, open `http://<ventuno-q-address>:8080/`. The dashboard has 11 tabs: OVERVIEW, RECEIVER, LINK & SECURITY, FRAMES & PACKETS, SPACECRAFT, SPECTROMETER, SCIENCE, MAGCAL, SEQUENCES, FILES and COMMANDING. Every metric is explained in [docs/13](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/13_Web_UI_Reference.md).
+From a computer on the same network, open `http://<ventuno-q-address>:8080/`. The dashboard has 11 tabs: OVERVIEW, RECEIVER, LINK & SECURITY, FRAMES & PACKETS, SPACECRAFT, SPECTROMETER, SCIENCE, MAGCAL, SEQUENCES, FILES and COMMANDING. Every metric is explained in [docs/13](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/13_Web_UI_Reference.md).
 
 - Reading needs no token. **Commanding** does: press **TOKEN** in the header and paste the contents of `data/http_token`. The browser keeps it for that session only.
 - The server answers only addresses that cannot be a rebound web name: an IP address, a single-label name or `<name>.local`. To use another DNS name, list it in `[gds] http_allowed_hosts`.
@@ -121,7 +121,7 @@ Everything the App keeps is in its `data/` folder, the folder App Lab reserves f
 | `archive/files/`, `archive/tdm/`, `archive/exports/` | Files received by CFDP, CCSDS tracking data messages, CSV exports (FILES tab, or `python3 -m dssq.export`) |
 | `archive/sdls_sn.txt`, `archive/sdls_tm_replay.txt` | SDLS counters: telecommand sequence number and telemetry anti-replay state |
 
-Retention is set in `[gds]`: days kept (`archive_keep_days`, 180), a size cap (`archive_max_gb`, 16) and a free-space floor (`archive_min_free_mb`, 2048) below which raw logging pauses. Formats, the CSV export and loading the data in Python: [docs/18](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/18_Data_Products.md).
+Retention is set in `[gds]`: days kept (`archive_keep_days`, 180), a size cap (`archive_max_gb`, 16) and a free-space floor (`archive_min_free_mb`, 2048) below which raw logging pauses. Formats, the CSV export and loading the data in Python: [docs/18](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/18_Data_Products.md).
 
 ---
 
@@ -144,7 +144,7 @@ Retention is set in `[gds]`: days kept (`archive_keep_days`, 180), a size cap (`
 | Frames arrive but are `UNPROTECTED`, or every frame fails authentication | The two ends have different keys or services (section 2.2) |
 | `... Bridge ...` errors while the host-mode service also runs | Only one program may provide the station's Bridge methods: run either the App or the service, never both |
 
-Every event and alarm of the ground and the spacecraft, with the operator response: [docs/14](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/14_Troubleshooting_and_Event_Response.md).
+Every event and alarm of the ground and the spacecraft, with the operator response: [docs/14](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/14_Troubleshooting_and_Event_Response.md).
 
 **Never export this App from App Lab with its data included, and never share such an export.** `data/` holds the key, the web token and the link counters. App Lab's own **Export** leaves `data/` out unless you ask for it. The release zips are built by `tools/package_apps.py`, which never packages `data/` and refuses to run while a key or token file is anywhere in the App folder.
 
@@ -152,9 +152,9 @@ Every event and alarm of the ground and the spacecraft, with the operator respon
 
 ## 5. Configuration
 
-`data/station.toml` (App Lab and host mode alike) holds every setting: station callsign, position and antenna, radio model, channel, rate and power, link framing, SDLS services and key file, CFDP, spectral analytics, archive and retention, web server, external interfaces, commanding (FOP-1 timers, two-person rule). The station refuses to start on an invalid value and names the key. Several values must match the flight software's `config.h`: [docs/15](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/15_Configuration_Reference.md) lists every key and every must-match pair.
+`data/station.toml` (App Lab and host mode alike) holds every setting: station callsign, position and antenna, radio model, channel, rate and power, link framing, SDLS services and key file, CFDP, spectral analytics, archive and retention, web server, external interfaces, commanding (FOP-1 timers, two-person rule). The station refuses to start on an invalid value and names the key. Several values must match the flight software's `config.h`: [docs/15](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/15_Configuration_Reference.md) lists every key and every must-match pair.
 
-**Station identification.** Both ends identify with an amateur callsign in clear text ([docs/09 section 1.3](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/09_Regulatory_and_Safety.md#13-station-identification)):
+**Station identification.** Both ends identify with an amateur callsign in clear text ([docs/09 section 1.3](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/09_Regulatory_and_Safety.md#13-station-identification)):
 
 - this station transmits `DE <callsign> <name>` (`[station] callsign` and `name`, plain ASCII) through the same radio path as its telecommands: right after the first uplink of a run, at least every 10 minutes while it keeps transmitting, and once after the last uplink (when the uplink has been idle for 120 s or the COP-1 timer T1, whichever is longer, also while the downlink is lost). The spacecraft ignores these packets (they are not CLTUs);
 - the spacecraft sends event 0x0002 `DE <callsign>` at boot and every 10 minutes, and its idle frames carry `DE <callsign> VGQ-1 ` (`VGQ_CALLSIGN` in its `sketch/src/config.h`).
@@ -215,9 +215,9 @@ data/                         created at the first start (section 3); never part
 
 All in the repository, <https://github.com/Tanay7/vgq1-deep-space-link>:
 
-- [docs/00 Beginner Setup Guide](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/00_Beginner_Setup_Guide.md): the whole system step by step, from the parts list to the first contact
-- [docs/06 Displays](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/06_Displays.md) and [docs/13 Web UI Reference](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/13_Web_UI_Reference.md)
-- [docs/07 Operations Procedures](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/07_Operations_Procedures.md)
-- [docs/02 Link Budget and RF Analysis](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/02_Link_Budget_and_RF_Analysis.md)
-- [docs/16 Developer Guide](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/16_Developer_Guide.md): building from the repository, tests, and the release procedure that makes this zip
-- [docs/17 Security Model](https://github.com/Tanay7/vgq1-deep-space-link/blob/main/docs/17_Security_Model.md): keys, counters, web authentication, recovery
+- [docs/00 Beginner Setup Guide](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/00_Beginner_Setup_Guide.md): the whole system step by step, from the parts list to the first contact
+- [docs/06 Displays](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/06_Displays.md) and [docs/13 Web UI Reference](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/13_Web_UI_Reference.md)
+- [docs/07 Operations Procedures](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/07_Operations_Procedures.md)
+- [docs/02 Link Budget and RF Analysis](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/02_Link_Budget_and_RF_Analysis.md)
+- [docs/16 Developer Guide](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/16_Developer_Guide.md): building from the repository, tests, and the release procedure that makes this zip
+- [docs/17 Security Model](https://github.com/Tanay7/vgq1-deep-space-link/blob/claude/unoq-ground-station/docs/17_Security_Model.md): keys, counters, web authentication, recovery

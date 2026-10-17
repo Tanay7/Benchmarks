@@ -339,7 +339,7 @@ input[type=number]{width:90px}
     <div class="panel"><h3>Console</h3><div class="log" id="cm-console"></div></div>
     <div class="panel"><h3>Event log</h3><div class="log tall" id="cm-events"></div></div>
     <div class="panel"><h3>GDS health <small>Runner stage error boundary (PB-8.4), software version</small></h3><div class="tw"><table id="cm-health"></table></div></div>
-    <div class="panel"><h3>Station I/O <small>VENTUNO Q MCU: one CardKB on the header Wire bus, annunciators, Radio Control Unit</small></h3><div class="tw"><table id="cm-io"></table></div></div>
+    <div class="panel"><h3>Station I/O <small>station MCU (UNO Q STM32U585): one CardKB on header SDA/SCL (D20/D21, Wire = I2C2), annunciators, LED matrix, Radio Control Unit</small></h3><div class="tw"><table id="cm-io"></table></div></div>
     <div class="panel wide"><h3>Dictionary <small>commands, COP-1 directives, ground directives</small> <input type="text" id="cm-filter" placeholder="filter" autocomplete="off" aria-label="filter the dictionary"></h3><div class="tw" style="max-height:520px"><table id="cm-dict"></table></div></div>
   </div>
 </section>
@@ -2010,8 +2010,13 @@ function renderCommanding() {
     ["Last stage error", le ? V(iso(le.t) + " " + le.stage + ": " + le.text, "l wrap bad") : "none"],
     ["TDM records refused (station clock)", V(fint(hl.tdm_rejected), hl.tdm_rejected ? "warn" : "")]]);
   const io = S.station_io || {};
+  // RCU (D-78): what station.toml asks for, and what the MCU reports about its last mode change.
+  const rcuLast = io.rcu_last === "OK" ? V("OK at " + iso(io.rcu_last_t), "ok") : io.rcu_last === "FAILED" ? V("FAILED at " + iso(io.rcu_last_t), "bad")
+    : io.rcu_last === "NEVER" ? "never (since the MCU started)" : io.connected ? "unknown (the sketch does not report it)" : "unknown (no hello)";
   table("cm-io", null, [["MCU link", V(io.connected ? "CONNECTED" : "no hello (station I/O off or MCU not running)", io.connected ? "ok" : "warn")], ["Last hello", iso(io.connected_t)],
-    ["Firmware", io.fw || NA], ["CardKB (header Wire, 0x5F)", V(io.kb ? "present" : "not detected", io.kb ? "ok" : "")], ["Radio Control Unit", io.rcu ? "present" : "absent"],
+    ["Firmware", io.fw || NA], ["CardKB (header Wire, 0x5F)", V(io.kb ? "present" : "not detected", io.kb ? "ok" : "")],
+    ["Radio Control Unit", io.rcu_configured ? "enabled in station.toml ([gds] rcu = true)" : "disabled in station.toml ([gds] rcu = false)"],
+    ["RCU last mode change", rcuLast],
     ["Typing on the CardKB", "> " + (io.input || "") + "_"], ["Last annunciator line", io.last_status_line || NA], ["Beacon level sent", fx(io.beacon_sent, 0)]]);
 }
 function renderDictTable() {

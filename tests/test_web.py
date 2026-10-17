@@ -472,7 +472,7 @@ def test_lan_server_refuses_foreign_host_names(make_server):
         st, _, _ = request(port, "POST", "/api/cmd", {"text": "NOOP"}, {"Host": host, "X-DSSQ-Token": "t0k"})
         assert st == 403, host
     for host in (f"127.0.0.1:{port}", f"192.168.1.5:{port}", "[fe80::1]:8080", f"{me}:{port}",
-                 "ventunoq.local:8080", "ventunoq", "STATION.example.org", "localhost"):
+                 "dssq-ground.local:8080", "dssq-ground", "STATION.example.org", "localhost"):
         assert request(port, "GET", "/api/state", headers={"Host": host})[0] == 200, host
     assert not [c for c in stub.calls if c[0] == "submit_command"]
     from dssq.config import is_loopback

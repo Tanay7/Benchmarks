@@ -1,9 +1,9 @@
 """Station I/O, Radio Control Unit and the GDS's single Router Bridge client.
 
-The GDS runs on the VENTUNO Q's Linux processor and talks to the board's STM32H5 MCU
-(the App's sketch, dssq-groundstation/sketch) through the Arduino Router (MessagePack-RPC
-over the board's internal link, socket unix:///var/run/arduino-router.sock or App Lab's
-APP_SOCKET).
+The GDS runs on the ground UNO Q's Linux processor (Qualcomm Dragonwing QRB2210, Debian;
+Arduino UNO Q 4 GB, D-71) and talks to the board's STM32U585 MCU (the App's sketch,
+dssq-groundstation/sketch) through the Arduino Router (MessagePack-RPC over the board's
+internal LPUART1 link, socket unix:///var/run/arduino-router.sock or App Lab's APP_SOCKET).
 
 One Linux client per provided name (arduino.router_bridge: a method name belongs to ONE
 client), so the whole GDS shares one BridgeLink: the front panel, the SX126x radio backend
@@ -21,16 +21,23 @@ RuntimeError pass through unchanged.
 
 GDS -> MCU   notify("fp_line", line)     S|<aos 0/1>|<alarm 0/1/2>|<uplink 0/1>|<beacon -1/0..3>
                                           Q|<id>  hazardous command awaiting CONFIRM (-1 none)
+                                          M|<sync>|<tx>|<rssi>|<margin>|<lost>|<clock>  the
+                                          LED-matrix link status (D-78, matrix_line())
              call("rcu_mode", m) -> int   drive the ground E22 M0/M1; 1 = AUX ready, 0 busy
 MCU -> GDS   notify("fp_in", line)       K|<typed text>  CMD|<text>  CONFIRM|<id>
-                                          H|<fw>|<rcu 0/1>|<kb 0/1>   (hello, every 5 s)
-One CardKB on the header SDA/SCL bus (contract 16.3 / 17.1); a second operator authorises
-with the web AUTH button, not on the panel. The SX126x services (rf_*) are documented in
+                                          H|<fw>|<rcu>|<kb 0/1>|<rcu age s>  (hello, every
+                                          5 s): rcu = result of the MCU's last rcu_mode()
+                                          since its boot (1 AUX ready, 0 failed, -1 never),
+                                          rcu age = seconds since then (-1 never) (D-78). A
+                                          3-field hello (older sketch: a constant 1 there)
+                                          leaves the RCU state unknown (parse_hello()).
+One CardKB on the header SDA/SCL bus (D20 / D21, Wire = I2C2; contract 16.3 / 17.1); a
+second operator authorises with the web AUTH button, not on the panel. The SX126x services (rf_*) are documented in
 dssq/radio/sx126x.py.
 
 Threads: the bridge's dispatcher thread only validates and enqueues fp_in lines (a
 provided handler must never call back into the bridge); "fp-rx" executes them, "fp-tx"
-sends the status lines once a second from GroundStation.panel_status() (cheap, no
+sends the S, Q and M lines once a second from GroundStation.panel_status() (cheap, no
 snapshot). Each thread body has ONE documented `except Exception` boundary (log and
 continue): a dead panel thread would go unnoticed, and a panel fault must never take the
 GDS down.
@@ -38,6 +45,7 @@ GDS down.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -54,6 +62,9 @@ RCU_TIMEOUT_S = 3.0              # rcu_mode blocks the MCU loop for <= ~1 s (AUX
 APP_RETRY_S = 10.0               # app_utils: after "router unreachable", fail fast this long
 BRIDGE_ERRORS = (TimeoutError, ConnectionError, ValueError, RuntimeError, OSError)
 ALARM_CODES = {"NONE": 0, "YELLOW": 1, "RED": 2}
+SYNC_CODES = {"LOCK": "L", "FLYWHEEL": "F", "SEARCH": "S", "PACKET": "P"}   # M line sync field
+RCU_RESULTS = {"1": "OK", "0": "FAILED", "-1": "NEVER"}                    # hello rcu field (D-78)
+RCU_AGE_MAX_S = 2**31 - 1                    # the sketch saturates the rcu age there
 
 
 class BridgeLink:
@@ -140,6 +151,60 @@ def status_lines(st: Mapping[str, Any]) -> list[str]:
             f"Q|{pend[-1] if pend else -1}"[:LINE_MAX]]
 
 
+def _number(v: object) -> float | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return float(v)
+
+
+def _clamped(v: float, lo: int, hi: int) -> int:
+    return max(lo, min(hi, round(v)))
+
+
+def matrix_line(st: Mapping[str, Any]) -> str:
+    """The LED-matrix line (D-78) from GroundStation.panel_status()["matrix"]:
+    M|sync|tx|rssi|margin|lost|clock (fields: the sketch's parse_matrix_line()). A value
+    the GDS does not produce (None) goes out as "?" and the MCU leaves its row blank, so
+    the matrix never shows a guess. rssi: "O" receiver overload, "-" no packet within the
+    LOS timeout (rssi_recent false), "?" a recent packet without an RSSI reading."""
+    raw = st.get("matrix")
+    m: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+    sync = SYNC_CODES.get(str(m.get("sync")), "?")
+    tx = "?" if m.get("tx") is None else "1" if m.get("tx") else "0"
+    rssi = _number(m.get("rssi_dbm"))
+    if m.get("rssi_overload") is True:
+        rssi_f = "O"
+    elif not m.get("rssi_recent"):
+        rssi_f = "-"
+    else:
+        rssi_f = "?" if rssi is None else str(_clamped(rssi, -300, 50))
+    margin = _number(m.get("margin_db"))
+    margin_f = "?" if margin is None else ("N" if m.get("margin_floor") else "") + str(_clamped(margin, -300, 300))
+    lost = _number(m.get("lost_10m"))
+    lost_f = "?" if lost is None or lost < 0 else str(_clamped(lost, 0, 30000))
+    clock = m.get("clock_synced")
+    clock_f = "1" if clock is True else "0" if clock is False else "?"
+    return f"M|{sync}|{tx}|{rssi_f}|{margin_f}|{lost_f}|{clock_f}"[:LINE_MAX]
+
+
+def parse_hello(parts: list[str]) -> tuple[str, bool, str | None, float | None]:
+    """(fw, kb, rcu_last, rcu_age_s) from the fields after "H|" (at least three). rcu_last
+    is "OK" / "FAILED" / "NEVER", or None when the sketch does not report it (a 3-field
+    hello: the older sketch sent a constant there) or sends something unreadable;
+    rcu_age_s comes only with OK / FAILED."""
+    fw, kb = parts[0][:32], parts[2] == "1"
+    if len(parts) < 4:
+        return fw, kb, None, None
+    last = RCU_RESULTS.get(parts[1])
+    age_txt = parts[3]
+    age = float(age_txt) if age_txt.isdecimal() and len(age_txt) <= 10 and int(age_txt) <= RCU_AGE_MAX_S else None
+    if last == "NEVER":
+        return fw, kb, last, None
+    if last is None or age is None:
+        return fw, kb, None, None
+    return fw, kb, last, age
+
+
 class _Rcu:
     """Radio Control Unit: the station MCU drives the ground E22 M0/M1 and reads AUX."""
 
@@ -209,7 +274,7 @@ class FrontPanel:
         kind, _, rest = line.partition("|")
         parts = rest.split("|")
         if kind == "H" and len(parts) >= 3:
-            self.gs.station_hello(parts[0][:32], parts[1] == "1", parts[2] == "1")
+            self.gs.station_hello(*parse_hello(parts))
         elif kind == "K":
             self.gs.station_input(rest)
         elif kind == "CMD" and rest:
@@ -234,7 +299,8 @@ class FrontPanel:
     def _tx_loop(self) -> None:
         while not self.stop_ev.is_set():
             try:
-                for line in status_lines(self.gs.panel_status()):
+                st = self.gs.panel_status()
+                for line in (*status_lines(st), matrix_line(st)):
                     try:
                         self.link.notify("fp_line", line)
                     except BRIDGE_ERRORS as e:

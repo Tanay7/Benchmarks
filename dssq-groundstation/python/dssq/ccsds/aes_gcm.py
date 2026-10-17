@@ -53,8 +53,8 @@ Speed (`python -m dssq.ccsds.aes_gcm` prints these figures for the machine it ru
   runs of benchmark(200): one 200-octet SDLS TM AE frame (20 octets AAD, 158 octets of
   ciphertext, 16-octet tag) takes 280 us to encrypt or decrypt-and-verify under CPython
   3.11, 320 us under 3.12 and 300-325 us under 3.13; key set-up (once per key) about
-  100 us. The VENTUNO Q's QCS8275 has not been measured: VERIFY with the same command on
-  the board. Budget: the fastest E22 air rate (62.5 kbit/s) carries at most about 33
+  100 us. The ground UNO Q's QRB2210 (4 x Cortex-A53 at 2.0 GHz) has not been measured:
+  VERIFY with the same command on the board. Budget: the fastest E22 air rate (62.5 kbit/s) carries at most about 33
   CADUs of 236 octets per second (236 x 8 bit / 62 500 bit/s = 30 ms each): 33 x 0.33 ms
   = 11 ms of CPU per second, about 1 % of one core here (11 % on a ten times slower core).
 """

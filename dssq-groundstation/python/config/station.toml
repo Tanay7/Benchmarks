@@ -1,10 +1,12 @@
 # =============================================================================
-#  DSS-Q1 ground station configuration (VENTUNO Q or any Linux PC)
+#  DSS-Q1 ground station configuration (Arduino UNO Q 4 GB with a USB-C hub, or any
+#  Linux PC; D-71)
 #
 #  Every key below is also the built-in default (dssq/config.py DEFAULTS mirrors this
 #  file), except [radio] model: the file names the default module "E22-400T33D", the
-#  built-in default is "auto" (see [radio]). A table you write replaces only the keys it
-#  names, nested tables included.
+#  built-in default is "auto" (see [radio]); [radio] fault_log is not set here because
+#  its default follows the model (see [radio]). A table you write replaces only the keys
+#  it names, nested tables included.
 #  The station refuses to start on an invalid value and names the key.
 #  The [radio] values MUST match the flight's vgq1-spacecraft/sketch/src/config.h.
 #  App Lab, and host mode (python -m dssq.gds --app-data <App>/data, host/install_station.sh):
@@ -36,15 +38,20 @@ tx_line_loss_db = 0.5
 [radio]
 # Station radio model: "E22-400T33D" (default, EBYTE UART module on a USB-UART),
 # "E22-400T37S" (5 W module on the E22-400TBH-02 board, preserved option) or "SX126x"
-# (SX1268 / SX1262 over SPI on the VENTUNO Q MCU, via RadioLib; build switch
+# (SX1268 / SX1262 over SPI on the station UNO Q MCU, via RadioLib; build switch
 # DSSQ_RADIO_SX126X = 1 of the station sketch). Both ends must use the same model.
 # "auto" (or no model line at all): an E22 station that follows the E22 model the
 # spacecraft reports in its RF packet - the flight software reads the T33D / T37S
 # choice from a jumper at boot (contract 33), so neither end needs an edit. The
 # station's own module registers then follow the T33D rules (the T37S abnormal-status
-# log is enabled only with model = "E22-400T37S" here).
+# log, fault_log below, needs model = "E22-400T37S" here).
 model = "E22-400T33D"
-port = "/dev/ttyUSB0"       # E22 models only: the USB-UART (check with: ls /dev/serial/by-id/)
+# E22 models only: the USB-UART on a port of the UNO Q's USB-C hub (E15-USB-T2 = CP2102
+# for the T33D, the TBH-02's own CH340X for the T37S). Prefer its stable name - the
+# ttyUSB number can change when the hub re-enumerates: write the /dev/serial/by-id/...
+# link that `ls -l /dev/serial/by-id/` shows for the adapter (VERIFY that the App
+# container sees it too).
+port = "/dev/ttyUSB0"
 address = 0
 netid = 0
 uart_code = 3               # E22: MUST be 3 = 9600 bit/s (CONFIG mode is always 9600 8N1)
@@ -59,8 +66,10 @@ parity = 0
 air_rate = 2
 subpacket = 0               # E22: 240-octet sub-packets (one CADU = one LoRa packet)
 rssi_noise = true           # E22: enables the C0 C1 C2 C3 ambient-noise queries
-fault_log = false           # E22-400T37S only (FF FF FF 0x under/over-voltage, over-temperature
-                            # reports); ignored on the T33D, whose REG1 b4..b2 are reserved
+# fault_log: the E22-400T37S abnormal-status log (FF FF FF 0x under/over-voltage and
+#   over-temperature reports, REG1 b2). Not set here = on for model = "E22-400T37S" and
+#   off for every other model (D-77); always written 0 to a T33D, whose REG1 b4..b2 are
+#   reserved. Write fault_log = false only to switch the T37S log off.
 # ---- Power code (ground transmitter, 0..3; the meaning depends on the model) ----
 #  E22-400T33D 33 / 30 / 27 / 24 dBm (codes 1..3 VERIFY: docs/08 T-RF-07)
 #  E22-400T37S 37 dBm for every code (the module has no power levels)
@@ -165,25 +174,27 @@ http_token = ""             # REQUIRED if http_host is not loopback (X-DSSQ-Toke
 http_allowed_hosts = []     # LAN server: DNS names (no port) the dashboard may be reached by, besides
                             # IP addresses, single-label and <name>.local names (DNS-rebinding guard)
 los_timeout_s = 90.0        # minimum; the GDS uses max(this, 3 x the spacecraft frame period)
-frontpanel = true           # VENTUNO Q MCU station I/O (CardKB, LEDs, buzzer) via arduino-router
+frontpanel = true           # station UNO Q MCU I/O (CardKB, lamps, buzzer, LED matrix) via arduino-router
 rcu = false                 # default: the E22 sits on an EBYTE E15-USB-T2 whose M0/M1 jumpers set
-                            # its mode (both fitted = normal); true: the VENTUNO Q MCU drives
-                            # M0/M1/AUX on D2/D3/D4 instead (needed for RADIO, GSCAN, WAKE, LINK*)
+                            # its mode (both fitted = normal); true: the station UNO Q MCU drives
+                            # M0/M1/AUX on D2/D3/D7 instead (needed for RADIO, GSCAN, WAKE, LINK*)
 router_address = ""         # host default unix:///var/run/arduino-router.sock; App: APP_SOCKET
 console_interval_s = 10.0
 # ---- Receiver data logger: retention and free-space guard (contract 39) ----------
 # The archive (archive_dir above) holds YYYYMMDD/ UTC day folders (cadu.bin, events.log),
 # gds.sqlite (frames, packets, params, events, commands and the 1 Hz rx_stats receiver
 # series) and exports/ (CSV from: python -m dssq.export, or the FILES tab).
-# VENTUNO Q (App Lab): <App>/data/archive = /home/arduino/ArduinoApps/<App>/data/archive on
-# the 64 GB eMMC. An ABSOLUTE archive_dir puts it elsewhere, e.g. an external M.2 2230 NVMe
-# or a USB 3.0 drive - only when that path is visible INSIDE the App container (VERIFY on
-# the hardware); the host CLI (python -m dssq.gds) has no such restriction.
+# UNO Q 4 GB (App Lab): <App>/data/archive = /home/arduino/ArduinoApps/<App>/data/archive on
+# the board's 32 GB eMMC, shared with Debian and App Lab (free space after both: VERIFY with
+# df -h /home). An ABSOLUTE archive_dir puts it elsewhere, e.g. a USB drive on the USB-C hub -
+# only when that path is visible INSIDE the App container (VERIFY on the hardware); the host
+# CLI (python -m dssq.gds) has no such restriction.
 archive_keep_days = 180     # day folders and rx_stats / params / frames rows older than this many
                             # days are deleted, oldest first (0 = no age limit); never the current
                             # UTC day. exports/ files older than this go too
-archive_max_gb = 16.0       # size cap of day folders + database pages in use, GB = 1e9 octets
+archive_max_gb = 8.0        # size cap of day folders + database pages in use, GB = 1e9 octets
                             # (0 = no cap): over it, the oldest day is pruned, one day per minute
+                            # (D-80: a quarter of the 32 GB eMMC)
 archive_min_free_mb = 2048.0  # free-space floor of the archive's file system, MB = 1e6 octets
                             # (0 = guard off): below it, raw CADU and rx_stats logging pause
                             # (WARN event, YELLOW alarm) and resume by themselves above it + 5 %

@@ -10,31 +10,20 @@
 #  App Lab sketch as sketch/libraries/RadioLib and referenced by its sketch.yaml
 #  ("- dir: libraries/RadioLib"). The repository holds only this patch.
 #
-#  Policy: patch only what cannot be handled from our own code. Each hunk below
-#  fixes a defect confirmed by the RadioLib platform audit; the evidence was
+#  Policy: patch only what cannot be handled from our own code. The hunk below
+#  fixes defects confirmed by the RadioLib platform audit; the evidence was
 #  reproduced with the real arduino:zephyr toolchain (arduino-cli 1.5.2, Zephyr
 #  SDK arm-zephyr-eabi-g++, ArduinoCore-zephyr b08a650 with ArduinoCore-API 1.5.2).
 #
-#  Hunk 1  src/BuildOpt.h - VENTUNO Q platform branch                (audit RL-01)
-#    Defect:   arduino:zephyr builds the VENTUNO Q with -DARDUINO_VENTUNO_Q
-#              -DARDUINO_ARCH_ZEPHYR (boards.txt:714 ventunoq.build.board=VENTUNO_Q,
-#              platform.txt:139 -DARDUINO_{build.board}). BuildOpt.h only knows
-#              "ARDUINO_ARCH_ZEPHYR && ARDUINO_UNO_Q", so the VENTUNO Q takes the
-#              "Unknown Arduino" branch with empty cast macros. ArduinoHal.cpp then
-#              calls ::pinMode / ::digitalWrite / ::attachInterrupt with uint32_t
-#              arguments, but ArduinoCore-API 1.5.2 declares only the typed global
-#              functions (Common.h:115-116, :132: PinMode / PinStatus); its int
-#              overloads live in namespace arduino (Compat.h:23-33), which a
-#              ::-qualified call never searches.
-#    Evidence: pristine library, VENTUNO Q: hal/Arduino/ArduinoHal.cpp:28:52,
-#              :35:59 and :49:89 "invalid conversion from 'uint32_t' to 'PinMode' /
-#              'PinStatus'", arduino-cli compile exit 1, plus RadioLib.h:74
-#              "#warning ... might not be compatible". 79 of 80 library TUs compile;
-#              on the UNO Q all 80 do.
-#    Fix:      a VENTUNO Q branch identical to the UNO Q one (same core, same API).
-#              Result: 80/80 TUs on both boards, no warning.
+#  Platform selection is not patched (D-79): both sketches build for the UNO Q only
+#  (FQBN arduino:zephyr:unoq, -DARDUINO_UNO_Q -DARDUINO_ARCH_ZEPHYR), which the stock
+#  src/BuildOpt.h knows ("ARDUINO_ARCH_ZEPHYR && ARDUINO_UNO_Q": the PinMode /
+#  PinStatus casts ArduinoHal.cpp needs with the core's typed pin API). The earlier
+#  hunk for the former ground board's platform entry (audit RL-01) was removed with
+#  that board; tools/host_test/check_firmware.sh keeps a negative control (a Zephyr
+#  board RadioLib does not know must fail with the core's PinMode / PinStatus errors).
 #
-#  Hunk 2  src/BuildOptUser.h - build options for every TU     (audit RL-02, RL-03)
+#  Hunk 1  src/BuildOptUser.h - build options for every TU     (audit RL-02, RL-03)
 #    Defect:   RADIOLIB_STATIC_ONLY defaults to 0, so Module::SPItransferStream()
 #              allocates two new uint8_t[] buffers for EVERY SPI command
 #              (Module.cpp:340, :383; freed at :468-469): continuous heap traffic
@@ -80,26 +69,6 @@
 #  stageMode(TX) without SetStandby, the 0 us delayMicroseconds(1) of the Zephyr core,
 #  the unbounded BUSY waits in begin() / launchMode() / scanChannel().
 # =============================================================================
-diff --git a/src/BuildOpt.h b/src/BuildOpt.h
-index ab95548..99ecb2a 100644
---- a/src/BuildOpt.h
-+++ b/src/BuildOpt.h
-@@ -421,6 +421,15 @@
-   #define RADIOLIB_ARDUINOHAL_PIN_STATUS_CAST         (PinStatus)
-   #define RADIOLIB_ARDUINOHAL_INTERRUPT_MODE_CAST     (PinStatus)
- 
-+#elif defined(ARDUINO_ARCH_ZEPHYR) && defined(ARDUINO_VENTUNO_Q)
-+  // Arduino VENTUNO Q (Zephyr OS) - VGQ patch: same ArduinoCore-zephyr core and
-+  // ArduinoCore-API typed pinMode(pin_size_t, PinMode), digitalWrite(pin_size_t,
-+  // PinStatus) and attachInterrupt(pin_size_t, voidFuncPtr, PinStatus) as the UNO Q
-+  #define RADIOLIB_PLATFORM                           "Arduino VENTUNO Q (Zephyr OS)"
-+  #define RADIOLIB_ARDUINOHAL_PIN_MODE_CAST           (PinMode)
-+  #define RADIOLIB_ARDUINOHAL_PIN_STATUS_CAST         (PinStatus)
-+  #define RADIOLIB_ARDUINOHAL_INTERRUPT_MODE_CAST     (PinStatus)
-+
- #else
-   // other Arduino platforms not covered by the above list - this may or may not work
-   #define RADIOLIB_PLATFORM                           "Unknown Arduino"
 diff --git a/src/BuildOptUser.h b/src/BuildOptUser.h
 index 54f16d8..441aa99 100644
 --- a/src/BuildOptUser.h

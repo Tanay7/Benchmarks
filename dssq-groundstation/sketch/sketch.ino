@@ -1,22 +1,28 @@
 // =============================================================================
 //  DSS-Q1 Station I/O, Radio Control Unit and optional SX126x ground radio
-//  VENTUNO Q MCU (STM32H5F5, Arduino core on Zephyr)
+//  Ground UNO Q MCU (Arduino UNO Q 4 GB, ABX00173: STM32U585, Arduino core on Zephyr;
+//  FQBN arduino:zephyr:unoq; D-71)
 //
-//  Split of work on the VENTUNO Q:
-//    Linux CPU (Dragonwing QCS8275) : the ground data system and its web dashboard
-//                                     (python -m dssq.gds) - the station's only display
+//  Split of work on the ground UNO Q (the spacecraft is a second UNO Q):
+//    Linux MPU (Qualcomm Dragonwing QRB2210, 4 x Cortex-A53, Debian)
+//                                   : the ground data system and its web dashboard
+//                                     (python -m dssq.gds) - the station's main display
 //    MCU (this sketch)              : real-time station I/O, linked to Linux by the
-//                                     Arduino Router Bridge (MessagePack-RPC)
+//                                     Arduino Router Bridge (MessagePack-RPC over the
+//                                     board's internal LPUART1 link)
+//  The board's single USB-C port carries a USB-C hub with its own power-delivery input;
+//  the station radio's USB-UART sits on a hub port (/dev/serial/by-id/..., Linux side).
 //
 //  Functions
-//   * CardKB command keyboard - exactly ONE, on `Wire` = the JDIGITAL header I2C pins
-//     SDA (PH12) and SCL (PH11) (Arduino VENTUNO Q user manual: D20 = SDA, D21 = SCL;
-//     the ArduinoCore-zephyr variant overlay lists the two GPIO numbers the other way
-//     round - wire by the SDA / SCL silkscreen, the I2C4 peripheral fixes the roles).
-//     Loose jumper leads from the header to the CardKB's Grove (HY2.0-4P) socket via an
-//     adapter: SDA, SCL, GND and 3.3 V - or 5 V through a BSS138 bidirectional level
-//     shifter (LV = 3.3 V, HV = 5 V): M5Stack specifies 5 V for the CardKB v1.1 and does
-//     not publish its I2C levels. The Qwiic socket is not used for anything.
+//   * CardKB command keyboard - exactly ONE, on `Wire` = I2C2 on the JDIGITAL header
+//     pins SDA = D20 (PB11) and SCL = D21 (PB10). The same two pins are USART3
+//     (`Serial3`): this sketch never begins Serial3 (on the spacecraft UNO Q the roles
+//     are reversed: there they carry the E22 UART and Wire is never begun). D20 / D21
+//     are 5 V tolerant inputs (FT). Loose jumper leads from the header to the CardKB's
+//     Grove (HY2.0-4P) socket via an adapter: SDA, SCL, GND and 3.3 V - or 5 V through
+//     a BSS138 bidirectional level shifter (LV = 3.3 V, HV = 5 V): M5Stack specifies
+//     5 V for the CardKB v1.1 and does not publish its I2C levels. The Qwiic socket
+//     (Wire1 = I2C4) and A4 / A5 (Wire2 = I2C3) are not used as I2C buses here.
 //     Every keystroke is echoed to the GDS (live typing line on the dashboard), Enter
 //     sends the line, an empty Enter CONFIRMs the pending hazardous command, KEYTEST
 //     switches raw key-code echo on (KEYTEST + Enter again, or ESC, leaves it). With the two-person rule enabled the second operator
@@ -27,8 +33,13 @@
 //     RED or at LOS, 2 / 3 short chirps when the beacon rises to IMPORTANT / URGENT
 //     (Phase B specification PB-6.4, contract 24.4). If the GDS falls silent for 5 s,
 //     AOS goes dark and ALARM flashes fast ("GDS link down").
-//   * Radio Control Unit for the UART E22 (default build): drives the station module's
-//     M0/M1 and reads AUX so the GDS can switch NORMAL / WOR / CONFIG / SLEEP.
+//   * Ground link status on the board's 13 x 8 LED matrix (D-78), from the M line the
+//     GDS sends once a second with the S line (layout above matrix_frame() below).
+//   * Radio Control Unit for the UART E22 (default build; optional, [gds] rcu = true in
+//     station.toml - the default E15-USB-T2 sets the mode with its jumpers): drives the
+//     station module's M0/M1 and reads AUX so the GDS can switch NORMAL / WOR / CONFIG /
+//     SLEEP. The hello line reports the result and age of the last mode change (D-78):
+//     what the MCU saw, never an assumed "present".
 //   * Optional SX126x LoRa ground radio over SPI (build switch DSSQ_RADIO_SX126X, see
 //     below): RadioLib 7.8.1 (bundled, patched copy), Rx boosted gain with retention,
 //     per-packet RSSI / SNR / frequency error, channel-activity detection before
@@ -45,9 +56,14 @@
 //  brackets.
 //   provide_safe "fp_line" (String)   S|aos|alarm|uplink|beacon   Q|<confirm id or -1>
 //                                     (beacon -1..3; a 4-field S line = beacon unknown)
+//                                     M|sync|tx|rssi|margin|lost|clock  (LED matrix,
+//                                     fields at parse_matrix_line(); "?" = unknown)
 //   provide_safe "rcu_mode" (int)     set E22 mode 0..3, returns AUX (1 = ready) [0]
 //   notify       "fp_in"   (String)   K|<typed text>  CMD|<text>  CONFIRM|<id>
-//                                     H|<fw>|<rcu>|<kb>  (hello, every 5 s)
+//                                     H|<fw>|<rcu>|<kb>|<rcu age s>  (hello, every 5 s):
+//                                     rcu = result of the last rcu_mode() call since
+//                                     boot (1 AUX ready, 0 failed, -1 never called),
+//                                     rcu age = seconds since that call (-1 never)
 //   SX126x build only:
 //   provide_safe "rf_tx"   (String hex) -> 1 queued, 0 queue full, -1 rejected, -2 radio down [0]
 //   provide_safe "rf_cfg"  (ch, code, pwr, flags; -1 = keep) -> 1 applied, 2 queued, -1 range
@@ -72,6 +88,7 @@
 //  KEYTEST + Enter again (or press ESC) to return to command entry.
 // =============================================================================
 #include <Arduino.h>
+#include <Arduino_LED_Matrix.h>
 #include <Arduino_RouterBridge.h>
 #include <Wire.h>
 
@@ -82,12 +99,12 @@
 //       chip on your module: 1268 = SX1268, e.g. EBYTE E22-400M33S; 1262 = SX1262);
 //    2. set [radio] model = "SX126x" in station.toml (<App>/data/station.toml).
 //  RadioLib is not downloaded by the board: tools/radiolib.py fetches release 7.8.1
-//  (tag commit verified), applies the project patch (VENTUNO Q platform entry with the
-//  PinMode / PinStatus casts the Zephyr core needs; RADIOLIB_STATIC_ONLY, so no heap
-//  allocation per SPI transfer; unused modules excluded) and places the result in
-//  libraries/RadioLib next to this file, which sketch.yaml lists. The include below is
-//  guarded by the build switch: the default E22 build never includes RadioLib.h, and
-//  arduino-cli compiles a profile library only for a sketch that includes it.
+//  (tag commit verified), applies the project patch (RADIOLIB_STATIC_ONLY, so no heap
+//  allocation per SPI transfer; unused modules excluded - the stock release already
+//  knows the UNO Q platform, D-79) and places the result in libraries/RadioLib next to
+//  this file, which sketch.yaml lists. The include below is guarded by the build switch:
+//  the default E22 build never includes RadioLib.h, and arduino-cli compiles a profile
+//  library only for a sketch that includes it.
 // -----------------------------------------------------------------------------
 #ifndef DSSQ_RADIO_SX126X
 #define DSSQ_RADIO_SX126X 0
@@ -105,7 +122,7 @@
 #if !RADIOLIB_STATIC_ONLY
 #error "use the bundled RadioLib patched by tools/radiolib.py (RADIOLIB_STATIC_ONLY must be 1)"
 #endif
-static const char* kFw = "DSSQ-IO 3.1 SX126x";
+static const char* kFw = "DSSQ-IO 4.0 SX126x";
 
 // Types that appear in function signatures. They must precede the first function of
 // the sketch: the Arduino builder inserts its generated prototypes there.
@@ -116,17 +133,23 @@ struct SxConfig {
   int32_t foff_hz;                                    // RF offset from the channel centre (rf_foff)
 };
 #else
-static const char* kFw = "DSSQ-IO 3.1";
+static const char* kFw = "DSSQ-IO 4.0";
 #endif
 
-// ---------------------------------------------------------------- pin map
+// ---------------------------------------------------------------- pin map (plan H, D-72)
+// UNO Q variant overlay digital-pin-gpios: D2 PB3, D3 PB0, D4 PA12, D5 PA11, D6 PB1,
+// D7 PB2, A1 = D15 PA5. All 3.3 V logic.
 // Radio Control Unit -> station E22 (T33D: DIP pins M0 / M1 / AUX; T37S: TBH-02 header
-// 10 M0, 7 M1, 4 AUX): M0 <- D2, M1 <- D3, AUX -> D4, GND common. Until setup() drives
-// M0/M1 LOW (NORMAL) they rest HIGH through the module's "very weak" pull-ups (deep
-// sleep); 10 kOhm pull-ups to 3.3 V make that rest state robust. Never fit pull-downs.
-static const int PIN_RCU_M0 = 2, PIN_RCU_M1 = 3, PIN_RCU_AUX = 4;
-// Annunciators (via 330 Ohm resistors / an NPN transistor for the buzzer)
-static const int PIN_LED_AOS = 5, PIN_LED_ALARM = 6, PIN_LED_UPLINK = 7, PIN_BUZZER = A0;
+// 10 M0, 7 M1, 4 AUX): M0 <- D2, M1 <- D3, AUX -> D7 - the spacecraft UNO Q's E22 pins,
+// so one wiring table serves both boards - GND common. Until setup() drives M0/M1 LOW
+// (NORMAL) they rest HIGH through the module's "very weak" pull-ups (deep sleep);
+// 10 kOhm pull-ups to 3.3 V make that rest state robust (D3 = PB0 is not 5 V tolerant:
+// 3.3 V only). Never fit pull-downs, and remove the board's M0 / M1 jumper caps before
+// wiring the RCU (a cap would short a pin this sketch drives HIGH).
+static const int PIN_RCU_M0 = 2, PIN_RCU_M1 = 3, PIN_RCU_AUX = 7;
+// Annunciators (via 330 Ohm resistors / an NPN transistor for the buzzer). A0 stays
+// free on the ground UNO Q: on the spacecraft UNO Q it is the E22 model strap.
+static const int PIN_LED_AOS = 4, PIN_LED_ALARM = 5, PIN_LED_UPLINK = 6, PIN_BUZZER = A1;
 
 static const uint32_t kKeyScanMs = 20;               // 50 Hz CardKB scan
 static const uint32_t kHelloMs = 5000;
@@ -160,6 +183,35 @@ static uint8_t g_chirps = 0;                        // chirps of the running bea
 // All timing is elapsed time (now - t0 >= duration): unsigned arithmetic that stays
 // correct across the 49.7-day millis() wrap.
 
+// Radio Control Unit state (D-78): the result of the last rcu_mode() call since boot
+// (1 AUX went HIGH = ready, 0 failed: AUX stayed LOW for kRcuAuxTimeoutMs or the mode
+// was out of range, -1 never called) and its age, reported in the hello line. AUX has
+// the MCU's pull-up, so an unwired AUX also reads HIGH: "OK" proves the mode pins were
+// driven and AUX was HIGH afterwards, not that a module is attached.
+static int8_t g_rcu_result = -1;
+static uint32_t g_rcu_t_ms = 0;                     // millis() anchor of the age below
+static uint32_t g_rcu_age_s = 0;                    // whole seconds since the call up to g_rcu_t_ms
+
+// LED matrix link status (D-78): the M line's fields (parse_matrix_line()). Unknown
+// values keep their row blank: the matrix shows only what the GDS measured.
+enum MxSync : uint8_t { kMxSyncUnknown = 0, kMxSearch = 1, kMxLock = 2, kMxFlywheel = 3, kMxPacket = 4 };
+enum MxRssi : uint8_t { kMxRssiUnknown = 0, kMxRssiValue = 1, kMxRssiNone = 2, kMxRssiOverload = 3 };
+enum MxMargin : uint8_t { kMxMarginUnknown = 0, kMxMarginValue = 1, kMxMarginFloor = 2 };
+struct MatrixData {
+  uint8_t sync;                                     // MxSync
+  int8_t tx;                                        // 1 transmitting, 0 not, -1 unknown
+  uint8_t rssi_kind;                                // MxRssi
+  int16_t rssi_dbm;                                 // with kMxRssiValue
+  uint8_t margin_kind;                              // MxMargin
+  int16_t margin_db;                                // with kMxMarginValue / kMxMarginFloor (upper bound)
+  int16_t lost;                                     // frames lost in the last 10 min, -1 unknown
+  int8_t clock;                                     // station clock: 1 synchronised, 0 not, -1 unknown
+};
+static const MatrixData kMxUnknown = {kMxSyncUnknown, -1, kMxRssiUnknown, 0, kMxMarginUnknown, 0, -1, -1};
+static MatrixData g_mx = kMxUnknown;
+static uint32_t g_last_mx_ms = 0;                   // last M line
+static bool g_mx_seen = false, g_rx_seen = false;   // an M line / any line from the GDS since boot
+
 static void send_line(const char* s) { Bridge.notify("fp_in", String(s)); }
 
 static void echo_input() {                          // live typing echo for the dashboard
@@ -176,11 +228,65 @@ static int split(char* s, char** f, int maxf) {     // "a|b|c" -> fields, in pla
   return n;
 }
 
+// Decimal integer with an optional '-' filling the whole field, within lo..hi. (Hand
+// written: no further C library call the board's loader would have to resolve.)
+static bool parse_int(const char* s, int32_t lo, int32_t hi, int32_t* v) {
+  const bool neg = *s == '-';
+  if (neg) ++s;
+  if (!*s) return false;
+  int32_t x = 0;
+  for (; *s; ++s) {
+    if (*s < '0' || *s > '9' || x > 99999) return false;
+    x = x * 10 + (*s - '0');
+  }
+  if (neg) x = -x;
+  if (x < lo || x > hi) return false;
+  *v = x;
+  return true;
+}
+
+// M|sync|tx|rssi|margin|lost|clock (display/frontpanel.py matrix_line(), once a second):
+//   sync    L LOCK, F FLYWHEEL, S SEARCH, P packet radio (SX126x: no frame synchronizer)
+//   tx      1 the station is transmitting, 0 not
+//   rssi    dBm (calibrated) of the last packet within the LOS timeout, "-" none in it,
+//           "O" receiver overload
+//   margin  dB against the worst-case sensitivity, "N<dB>": at the noise floor, only an
+//           upper bound (not measurable)
+//   lost    frames lost in the last 10 minutes
+//   clock   1 station clock synchronised, 0 unsynchronised
+// "?" - or anything this parser does not accept - is unknown for that field alone.
+static void parse_matrix_line(char** f, int n, MatrixData* m) {
+  *m = kMxUnknown;
+  if (n < 7) return;
+  int32_t v = 0;
+  switch (f[1][0]) {
+    case 'L': m->sync = kMxLock; break;
+    case 'F': m->sync = kMxFlywheel; break;
+    case 'S': m->sync = kMxSearch; break;
+    case 'P': m->sync = kMxPacket; break;
+    default: break;
+  }
+  if (f[1][0] && f[1][1]) m->sync = kMxSyncUnknown;        // one letter only
+  if (parse_int(f[2], 0, 1, &v)) m->tx = (int8_t)v;
+  if (!strcmp(f[3], "-")) m->rssi_kind = kMxRssiNone;
+  else if (!strcmp(f[3], "O")) m->rssi_kind = kMxRssiOverload;
+  else if (parse_int(f[3], -300, 50, &v)) { m->rssi_kind = kMxRssiValue; m->rssi_dbm = (int16_t)v; }
+  if (f[4][0] == 'N' && parse_int(f[4] + 1, -300, 300, &v)) { m->margin_kind = kMxMarginFloor; m->margin_db = (int16_t)v; }
+  else if (parse_int(f[4], -300, 300, &v)) { m->margin_kind = kMxMarginValue; m->margin_db = (int16_t)v; }
+  if (parse_int(f[5], 0, 30000, &v)) m->lost = (int16_t)v;
+  if (parse_int(f[6], 0, 1, &v)) m->clock = (int8_t)v;
+}
+
 static void handle_line(char* line) {
   g_last_rx_ms = millis();
-  char* f[6];
-  const int n = split(line, f, 6);
-  if (f[0][0] == 'S' && n >= 4) {                   // S|aos|alarm|uplink[|beacon]
+  g_rx_seen = true;
+  char* f[8];
+  const int n = split(line, f, 8);
+  if (f[0][0] == 'M' && f[0][1] == 0) {             // M|sync|tx|rssi|margin|lost|clock
+    parse_matrix_line(f, n, &g_mx);
+    g_last_mx_ms = g_last_rx_ms;
+    g_mx_seen = true;
+  } else if (f[0][0] == 'S' && n >= 4) {            // S|aos|alarm|uplink[|beacon]
     const bool aos = atoi(f[1]) != 0;
     const int alarm = atoi(f[2]);
     g_alarm = (uint8_t)((alarm >= 0 && alarm <= 2) ? alarm : 2);   // unknown level: worst case
@@ -216,13 +322,30 @@ static bool fp_line_exec(const char* s) {
   return true;
 }
 
+static int rcu_note(int result) {                  // the hello line's RCU state (D-78)
+  g_rcu_result = (int8_t)result;
+  g_rcu_t_ms = millis();
+  g_rcu_age_s = 0;
+  return result;
+}
+
 static int rcu_mode_exec(int m) {
-  if (m < 0 || m > 3) return 0;                     // range check: modes 0..3 only
+  if (m < 0 || m > 3) return rcu_note(0);           // range check: modes 0..3 only
   digitalWrite(PIN_RCU_M0, (m & 1) ? HIGH : LOW);
   digitalWrite(PIN_RCU_M1, (m & 2) ? HIGH : LOW);
   delay(3);                                          // E22: >= 2 ms after a mode change
   for (uint32_t i = 0; i < kRcuAuxTimeoutMs && digitalRead(PIN_RCU_AUX) == LOW; ++i) delay(1);
-  return digitalRead(PIN_RCU_AUX) == HIGH ? 1 : 0;
+  return rcu_note(digitalRead(PIN_RCU_AUX) == HIGH ? 1 : 0);
+}
+
+// Seconds since the last rcu_mode() call, -1 if none since boot. Re-anchored at every
+// call (each hello, 5 s apart), so the 49.7-day millis() wrap never reaches it.
+static int32_t rcu_age_s(uint32_t now) {
+  if (g_rcu_result < 0) return -1;
+  const uint32_t whole = (now - g_rcu_t_ms) / 1000UL;
+  g_rcu_t_ms += whole * 1000UL;
+  g_rcu_age_s = g_rcu_age_s > 0x7FFFFFFFUL - whole ? 0x7FFFFFFFUL : g_rcu_age_s + whole;   // saturating
+  return (int32_t)g_rcu_age_s;
 }
 
 // ---------------------------------------------------------------- keyboard
@@ -351,12 +474,13 @@ static void annunciators() {
 // =============================================================================
 //  SX126x ground radio (contract v3 2.2, 14, 24.8, 25; Semtech SX1261/2 DS rev 2.2)
 //
-//  Wiring (VENTUNO Q JDIGITAL / JANALOG headers, all 3.3 V logic):
+//  Wiring (ground UNO Q JDIGITAL / JANALOG headers, all 3.3 V logic; pin plan H, D-72):
 //    `SPI` = SPI2 (variant overlay: spis = <&spi2>, <&spi3>): SCK D13 (PB13),
-//    MISO D12 (PB14), MOSI D11 (PB15); NSS D10 (PB12) driven as a GPIO by RadioLib;
-//    BUSY D8 (PB4); DIO1 D9 (PB7, polled - no interrupt needed); NRST A1 (PA5, a
-//    plain GPIO output here); RXEN A2 (PE12); TXEN A3 (PE13). No conflict with the
-//    RCU (D2-D4), the LEDs (D5-D7), the buzzer (A0) or the CardKB bus (PH11/PH12).
+//    MISO D12 (PB14), MOSI D11 (PB15); NSS D10 (PB9) driven as a GPIO by RadioLib;
+//    BUSY D8 (PB4); DIO1 D9 (PB8, polled - no interrupt needed); NRST A4 (D18, PC1, a
+//    plain GPIO output here: A1 drives the buzzer, A0 stays free); RXEN A2 (PA6);
+//    TXEN A3 (PA7). No conflict with the RCU (D2 / D3 / D7), the lamps (D4-D6), the
+//    buzzer (A1) or the CardKB bus (D20 / D21 = PB11 / PB10). A4 is not 5 V tolerant.
 //    Module supply, TCXO and RF-switch wiring: VERIFY against the module datasheet.
 //
 //  Link parameters identical to the spacecraft (src/drivers/sx126x.*): explicit
@@ -405,7 +529,7 @@ static void annunciators() {
 //  NRST pulse; failed initialisations back off exponentially (max 60 s).
 // =============================================================================
 static const int PIN_SX_NSS = 10, PIN_SX_BUSY = 8, PIN_SX_DIO1 = 9;
-static const int PIN_SX_NRST = A1, PIN_SX_RXEN = A2, PIN_SX_TXEN = A3;
+static const int PIN_SX_NRST = A4, PIN_SX_RXEN = A2, PIN_SX_TXEN = A3;
 
 static const uint16_t kSxTcxoMv = 1800;              // DIO3 TCXO supply, 0 = no TCXO - VERIFY module
 static const float kSxTcxoV = kSxTcxoMv / 1000.0f;   // as RadioLib begin() takes it (0 = crystal)
@@ -659,7 +783,10 @@ static uint32_t airtime_ms(size_t len) {
   const int32_t den = 4 * ((int32_t)p.sf - de);
   const int32_t blocks = num > 0 ? (num + den - 1) / den : 0;
   const uint64_t quarter_symbols = 4ull * g_sx.preamble + 17ull + 4ull * (8ull + (uint64_t)blocks * kSxCodingRate);
-  const uint64_t bw_hz = (uint64_t)(p.bw_khz * 1000.0f + 0.5f);
+  // 31 250..125 000 Hz: a 32-bit conversion (the M33's VCVT). A float -> uint64_t
+  // conversion calls libgcc's __aeabi_f2ulz, which the arduino:zephyr 0.90.0 sketch link
+  // does not provide ("undefined reference").
+  const uint64_t bw_hz = (uint32_t)(p.bw_khz * 1000.0f + 0.5f);
   const uint64_t us = (quarter_symbols * (1000000ull << p.sf) + 4ull * bw_hz - 1ull) / (4ull * bw_hz);
   return (uint32_t)((us + 999ull) / 1000ull);
 }
@@ -1297,24 +1424,125 @@ static void sx_setup() {
 #endif  // DSSQ_RADIO_SX126X
 
 // =============================================================================
+//  Ground link status on the UNO Q's 13 x 8 LED matrix (D-78), redrawn at 4 Hz from
+//  the S and M lines the GDS sends once a second (column 0 = left):
+//    row 0    AOS: all lit; LOS: off                                       (S aos)
+//    row 1    frame sync LOCK: lit; FLYWHEEL: blinking; SEARCH, the SX126x packet radio
+//             (no frame synchronizer) or unknown: off                      (M sync)
+//    row 2    uplink: lit while the station transmits (the GDS's flag; the SX126x build
+//             also lights it while its own radio is in TX)                 (M tx)
+//    rows 3-4 RSSI of the last packet within the LOS timeout: a bar of 0..13 columns for
+//             -135..-30 dBm; blank without such a packet; all columns blinking on a
+//             receiver OVERLOAD                                            (M rssi)
+//    row 5    link margin against the worst-case sensitivity: 0..13 columns for
+//             0..+26 dB; the bar blinks when the margin is not measurable (at the noise
+//             floor: the value is an upper bound)                          (M margin)
+//    row 6    frames lost in the last 10 minutes: one column per frame, 13 = 13 or more
+//                                                                          (M lost)
+//    row 7    alarm level: GREEN 1 column, YELLOW 5, RED all 13 blinking (S alarm); the
+//             last column blinks while the station clock is unsynchronised (M clock)
+//  A field the GDS reports as unknown leaves its row blank. Before the first line from
+//  the GDS, and after kGdsSilentMs without one, only row 7 shows, all columns blinking
+//  fast like the ALARM lamp ("GDS link down"); M data older than that is not shown. The matrix is started after Bridge.begin(): the board shows its boot logo
+//  until Linux is up, and touching the matrix earlier may disturb the MCU (UNO Q user
+//  manual). Brightness levels 0..7 (setGrayscaleBits(3)), as the flight's
+//  status_display.cpp.
+// =============================================================================
+static const uint8_t kMxCols = 13, kMxRows = 8;
+static const uint32_t kMxPeriodMs = 250;             // 4 Hz redraw
+static const uint32_t kMxBlinkHalfMs = 500;          // 1 Hz blink
+static const int32_t kMxRssiMinDbm = -135, kMxRssiMaxDbm = -30;
+static const int32_t kMxMarginDbPerCol = 2;           // 13 columns = +26 dB
+static const uint8_t kMxBright = 7, kMxBar = 4, kMxDim = 3;
+static Arduino_LED_Matrix g_matrix;
+static uint8_t g_frame[kMxCols * kMxRows];
+static bool g_matrix_on = false;
+
+static void mx_row(uint8_t* f, uint8_t row, uint8_t cols, uint8_t level) {
+  for (uint8_t c = 0; c < kMxCols; ++c) f[row * kMxCols + c] = c < cols ? level : 0;
+}
+
+static uint8_t mx_rssi_cols(int32_t dbm) {          // -135..-30 dBm -> 0..13, rounded
+  if (dbm <= kMxRssiMinDbm) return 0;
+  if (dbm >= kMxRssiMaxDbm) return kMxCols;
+  return (uint8_t)(((dbm - kMxRssiMinDbm) * kMxCols + (kMxRssiMaxDbm - kMxRssiMinDbm) / 2) /
+                   (kMxRssiMaxDbm - kMxRssiMinDbm));
+}
+
+static uint8_t mx_margin_cols(int32_t db) {         // 0..+26 dB -> 0..13, rounded
+  if (db <= 0) return 0;
+  const int32_t c = (db + kMxMarginDbPerCol / 2) / kMxMarginDbPerCol;
+  return (uint8_t)(c > kMxCols ? kMxCols : c);
+}
+
+static void matrix_frame(uint8_t* f, uint32_t now) {
+  memset(f, 0, (size_t)kMxCols * kMxRows);
+  const bool blink = ((now / kMxBlinkHalfMs) & 1) != 0;
+  if (!g_rx_seen || now - g_last_rx_ms > kGdsSilentMs) {   // GDS link down: none yet, or none for 5 s
+    mx_row(f, 7, ((now / kLinkDownHalfMs) & 1) ? kMxCols : 0, kMxBright);
+    return;
+  }
+  mx_row(f, 0, g_aos ? kMxCols : 0, kMxBright);
+  const MatrixData& m = (g_mx_seen && now - g_last_mx_ms <= kGdsSilentMs) ? g_mx : kMxUnknown;
+  if (m.sync == kMxLock || (m.sync == kMxFlywheel && blink)) mx_row(f, 1, kMxCols, kMxBright);
+  bool tx = m.tx == 1;
+#if DSSQ_RADIO_SX126X
+  tx = tx || g_sx.state == kSxTx;
+#endif
+  mx_row(f, 2, tx ? kMxCols : 0, kMxBright);
+  uint8_t rssi = 0;
+  if (m.rssi_kind == kMxRssiValue) rssi = mx_rssi_cols(m.rssi_dbm);
+  else if (m.rssi_kind == kMxRssiOverload && blink) rssi = kMxCols;
+  mx_row(f, 3, rssi, kMxBar);
+  mx_row(f, 4, rssi, kMxBar);
+  if (m.margin_kind == kMxMarginValue) {
+    mx_row(f, 5, mx_margin_cols(m.margin_db), kMxBar);
+  } else if (m.margin_kind == kMxMarginFloor && blink) {
+    const uint8_t c = mx_margin_cols(m.margin_db);
+    mx_row(f, 5, c ? c : 1, kMxBar);                 // at least one column, so the blink shows
+  }
+  if (m.lost >= 0) mx_row(f, 6, m.lost > kMxCols ? kMxCols : (uint8_t)m.lost, kMxDim);
+  const uint8_t alarm_cols = g_alarm == 0 ? 1 : g_alarm == 1 ? 5 : (((now / kAlarmRedHalfMs) & 1) ? kMxCols : 0);
+  mx_row(f, 7, alarm_cols, kMxBright);
+  if (m.clock == 0) f[7 * kMxCols + kMxCols - 1] = blink ? kMxBright : 0;
+}
+
+static void matrix_begin() {
+  (void)g_matrix.begin();
+  g_matrix.setGrayscaleBits(3);
+  memset(g_frame, 0, sizeof g_frame);
+  g_matrix.draw(g_frame);
+  g_matrix_on = true;
+}
+
+static void matrix_service(uint32_t now) {
+  static uint32_t last = 0;
+  if (!g_matrix_on || now - last < kMxPeriodMs) return;
+  last = now;
+  matrix_frame(g_frame, now);
+  g_matrix.draw(g_frame);
+}
+
+// =============================================================================
 //  Bridge services: a mailbox to the loop thread
 //
 //  The stock Arduino_RouterBridge 0.4.3 does NOT confine provide_safe handlers to the
 //  loop thread (its README says so, its code does not). Bridge.begin() starts a "bridge"
-//  thread (bridge.h: UPDATE_THREAD_PRIORITY 5 - above the main thread's 14 in both Q
-//  cores' CONFIG_MAIN_THREAD_PRIORITY - and UPDATE_THREAD_STACK_SIZE 500 octets) that
-//  calls update() every millisecond; update() fetches requests with get_rpc() WITHOUT
-//  a tag, and RPClite 0.3.1 RPCServer::get_rpc() filters by tag only when one is given,
-//  so that thread takes "__safe__" methods as well and runs them by preempting loop()
-//  anywhere. Only update_safe(), reached from __loopHook between two loop() calls, runs
-//  them in the loop thread. Run directly, rf_cfg / rf_foff would interleave RadioLib
-//  SPI transactions with sx_service(), queue_tx() and sx_tx_finished() would race on
-//  tx_count, and sx_status()'s 224-octet line plus snprintf would sit on a 500-octet
-//  stack. This sketch builds with the bundled patched copy (libraries/
-//  Arduino_RouterBridge, tools/arduino_routerbridge-0.4.3.patch, contract 41): update()
-//  leaves "__safe__" methods to update_safe() and the bridge thread has 1536 octets, so
-//  the shims below run on the loop thread and execute directly; the mailbox stays as
-//  defence in depth (a build against the stock library stays safe).
+//  thread (bridge.h: UPDATE_THREAD_PRIORITY 5 - above the main thread's 14, the UNO Q
+//  core's CONFIG_MAIN_THREAD_PRIORITY in 0.90.0 and later - and UPDATE_THREAD_STACK_SIZE
+//  500 octets) that calls update() every millisecond; update() fetches requests with
+//  get_rpc() WITHOUT a tag, and RPClite 0.3.1 RPCServer::get_rpc() filters by tag only
+//  when one is given, so that thread takes "__safe__" methods as well and runs them by
+//  preempting loop() anywhere. Only update_safe(), reached from __loopHook between two
+//  loop() calls, runs them in the loop thread. Run directly, rf_cfg / rf_foff would
+//  interleave RadioLib SPI transactions with sx_service(), queue_tx() and
+//  sx_tx_finished() would race on tx_count, and sx_status()'s 224-octet line plus
+//  snprintf would sit on a 500-octet stack. This sketch builds with the bundled patched
+//  copy (libraries/Arduino_RouterBridge, tools/arduino_routerbridge-0.4.3.patch,
+//  contract 41): update() leaves "__safe__" methods to update_safe() and the bridge
+//  thread has 1536 octets, so the shims below run on the loop thread and execute
+//  directly; the mailbox stays as defence in depth (a build against the stock library
+//  stays safe).
 //
 //  Every registered handler is therefore a shim (rpc_call) that only copies its
 //  arguments into one static slot, publishes it (atomic POSTED) and waits, bounded,
@@ -1342,6 +1570,15 @@ static_assert(kRpcTextMax > 2 * kRfTxMaxOctets, "the mailbox must hold the longe
 static atomic_t g_rpc_state = ATOMIC_INIT(0);        // kRpcIdle / kRpcPosted / kRpcRunning
 static struct k_sem g_rpc_done;                      // given by the loop when a posted request ends
 static k_tid_t g_loop_tid = nullptr;                 // the Arduino main thread (setup() and loop())
+
+// Not k_current_get(): with CONFIG_CURRENT_THREAD_USE_TLS it reads the extern
+// thread_local z_tls_current, and C++ then also references its TLS init function
+// _ZTH13z_tls_current (weak). arduino:zephyr up to 0.90.0 - the core of older App Lab
+// installations on the UNO Q - does not compile with -fno-extern-tls-init and its
+// loader does not export that symbol, so it would refuse the whole sketch ("Undefined
+// symbol with no entry in symbol table"). The scheduler's query is exported by every
+// core release (as the flight's src/fsw/rpc_mailbox.h current_thread()).
+static k_tid_t current_thread() { return k_sched_current_thread_query(); }
 static uint8_t g_rpc_op = 0;
 static int32_t g_rpc_arg[4] = {0, 0, 0, 0};
 static char g_rpc_text[kRpcTextMax];
@@ -1372,7 +1609,7 @@ static int32_t rpc_call(uint8_t op, const int32_t* a, const String* s, int32_t n
   if (!a) a = kNoArgs;
   const char* text = (s && s->c_str()) ? s->c_str() : "";
   const size_t len = s ? s->length() : 0;
-  if (k_current_get() == g_loop_tid) return rpc_execute(op, a, text, len);
+  if (current_thread() == g_loop_tid) return rpc_execute(op, a, text, len);
   g_rpc_op = op;
   memcpy(g_rpc_arg, a, sizeof g_rpc_arg);
   const size_t n = len < kRpcTextMax - 1 ? len : kRpcTextMax - 1;   // longer: rejected on g_rpc_len
@@ -1422,7 +1659,7 @@ static int rpc_rf_cad() { return (int)rpc_call(kOpRfCad, nullptr, nullptr, 0, kR
 
 // ---------------------------------------------------------------- setup/loop
 void setup() {
-  g_loop_tid = k_current_get();                     // before any handler can be registered
+  g_loop_tid = current_thread();                    // before any handler can be registered
   k_sem_init(&g_rpc_done, 0, 1);
   pinMode(PIN_RCU_M0, OUTPUT);
   pinMode(PIN_RCU_M1, OUTPUT);
@@ -1433,11 +1670,12 @@ void setup() {
   for (int p : outs) { pinMode(p, OUTPUT); digitalWrite(p, LOW); }
 
   Bridge.begin();                                   // waits for the arduino-router service
+  matrix_begin();                                   // Linux is up: the boot logo is over
   // provide_safe: run from __loopHook on the loop thread (bundled patched library);
   // with the stock library the shims still hand the work to the loop thread.
   Bridge.provide_safe("fp_line", rpc_fp_line);
   Bridge.provide_safe("rcu_mode", rpc_rcu_mode);
-  Wire.begin();                                     // header SDA/SCL (I2C4): the CardKB
+  Wire.begin();                                     // I2C2, header SDA D20 / SCL D21: the CardKB
   Wire.setClock(100000);
 #if DSSQ_RADIO_SX126X
   sx_setup();
@@ -1463,10 +1701,11 @@ void loop() {
   if (now - g_last_hello_ms >= kHelloMs) {
     g_last_hello_ms = now;
     char h[48];
-    snprintf(h, sizeof h, "H|%s|1|%d", kFw, g_kb ? 1 : 0);
+    snprintf(h, sizeof h, "H|%s|%d|%d|%ld", kFw, (int)g_rcu_result, g_kb ? 1 : 0, (long)rcu_age_s(now));
     send_line(h);
   }
   annunciators();
+  matrix_service(now);
 #if DSSQ_RADIO_SX126X
   rpc_service();                                    // again after the I2C scan, before the radio
   sx_service();

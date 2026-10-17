@@ -30,8 +30,8 @@ Decision records: [12_Design_Decisions.md](12_Design_Decisions.md) D-40 (RadioLi
 | Tag commit | `2325a38a89dd0f0e402c19f67fe910111da1e246` | `d681b87211864148367f2d77096ae84c5badcb2f` |
 | Pristine tree SHA-256 (section 5.3) | `84370304e2fa416a2d4aa798b49a576d6821252691191afdc3ed413a49fa9189` | `c86d601236aef85b351c39c472273cd8bf96c3d38a8a18c708788945b5813194` |
 | Bundled files | `library.properties`, `license.txt`, `src/` (176 files) | `library.properties`, `LICENSE`, `src/` (11 files) |
-| Patch | [../tools/radiolib-7.8.1.patch](../tools/radiolib-7.8.1.patch) (2 hunks, 2 files) | [../tools/arduino_routerbridge-0.4.3.patch](../tools/arduino_routerbridge-0.4.3.patch) (2 hunks, 1 file) |
-| Patch SHA-256 (as written into PROVENANCE.txt) | `e935551ccb1cdc7df1496e097248eb6877b976db51e90b2954aac99034706eab` | `b9e95dc6c8aad69f5c9ac56da65017b0a9565d6c18eefec7c74dcbb07b36500d` |
+| Patch | [../tools/radiolib-7.8.1.patch](../tools/radiolib-7.8.1.patch) (1 hunk, 1 file; D-79) | [../tools/arduino_routerbridge-0.4.3.patch](../tools/arduino_routerbridge-0.4.3.patch) (2 hunks, 1 file) |
+| Patch SHA-256 (as written into PROVENANCE.txt) | `48e4854224a10b73710453ec47e6a8987f266c89fa044e4a0a75c460ff0c738b` | `6324a5d39715d4efad41e6c5eeb641542769b3f5bc65289f2436b5aa4ab8fd9c` |
 | Tool | [../tools/radiolib.py](../tools/radiolib.py) | [../tools/routerbridge.py](../tools/routerbridge.py) |
 | Shared engine | [../tools/libbundle.py](../tools/libbundle.py) | same |
 | Bundled as | `<sketch>/libraries/RadioLib` | `<sketch>/libraries/Arduino_RouterBridge` |
@@ -304,7 +304,7 @@ tag: 0.4.3
 commit: d681b87211864148367f2d77096ae84c5badcb2f
 pristine-tree-sha256: c86d601236aef85b351c39c472273cd8bf96c3d38a8a18c708788945b5813194
 patch: arduino_routerbridge-0.4.3.patch
-patch-sha256: b9e95dc6c8aad69f5c9ac56da65017b0a9565d6c18eefec7c74dcbb07b36500d
+patch-sha256: 6324a5d39715d4efad41e6c5eeb641542769b3f5bc65289f2436b5aa4ab8fd9c
 files: library.properties, LICENSE, src/ (11 files)
 license: MPL-2.0 (LICENSE, unchanged; the modified file is src/bridge.h, its source is this copy)
 ```

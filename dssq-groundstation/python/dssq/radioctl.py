@@ -3,8 +3,8 @@
 Two control paths behind one API (RadioManager), selected by the radio backend:
 
   E22 UART models (E22-400T33D default, E22-400T37S) - through the Radio Control Unit:
-    the VENTUNO Q MCU drives the module's M0/M1 pins and reads AUX (the App's sketch,
-    RPC rcu_mode), so the GDS can enter CONFIG mode for register read-back and
+    the station UNO Q MCU drives the module's M0/M1 pins and reads AUX (the App's sketch,
+    D2 / D3 / D7, RPC rcu_mode), so the GDS can enter CONFIG mode for register read-back and
     volatile (C2) writes, read the ambient-noise register, and use the module's WOR
     transmitter role. Model differences: the T33D's REG1 b4..b2 are reserved and are
     never written 1 (e22.sanitize_reg1); power codes mean different dBm per model.
@@ -46,7 +46,7 @@ SURVEY_RESTORE_TRIES = 3               # attempts to return to the home channel 
 
 class RadioManager:
     """Model-aware ground radio procedures. `radio` is the GDS radio backend;
-    `rcu` an object with set_mode(int) -> bool (VENTUNO Q MCU or simulator), None
+    `rcu` an object with set_mode(int) -> bool (station MCU or simulator), None
     for packet backends. `model` defaults to the backend's model (SX126x for a packet
     backend, else the default E22 model)."""
 

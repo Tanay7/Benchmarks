@@ -1,5 +1,5 @@
 name: DSS-Q Ground Station
 icon: 📡
-description: DSS-Q1 ground station for VGQ-1 - CCSDS ground data system and operator web dashboard (port 8080, Python standard library only) plus the station I/O sketch (CardKB, annunciators, Radio Control Unit, optional SX126x radio).
+description: DSS-Q1 ground station for VGQ-1 on an Arduino UNO Q 4 GB - CCSDS ground data system and operator web dashboard (port 8080, Python standard library only) plus the station I/O sketch (CardKB, annunciators, LED-matrix link status, Radio Control Unit, optional SX126x radio).
 ports:
   - 8080

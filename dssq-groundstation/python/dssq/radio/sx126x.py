@@ -1,6 +1,6 @@
 """SX126x ground radio over the Arduino Router Bridge (packet backend).
 
-The VENTUNO Q MCU (dssq-groundstation/sketch, build switch DSSQ_RADIO_SX126X = 1)
+The station UNO Q MCU (dssq-groundstation/sketch, build switch DSSQ_RADIO_SX126X = 1)
 drives an SX1268 / SX1262 module (reference: EBYTE E22-400M33S) over SPI with
 RadioLib 7.8.1 (the patched copy bundled by tools/radiolib.py, contract 25) and
 exchanges WHOLE LoRa packets with Linux through the Router Bridge (MessagePack-RPC).

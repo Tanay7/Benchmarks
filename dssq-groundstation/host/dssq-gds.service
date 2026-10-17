@@ -1,5 +1,5 @@
-# systemd unit for the DSS-Q ground data system on the VENTUNO Q Linux side (host mode,
-# the documented fallback / always-on alternative to the App Lab App, contract 18).
+# systemd unit for the DSS-Q ground data system on the ground UNO Q's Linux side (Debian;
+# host mode, the documented fallback / always-on alternative to the App Lab App, contract 18).
 # host/install_station.sh --service installs it for the App folder it lives in, the
 # virtual environment it creates and the invoking user. The paths below are its defaults:
 # the App imported by App Lab (/home/arduino/ArduinoApps/dssq-groundstation) and the
@@ -16,12 +16,13 @@
 # sequence counter per key (a second archive would restart it: GCM nonce reuse under AE).
 # As in the App, the dashboard listens on all interfaces (commanding needs the token); add
 # Environment=DSSQ_HTTP_HOST=127.0.0.1 under [Service] to keep it on the board.
-# The GDS itself needs only the Python standard library (>= 3.11; Ubuntu 24.04 ships 3.12),
-# but in host mode the front panel (CardKB, annunciators), the Radio Control Unit and the
-# SX126x radio need arduino.router_bridge (PyPI arduino-router-bridge 0.5.1 + msgpack),
-# which App Lab's container has and the board's host Python does not. ExecStart therefore
-# uses the virtual environment that install_station.sh creates (Ubuntu 24.04 refuses pip
-# into the system Python). Without the package the GDS still runs, logs WARN
+# The GDS itself needs only the Python standard library (>= 3.11: the board's Debian
+# Python, release VERIFY on the board), but in host mode the front panel (CardKB,
+# annunciators, LED matrix), the Radio Control Unit and the SX126x radio need
+# arduino.router_bridge (PyPI arduino-router-bridge 0.5.1 + msgpack), which App Lab's
+# container has and the board's host Python does not. ExecStart therefore uses the
+# virtual environment that install_station.sh creates (pip stays out of the Debian system
+# Python). Without the package the GDS still runs, logs WARN
 # "router bridge unavailable" and those three functions stay disabled (an SX126x station
 # then has no radio at all).
 #
@@ -42,7 +43,7 @@ Restart=on-failure
 RestartSec=5
 # Runner.close() finishes within 4 s after SIGTERM (TDM, archive and SDLS state flushed).
 TimeoutStopSec=10
-# Serial port access (E22 USB-UART).
+# Serial port access (E22 USB-UART on the USB-C hub).
 SupplementaryGroups=dialout
 NoNewPrivileges=true
 PrivateTmp=true

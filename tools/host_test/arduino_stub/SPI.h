@@ -68,7 +68,7 @@ class ZephyrSPI : public HardwareSPI {
 };
 }  // namespace arduino
 
-// spis = <&spi2>, <&spi3> on both the UNO Q and the VENTUNO Q overlays.
+// spis = <&spi2>, <&spi3> in the UNO Q variant overlay.
 extern arduino::ZephyrSPI SPI;
 extern arduino::ZephyrSPI SPI1;
 

@@ -5,8 +5,8 @@ Each package is a zip whose single top-level folder is an App, the form Arduino 
 imports (My Apps -> open any App -> the menu next to its name -> Import App; the App lands
 in ~/ArduinoApps/<folder> on the board):
 
-    dist/vgq1-spacecraft-unoq.zip          folder vgq1-spacecraft     Arduino UNO Q
-    dist/dssq-groundstation-ventunoq.zip   folder dssq-groundstation  Arduino VENTUNO Q
+    dist/vgq1-spacecraft-unoq.zip          folder vgq1-spacecraft     Arduino UNO Q (spacecraft)
+    dist/dssq-groundstation-unoq.zip       folder dssq-groundstation  Arduino UNO Q 4 GB (ABX00173, ground)
     dist/SHA256SUMS                        check with: cd dist && sha256sum -c SHA256SUMS
 
 What a package contains
@@ -64,7 +64,7 @@ platform's).
 Usage
   python3 tools/package_apps.py [--out DIR] [--libs-from DIR] [--build [--compiler PATH]]
   python3 tools/package_apps.py --verify [--out DIR] [--build [--compiler PATH]]
---compiler names an acompile.sh-style wrapper, called as 'PATH <unoq|ventunoq> <sketch>
+--compiler names an acompile.sh-style wrapper, called as 'PATH unoq <sketch>
 --out <dir>', or arduino-cli itself, called as 'arduino-cli compile --profile default -v
 --build-path <dir> <sketch>'; the default is $VGQ_ACOMPILE, else arduino-cli from PATH.
 
@@ -158,7 +158,7 @@ COMMON_REQUIRED = ("app.yaml", "README.md", "python/main.py", "sketch/sketch.ino
 APPS: tuple[AppSpec, ...] = (
     AppSpec("vgq1-spacecraft", "vgq1-spacecraft-unoq.zip", "unoq",
             (*COMMON_REQUIRED, "python/cfdp_tx.py", "sketch/src/config.h")),
-    AppSpec("dssq-groundstation", "dssq-groundstation-ventunoq.zip", "ventunoq",
+    AppSpec("dssq-groundstation", "dssq-groundstation-unoq.zip", "unoq",
             (*COMMON_REQUIRED, "python/dssq/__init__.py", "python/config/station.toml",
              "host/install_station.sh", "host/dssq-gds.service"),
             station_toml="python/config/station.toml"),
@@ -1040,7 +1040,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="package_apps.py",
         description="Build (default) or verify the two Arduino App Lab packages of VGQ-1 / DSS-Q1: "
-                    "dist/vgq1-spacecraft-unoq.zip and dist/dssq-groundstation-ventunoq.zip.",
+                    "dist/vgq1-spacecraft-unoq.zip and dist/dssq-groundstation-unoq.zip.",
         epilog="Exit status: 0 success; 1 a check failed; 2 usage or environment error; 3 a library could "
                "not be fetched; 4 refused: secret material in an App folder or a package.")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, metavar="DIR",

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Station sketch regression harness (VENTUNO Q MCU, dssq-groundstation/sketch/sketch.ino).
+# Station sketch regression harness (ground UNO Q MCU, dssq-groundstation/sketch/sketch.ino).
 #
 # Builds the REAL station sketch with the host compiler - against tools/host_test/arduino_stub
-# plus the test doubles in include/ (a recording Arduino_RouterBridge, a <zephyr/kernel.h>
-# on real host threads) and runtime.cpp (Arduino core on real time, a pin table, a fake
-# SX126x behind the SPI) - and runs it on real threads:
-#   test_e22.cpp  default E22 build: CardKB key-test mode (Phase C C51) and the Bridge
+# plus the test doubles in include/ (a recording Arduino_RouterBridge, a recording
+# Arduino_LED_Matrix, a <zephyr/kernel.h> on real host threads) and runtime.cpp (Arduino core
+# on real time, a pin table, a fake SX126x behind the SPI) - and runs it on real threads:
+#   test_e22.cpp  default E22 build: CardKB key-test mode (Phase C C51), the Bridge
 #                 mailbox (C50 / decision I4): a handler called from another thread is
-#                 executed by the loop thread; an unserved request times out and never runs
+#                 executed by the loop thread; an unserved request times out and never
+#                 runs; pin plan H (D-72); the RCU state in the hello and the LED-matrix
+#                 link status (D-78)
 #   test_sx.cpp   SX126x build (DSSQ_RADIO_SX126X=1) for the SX1268 and the SX1262,
 #                 compiled with the bundled patched RadioLib: rf_rx length bound (C54),
-#                 TX-fault dequeue (C25), S| status fields (I3)
-# 12 checks + 2 x 7 checks = 26. CI runs it under AddressSanitizer + UBSan and under
+#                 TX-fault dequeue (C25), S| status fields (I3), SX126x pins, time on air,
+#                 the matrix uplink row in TX
+# 31 checks + 2 x 10 checks = 51. CI runs it under AddressSanitizer + UBSan and under
 # ThreadSanitizer (the mailbox is a cross-thread protocol).
 #
 # Usage: tools/host_test/station/run.sh [OUT_DIR]
@@ -42,7 +45,7 @@ else
   OUT="$(mktemp -d)"
   trap 'rm -rf "$OUT"' EXIT
 fi
-BOARD=(-DARDUINO=10607 -DARDUINO_VENTUNO_Q -DARDUINO_ARCH_ZEPHYR)
+BOARD=(-DARDUINO=10607 -DARDUINO_UNO_Q -DARDUINO_ARCH_ZEPHYR)
 # include/ first: its Arduino_RouterBridge.h and zephyr/ replace the syntax-check stubs.
 INC=(-I"$HERE/include" -I"$HERE" -I"$STUB")
 CXXF=(-std=gnu++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Werror -pthread "${SAN_FLAGS[@]}" "${BOARD[@]}")
