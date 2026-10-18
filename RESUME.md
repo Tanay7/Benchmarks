@@ -47,3 +47,9 @@ Running in parallel (each agent makes its own worktree under .claude/worktrees/,
    -> branches v31-doc-<W>; W1b writes docs/03_part2.fragment.md to splice at "<!-- DOCS03-PART2 -->"
 Then: merge all (fixes first), splice docs/03, regenerate docs/05, docs/13 final pass, reference sweep
 (xrefs/code_refs from writers), CHANGELOG 3.1, refresh counts, all checks + real builds, dist zips, push.
+2026-10-18 ~01:22 UTC: owner at 90 % session usage -> STOPPED the 5 docs workflows (W1a..W9; barely
+started, worktrees .claude/worktrees/doc-* kept and autosaved). The 4 fixers continue
+(wf_801217af-f75 flight+station, wf_8b564b3a-672 sensors+link). Autosave loop
+(scratchpad/backup31/autosave.sh, bg) pushes in-progress work to claude/unoq-31-progress-notes
+every 10 min. On "continue": relaunch the docs workflows with the same script + args (agents resume
+from their worktrees), resume unfinished fixers with resumeFromRunId.

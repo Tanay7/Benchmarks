@@ -56,10 +56,23 @@ index a0c6f33..4dfd1c0 100644
  height or feeders" (at the noise floor the margin's upper bound can still show this);
  margin p10 > target + 9 dB and FER < 1 %: one code faster, if the margin predicted at the
 diff --git a/dssq-groundstation/python/dssq/display/dashboard.html b/dssq-groundstation/python/dssq/display/dashboard.html
-index 609c76a..f44ccf5 100644
+index 609c76a..0280cd3 100644
 --- a/dssq-groundstation/python/dssq/display/dashboard.html
 +++ b/dssq-groundstation/python/dssq/display/dashboard.html
-@@ -1665,7 +1665,9 @@ function renderReceiver() {
+@@ -477,7 +477,11 @@ function ferText(ci, compact) {
+   const n = ci.lost + ci.received, conf = fx(100 * ci.confidence, 0) + " %";
+   const title = "FER " + fpct3(ci.fer) + " = " + ci.lost + " lost of " + n + " frames. Exact (Clopper-Pearson) bounds: one-sided " + conf +
+     " upper bound " + fpct3(ci.one_sided_hi) + "; two-sided " + conf + " [" + fpct3(ci.two_sided_lo) + ", " + fpct3(ci.two_sided_hi) + "]";
+-  const cls = ci.fer > 0.1 ? "bad" : ci.fer > 0.01 ? "warn" : "ok";
++  // amber / red by the point estimate; green only when the frames show FER <= 1 % (the one-sided
++  // upper bound, LS-3): 0 lost of 20 is uncoloured (bound 13.9 %), not green
++  const few = !(ci.fer > 0.01) && !(ci.one_sided_hi <= 0.01);
++  const cls = ci.fer > 0.1 ? "bad" : ci.fer > 0.01 ? "warn" : few ? "" : "ok";
++  if (few) title = "too few frames to show FER ≤ 1 % (one-sided " + conf + " upper bound " + fpct3(ci.one_sided_hi) + "). " + title;
+   if (compact) return {cls: cls, title: title, text: ci.lost === 0 ? "0/" + n + " ≤ " + fpct3(ci.one_sided_hi) : fpct3(ci.fer) + " (" + ci.lost + "/" + n + ")"};
+   return {cls: cls, title: title, text: ci.lost + " of " + n + " lost · " + ferBounds(ci)};
+ }
+@@ -1665,7 +1669,9 @@ function renderReceiver() {
      ["Recommendation", (rec.action || NA) + (rec.value !== undefined ? " " + rec.value : "") + (rec.why ? " — " + rec.why : "")],
      ["Margin p10 (vs " + (rec.sensitivity_basis || "sensitivity") + " " + fu(rec.sensitivity_dbm, 1, "dBm") + ")", (rec.noise_state === "NOISE_FLOOR" ? "≤ " : "") + fu(rec.margin_p10_db, 1, "dB") +
        (rec.noise_state ? " · " + (MSTATE_TEXT[rec.noise_state] || rec.noise_state).split(":")[0] : "")],
