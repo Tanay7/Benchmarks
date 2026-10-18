@@ -1,4 +1,6 @@
 # Resume notes (paused 2026-10-17 ~19:10 UTC for the owner's session limit)
+OWNER RULE (2026-10-18): do NOT launch many agents/workflows without asking first - they use the
+session usage quickly. Before any multi-agent run, say how many agents and roughly how much usage, and wait for a yes.
 NAMING: this folder "v4" is only my internal label for the UNO Q branch contract. The owner's
 "version 4" is the later feature list in ../version4/PLAN.md. Software on both branches still says
 3.0 (flight 3.0, dssq 3.0.0). OWNER DECIDED (2026-10-17): UNO Q branch = 3.1, features = 4.0.

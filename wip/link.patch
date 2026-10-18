@@ -1,7 +1,30 @@
 diff --git a/docs/13_Web_UI_Reference.md b/docs/13_Web_UI_Reference.md
-index a0c6f33..4dfd1c0 100644
+index a0c6f33..56afc70 100644
 --- a/docs/13_Web_UI_Reference.md
 +++ b/docs/13_Web_UI_Reference.md
+@@ -429,11 +429,11 @@ by `renderHeader()` from `/api/state`.
+ | ALARM pill | `alarm`, tooltip `alarm_reasons` | green NONE, amber YELLOW, red RED | the station alarm ([section 15](#15-alarm-logic)); hover to read every reason |
+ | MODE | `decoded.mode` | text | the **spacecraft** flight-software mode from HK `fsw_mode`: BOOT, SAFE, CRUISE, ENCOUNTER, TEST. (The GDS run mode is at the right end.) |
+ | UTC | `utc` | ISO 8601 | the station clock when the snapshot was built; check it against a reference clock: SCET, TDM and latency depend on it (NTP) |
+-| CLOCK | `station_clock.synced` (tooltip: `station_clock.state`, `station_clock.reason`, `station_clock.maxerror_us`, `station_clock.esterror_us`) | green "synced", amber "NOT SYNCED", grey "unknown" | whether the kernel considers the station clock synchronised (D-76, [13.7](#137-gds-health-panel)): NOT SYNCED = the kernel reports TIME_ERROR or STA_UNSYNC (no NTP / chrony / timesyncd discipline, e.g. a board booted without a network); TDM records are refused then ([12.4](#124-tracking-data-messages-and-xtce)). Unknown: the query was refused or is not available (never guessed) |
++| CLOCK | `station_clock.synced` (tooltip: `station_clock.state`, `station_clock.reason`, and `station_clock.maxerror_us`, `station_clock.esterror_us` only while synchronised: [13.7](#137-gds-health-panel)) | green "synced", amber "NOT SYNCED", grey "unknown" | whether the kernel considers the station clock synchronised (D-76, [13.7](#137-gds-health-panel)): NOT SYNCED = the kernel reports TIME_ERROR or STA_UNSYNC (no NTP / chrony / timesyncd discipline, e.g. a board booted without a network); TDM records are refused then ([12.4](#124-tracking-data-messages-and-xtce)). Unknown: the query was refused or is not available (never guessed) |
+ | RSSI | `rx.rf.rssi_dbm`, `rx.rf.rssi_state` | "-111 dBm", at the readings' resolution (1.5); red **OVERLOAD** (tooltip: the warning text) when the newest reading is an overload; **—** during LOS | the newest frame's calibrated packet RSSI as the radio reported it (D-70; the window means are on the RECEIVER tab) ([1.6](#16-the-statistics-windows-explained)). OVERLOAD: the RSSI octet stood at the top of its scale, the signal is too strong to measure ([4.2](#42-rf-now), "RSSI reading") |
+ | SNR | `rx.rf.packet.snr_db`, else `rx.rf.snr_est_db` | SX126x: measured SNR, 2 decimals, "dB"; E22: "dB est." (RSSI - noise of the same pass), whole dB; **—** during LOS | the newest frame's signal-to-noise ratio; during LOS the last value is history, not the link, so it is hidden here (the RECEIVER tab keeps it with its time) |
+ | MARGIN | `rx.rf.margin_worst_est_db` (else `rx.rf.margin_est_db`), `rx.rf.margin_state`; SX126x: `rx.rf.snr_margin_db` | "16 dB": the margin against the **worst-case** sensitivity where the datasheet gives one (E22), coloured red < 3, amber 3-6, green >= 6 dB; "≤ 8 dB" amber at the noise floor (an upper bound, never green); amber at most while the RSSI is not yet checked against a noise reading; "n/a" (red) on an overload; SX126x: "12.25 dB SNR" (measured SNR margin, F-P2-2); **—** during LOS; the tooltip names the basis and the typical-sensitivity margin | the link margin after the noise-floor rule of D-76 ([4.2](#42-rf-now), "Link margin") |
+-| FER 10m | `rx.frames.fer_10m_ci` | "0/178 ≤ 1.67 %" (no frame lost: the one-sided 95 % upper bound) or "1.69 % (3/178)"; colour green / amber > 1 % / red > 10 %; the tooltip holds both the one-sided upper bound and the two-sided 95 % interval | frame error rate over the last 10 minutes of reception (in pass: frames not received while out of view are not lost), with its exact Clopper-Pearson bounds ([4.11](#411-frames)) |
++| FER 10m | `rx.frames.fer_10m_ci` | "0/178 ≤ 1.67 %" (no frame lost: the one-sided 95 % upper bound) or "1.69 % (3/178)"; colour: amber > 1 % and red > 10 % by the FER itself; green only when the frames show FER ≤ 1 % - the one-sided 95 % upper bound at most 1 %, which takes at least 299 frames with none lost - else uncoloured, the tooltip beginning "too few frames to show FER ≤ 1 %" (LS-3: "0/20 ≤ 13.9 %" is not green); the tooltip holds both the one-sided upper bound and the two-sided 95 % interval | frame error rate over the last 10 minutes of reception (in pass: frames not received while out of view are not lost), with its exact Clopper-Pearson bounds ([4.11](#411-frames)) |
+ | FRAMES | `rx.frames.ok`, `rx.frames.lost` | "344 / lost 15" | frames received and frames lost inside the passes (master-channel counter gaps; the counter jump at AOS is `rx.frames.aos_gap_frames`, not lost) |
+ | SCLK | `time.partition`, `time.sclk_estimate_s` | "1/1224" | spacecraft clock: partition (boot counter) / estimated SCLK seconds now ([5.8](#58-time-correlation)) |
+ | COP-1 | `cop.vs`, `cop.nr`, `cop.lockout`, `cop.uplink_blocked`, `cop.suspended`, `cop.outstanding` | "V(S)=4 N(R)=4 OK out=1" | uplink protocol state: next frame number to send, the spacecraft's next expected number, and LOCKOUT / BLOCKED / SUSPENDED / OK ([5.5](#55-cop-1-fop)) |
+@@ -496,7 +496,7 @@ green, the other tabs can wait.
+ | Margin est. (E22) / SNR margin (SX126x) | E22: `rx.rf.margin_worst_est_db` (worst-case sensitivity), "≤ x" (`rx.rf.margin_worst_max_db`) at the noise floor, "n/a" on an overload; SX126x: `rx.rf.snr_margin_db` when there is one | "dB vs worst case -126.0 dBm · typ. x dB"; at the noise floor "dB: not measurable (at the noise floor)"; SX126x "dB SNR margin (measured − required x dB)"; during LOS "LOS · last x dB, t ago"; tooltip `rx.rf.margin_basis` | red < 3 dB, amber 3-6 dB, green >= 6 dB; amber at most at the noise floor and while the RSSI is not checked against a noise reading (`rx.rf.margin_state` NOISE_UNKNOWN); red "n/a" on an overload | how far above the decode threshold the newest frame was, as far as the RSSI can tell (D-76, [4.2](#42-rf-now) "Link margin"); below 3 dB frames start to drop |
+ | Frames | `rx.frames.ok` | "lost n in passes · FER 0/344 ≤ 0.87 %" (`rx.frames.lost`, `rx.frames.fer_ci`); tooltip: both bounds and `rx.frames.aos_gap_frames` | - | frames received and lost since the GDS started, with the FER's exact bounds ([4.11](#411-frames)) |
+ | Throughput | `rx.frames.info_rate_bps`, 1 dp | "bit/s info · n frames/min (60 s)" (`rx.frames.rate_window_s`) | - | useful telemetry bits per second over the rate window max(60 s, 5 frame periods) ([4.11](#411-frames)) |
+-| Frames lost (10 min) (E22) | `rx.frames.fer_10m_ci` (`lost`, `received`) | "0 / 178"; the bounds "FER ≤ 1.67 % (95 %, one-sided) · two-sided 95 % [0, 2.05 %]" | green; amber above 1 %, red above 10 % | the E22 replacement of the RS tile (F-P0-3): the E22 discards CRC-failed packets inside the module, so RS corrections say nothing about the channel there |
++| Frames lost (10 min) (E22) | `rx.frames.fer_10m_ci` (`lost`, `received`) | "0 / 178"; the bounds "FER ≤ 1.67 % (95 %, one-sided) · two-sided 95 % [0, 2.05 %]" | amber above 1 %, red above 10 %; green only when the one-sided 95 % upper bound is ≤ 1 % (≥ 299 frames with none lost), else uncoloured (as the header FER 10m, LS-3) | the E22 replacement of the RS tile (F-P0-3): the E22 discards CRC-failed packets inside the module, so RS corrections say nothing about the channel there |
+ | RS decoder (SX126x) | `rx.decoder.symbols_corrected` | "sym corrected · uncorrectable n · rescued n" (`rx.decoder.rs_rescued`) | amber when any codeblock was uncorrectable | how hard the error correction works on CRC-failed LoRa packets ([4.10](#410-decoder)) |
+ | S/C mode | `decoded.mode` | "beacon <name> · FDIR <number of active flags>" | - | spacecraft mode, beacon level and active fault-protection flags |
+ | Bus temperature | `tlm.HK.values.bus_temp`, 2 dp | "°C (Nicla Sense ME BME688)" | amber on a YELLOW or RED limit | spacecraft bus temperature ([7.3](#73-housekeeping-hk-all-43-fields)) |
 @@ -719,7 +719,7 @@ checks in [4.6](#46-radio-configuration).
  | Shown as | "Signal power est. (noise removed)" |
  | Key | `rx.rf.pr_est_dbm` |
@@ -34,7 +57,23 @@ index a0c6f33..4dfd1c0 100644
  | Updates | every reception |
  | This hardware | at the LoRa demodulator limit every profile needs about 6.0 to 6.3 dB (SNRmin + 10 log10(B) - 10 log10(Rb)); SF12 profiles 6.30 dB |
  | Meaning | energy per bit relative to the noise density: the figure coding textbooks use |
-@@ -1394,14 +1394,17 @@ Keys `linkmgr` and `rx.events`.
+@@ -1275,7 +1275,7 @@ throughput. Key prefix `rx.frames`.
+ |---|---|---|---|---|
+ | Frames OK / lost (inside passes) | `rx.frames.ok`, `rx.frames.lost` | counts | lost = gaps in the master-channel frame count (TM MCFC, mod 256) or, for USLP, in each VC's frame count, inside the passes (F-P0-4) | - |
+ | Not received while out of view (AOS counter jumps, mod 256: not lost) | `rx.frames.aos_gap_frames` | count | the frame-count jump of every AOS frame: frames the spacecraft sent while out of view, or a reboot; modulo 256, so not even a count of them. Until schema 3 it was added to `lost` and the FER, which made the lifetime FER a function of the gap length mod 256 | - |
+-| Frame error rate since the GDS started (in passes) | `rx.frames.fer`, `rx.frames.fer_ci` | "n of N lost · FER x % · two-sided 95 % [lo, hi]", or with no frame lost "0 of N lost · FER ≤ u % (95 %, one-sided) · two-sided 95 % [0, hi]"; green <= 1 %, amber > 1 %, red > 10 % | FER = lost / (ok + lost); `fer_ci` = `rxstats.fer_block()`: `lost`, `received`, `fer`, `confidence` (0.95), `two_sided_lo`, `two_sided_hi`, `one_sided_hi` - the exact Clopper-Pearson bounds of the binomial proportion (Beta quantiles, pure Python; at zero losses the one-sided bound 1 - 0.05^(1/N), about 3/N, the "rule of three") | a FER from a few frames is not a precise number: read the bounds |
++| Frame error rate since the GDS started (in passes) | `rx.frames.fer`, `rx.frames.fer_ci` | "n of N lost · FER x % · two-sided 95 % [lo, hi]", or with no frame lost "0 of N lost · FER ≤ u % (95 %, one-sided) · two-sided 95 % [0, hi]"; amber > 1 %, red > 10 %; green only when the one-sided 95 % upper bound is <= 1 % (at least 299 frames with none lost), else uncoloured with the tooltip "too few frames to show FER ≤ 1 %" (LS-3) | FER = lost / (ok + lost); `fer_ci` = `rxstats.fer_block()`: `lost`, `received`, `fer`, `confidence` (0.95), `two_sided_lo`, `two_sided_hi`, `one_sided_hi` - the exact Clopper-Pearson bounds of the binomial proportion (Beta quantiles, pure Python; at zero losses the one-sided bound 1 - 0.05^(1/N), about 3/N, the "rule of three") | a FER from a few frames is not a precise number: read the bounds |
+ | Frame error rate, last 10 min of reception | `rx.frames.fer_10m`, `rx.frames.fer_10m_ci` | as above | the same over the last 600 s of reception; the header "FER 10m" and the OVERVIEW E22 tile | > 10 % makes the link manager recommend a slower rate |
+ | Idle (OID) frames | `rx.frames.oid_frames`, `rx.frames.idle_frame_pct` | count (%) | frames carrying only the idle / identification data; % = 100 x OID / OK | high when the spacecraft has little to send |
+ | Channel efficiency (packet / data-field octets) | `rx.frames.channel_efficiency_pct` | % | 100 x octets of real packets delivered / data-field octets of the data-VC frames received | low = frames padded with idle packets |
+@@ -1388,20 +1388,23 @@ Keys `linkmgr` and `rx.events`.
+ 
+ | Shown as | Key | Meaning |
+ |---|---|---|
+-| Mode | `linkmgr.mode` | OFF, ADVISE (recommendation only, default) or AUTO (executes it with the coordinated LINKRATE procedure; needs the station radio control path); set with the directive `LINKMGR OFF\|ADVISE\|AUTO` |
++| Mode | `linkmgr.mode` | OFF, ADVISE (recommendation only, default) or AUTO (executes it with the coordinated LINKRATE procedure; needs the station radio control path); set with the directive `LINKMGR OFF\|ADVISE\|AUTO`. OFF clears the recommendation (no evaluation runs then, so its last one would be stale) |
+ | Executable | `linkmgr.executable`, `linkmgr.why_not` | "yes (radio control path present)" or "advice only: LINKRATE needs the Radio Control Unit (station UNO Q MCU D2/D3/D7 wired to the E22 M0/M1/AUX, [gds] rcu = true): the link manager only advises" (F-P1-6): with the shipped `[gds] rcu = false` a recommendation cannot be executed |
+ | Target margin | `linkmgr.target_margin_db` | `[linkmgr] target_margin_db` (default 6 dB) |
  | Evaluation window | `linkmgr.recommendation.window_s` | W = max(600 s, 10 x the longest expected frame period) (F-P1-1): at the slow SX126x profiles 10 minutes hold fewer than the 10 frames needed |
  | Recommendation | `linkmgr.recommendation` (`action`; `value` and `why` when there is a proposal or a reason to give) | NONE or "LINKRATE n", with the reason; null before the first evaluation |
  | Margin p10 (vs worst case / typical S) | `linkmgr.recommendation.margin_p10_db`, `linkmgr.recommendation.sensitivity_dbm`, `linkmgr.recommendation.sensitivity_basis`, `linkmgr.recommendation.noise_state`, `linkmgr.recommendation.rssi_p10_dbm`, `linkmgr.recommendation.noise_mean_dbm` | 10th-percentile RSSI of the window minus the sensitivity - the worst case where the datasheet gives one (D-76) - after the noise-floor rule applied to the p10 and the window's noise mean ("≤" at the noise floor: an upper bound), rounded to 0.1 dB |
@@ -55,11 +94,101 @@ index a0c6f33..4dfd1c0 100644
  one code slower (more sensitive), or at the slowest usable code "improve the antennas,
  height or feeders" (at the noise floor the margin's upper bound can still show this);
  margin p10 > target + 9 dB and FER < 1 %: one code faster, if the margin predicted at the
+@@ -1425,9 +1428,9 @@ allowed channel. Use it to choose the quietest allowed channel before a pass (th
+ 
+ | Item | Key | Meaning |
+ |---|---|---|
+-| ground bars | `radio.last_scan` (`t`, `first`, `noise`, `quietest`, `quietest_allowed`, `duration_s`, `home`, `home_restored`, `calibrated`) | noise per channel in dBm from `first`, calibrated with `rssi_cal_offset_db`; quietest channel overall and among the allowed ones; the scan takes the radio off the operational channel for `duration_s` (the station is deaf meanwhile) and returns to `home`, the station's operational channel (including a change the MCU has only queued); `home_restored` false: the return failed 3 times (`SURVEY_RESTORE_TRIES`) and an ERROR event is raised. An SX126x station then re-sends its configuration every 5 s until the MCU accepts it, and every uplink is held meanwhile, reported as `tx_hold` in the `radio.sx126x` snapshot block ([4.13](#413-sx126x-station-mcu)); the ERROR reads "ground RF survey: the station radio did not return to CH<n> - it may be receiving on a surveyed channel; every uplink is held (radio.sx126x.tx_hold) until the MCU reports CH<n> again, and the station configuration is re-sent until the MCU accepts it" (E22: "... - it may be receiving and transmitting on a surveyed channel; check it with RADIO"). `home_restored` describes the survey only: it stays false after the station has repaired itself, until the next survey |
++| ground bars | `radio.last_scan` (`t`, `first`, `noise`, `quietest`, `quietest_allowed`, `duration_s`, `home`, `home_restored`, `calibrated`, `rejected`) | noise per channel in dBm from `first`, calibrated with `rssi_cal_offset_db`; quietest channel overall and among the allowed ones. A reading that is no noise power (D-76, as in the RECEIVER noise floor: an E22 noise octet at the end of its range, 0x00 = -256 dBm or 0xFF = -1 dBm, or any reading below -160 dBm) is null in `noise`, draws no bar, is no candidate for the quietest channel and is named in `radio.last_scan.rejected` ({"<channel>": "OVERLOAD" \| "INVALID"}; empty when none), in the note line and in the GSCAN event ("CH21 OVERLOAD (no noise power)") (LS-5); the scan takes the radio off the operational channel for `duration_s` (the station is deaf meanwhile) and returns to `home`, the station's operational channel (including a change the MCU has only queued); `home_restored` false: the return failed 3 times (`SURVEY_RESTORE_TRIES`) and an ERROR event is raised. An SX126x station then re-sends its configuration every 5 s until the MCU accepts it, and every uplink is held meanwhile, reported as `tx_hold` in the `radio.sx126x` snapshot block ([4.13](#413-sx126x-station-mcu)); the ERROR reads "ground RF survey: the station radio did not return to CH<n> - it may be receiving on a surveyed channel; every uplink is held (radio.sx126x.tx_hold) until the MCU reports CH<n> again, and the station configuration is re-sent until the MCU accepts it" (E22: "... - it may be receiving and transmitting on a surveyed channel; check it with RADIO"). `home_restored` describes the survey only: it stays false after the station has repaired itself, until the next survey |
+ | spacecraft dots | `tlm.RFSCAN.values` (`first_ch`, `count`, `duration_ms`, `noise`) | the spacecraft's survey (downlink paused while it runs); whole-dB noise per channel |
+-| note line | - | "GSCAN <time>: quietest CHn, quietest allowed CHm, d s · RFSCAN CHa..CHb in t ms" |
++| note line | - | "GSCAN <time>: quietest CHn, quietest allowed CHm, d s[; rejected (no noise power): CHk OVERLOAD] · RFSCAN CHa..CHb in t ms" |
+ 
+ Example (simulator): GSCAN CH20-24 in 0.9 s: -119, -109, -117, -118, -100 dBm; quietest
+ CH20 (allowed). RFSCAN CH20..CH29 in 2500 ms: -118, -109, -117, -118, -99, -117, -118, -117,
+@@ -3141,7 +3144,7 @@ description), the COP-1 directives (BC) and the ground directives (GDS), from
+ | Stage errors: <stage> | `health.stage_errors` | failures per Runner stage (register, radio_read, ingest, packets, outbox, jobs, afc, tdm, housekeeping, console); each is caught, counted, logged at most once a minute (WARN, source GDS) and the loop continues; YELLOW alarm for 60 s after one |
+ | Last stage error | `health.last_error` (`stage`, `text`, `t`) | the newest failure; report it (with the log) |
+ | Station clock (kernel) | `station_clock.synced`, `station_clock.state`, `station_clock.reason` | "synced (TIME_OK)" green, "NOT SYNCED (TIME_ERROR: TIME_ERROR and STA_UNSYNC)" amber, "unknown (<reason>)" grey; see "Station clock" below |
+-| Station clock maximum / estimated error | `station_clock.maxerror_us`, `station_clock.esterror_us` | the kernel's maximum and estimated error of the clock, shown in ms ("(kernel)") |
++| Station clock maximum / estimated error | `station_clock.maxerror_us`, `station_clock.esterror_us` | the kernel's maximum and estimated error of the clock, shown in ms ("(kernel)") only while it is synchronised; unsynchronised "n/a (not synchronised: the kernel gives no bound)" (LS-4: the kernel then reports its 16 s ceiling, below), unknown "—" |
+ | Station clock checked | `station_clock.checked_t`, `station_clock.refresh_s` | when the GDS last asked the kernel ("every 10 s") |
+ | TDM records refused (station clock or out-of-range value) | `health.tdm_rejected` | records the TDM recorder or the GDS refused: a station time outside 2000-2100, a measurement outside the TDM limits, or an unsynchronised station clock |
+ | of them: station clock not synchronised | `health.tdm_rejected_clock` | records refused because the kernel reported the station clock not synchronised (D-76) |
+@@ -3159,7 +3162,7 @@ snapshot reads the cached answer).
+ | `station_clock.synced` | true: the kernel state is not TIME_ERROR and STA_UNSYNC (0x0040) is clear; false: TIME_ERROR or STA_UNSYNC (no NTP / chrony / timesyncd discipline, e.g. the board booted without a network); null: unknown - no libc function, the call failed (a sandbox may refuse it) or not Linux, never guessed |
+ | `station_clock.state` | the kernel's clock state: TIME_OK, TIME_INS, TIME_DEL, TIME_OOP, TIME_WAIT or TIME_ERROR |
+ | `station_clock.sta_unsync` | the STA_UNSYNC status bit |
+-| `station_clock.maxerror_us`, `station_clock.esterror_us` | the kernel's maximum and estimated error, microseconds (Linux adjtimex(2)) |
++| `station_clock.maxerror_us`, `station_clock.esterror_us` | the kernel's maximum and estimated error, microseconds (Linux adjtimex(2)). They bound the clock only while it is synchronised: without a discipline the kernel caps the maximum error at its 16 s ceiling (NTP_PHASE_LIMIT, 16 000 000 µs) and sets STA_UNSYNC, and starts both values there, so an unsynchronised clock - for example a time restored from the last shutdown - can be hours or days off although the kernel says 16 s. The page shows them only when `station_clock.synced` is true (LS-4) |
+ | `station_clock.reason` | why it is not synchronised ("TIME_ERROR and STA_UNSYNC") or why it is unknown; null when synchronised |
+ | `station_clock.checked_t` | when the kernel was last asked (null: not yet) |
+ | `station_clock.refresh_s` | 10 s (`clocksync.REFRESH_S`) |
+@@ -3317,7 +3320,7 @@ configured). Request limits and the security headers: [17_Security_Model.md](17_
+ | `dssq_sync_<key>` | the frame synchronizer counters of `sync` (asm_found, slips, lock_losses, discarded_octets, ...: the E22's real link-integrity counters) |
+ | `dssq_serial_<key>` | `rx.serial` (octets, octets_per_s, noise_queries, noise_replies) |
+ | `dssq_radio_link_connected`, `dssq_station_io_connected` | `rx.radio_link.connected`, `station_io.connected` |
+-| `dssq_linkmgr_margin_p10_db`, `dssq_linkmgr_executable` | `linkmgr.recommendation.margin_p10_db`, `linkmgr.executable` |
++| `dssq_linkmgr_margin_p10_db`, `dssq_linkmgr_margin_p10_max_db`, `dssq_linkmgr_executable` | `linkmgr.recommendation.margin_p10_db`: as `dssq_linkmgr_margin_p10_db` unless `linkmgr.recommendation.noise_state` is NOISE_FLOOR, where the value is only the upper bound noise - S and is exported as `dssq_linkmgr_margin_p10_max_db` instead (LS-6); neither after `LINKMGR OFF` (the recommendation is cleared); `linkmgr.executable` |
+ | `dssq_station_clock_synced` | `station_clock.synced`: 1 synchronised, 0 not; absent while unknown (D-76) |
+ | `dssq_beacon_level`, `dssq_alarm_level` (0 NONE, 1 YELLOW, 2 RED), `dssq_uptime_s` | top level |
+ | `dssq_sdls_<key>` | numeric `link.sdls` values |
 diff --git a/dssq-groundstation/python/dssq/display/dashboard.html b/dssq-groundstation/python/dssq/display/dashboard.html
-index 609c76a..f44ccf5 100644
+index 609c76a..9b115ee 100644
 --- a/dssq-groundstation/python/dssq/display/dashboard.html
 +++ b/dssq-groundstation/python/dssq/display/dashboard.html
-@@ -1665,7 +1665,9 @@ function renderReceiver() {
+@@ -475,9 +475,13 @@ function ferBounds(ci) {
+ function ferText(ci, compact) {
+   if (!ferOk(ci)) return {text: NA, title: "no frame in the window", cls: ""};
+   const n = ci.lost + ci.received, conf = fx(100 * ci.confidence, 0) + " %";
+-  const title = "FER " + fpct3(ci.fer) + " = " + ci.lost + " lost of " + n + " frames. Exact (Clopper-Pearson) bounds: one-sided " + conf +
++  let title = "FER " + fpct3(ci.fer) + " = " + ci.lost + " lost of " + n + " frames. Exact (Clopper-Pearson) bounds: one-sided " + conf +
+     " upper bound " + fpct3(ci.one_sided_hi) + "; two-sided " + conf + " [" + fpct3(ci.two_sided_lo) + ", " + fpct3(ci.two_sided_hi) + "]";
+-  const cls = ci.fer > 0.1 ? "bad" : ci.fer > 0.01 ? "warn" : "ok";
++  // amber / red by the point estimate; green only when the frames show FER <= 1 % (the one-sided
++  // upper bound, LS-3): 0 lost of 20 is uncoloured (bound 13.9 %), not green
++  const few = !(ci.fer > 0.01) && !(ci.one_sided_hi <= 0.01);
++  const cls = ci.fer > 0.1 ? "bad" : ci.fer > 0.01 ? "warn" : few ? "" : "ok";
++  if (few) title = "too few frames to show FER ≤ 1 % (one-sided " + conf + " upper bound " + fpct3(ci.one_sided_hi) + "). " + title;
+   if (compact) return {cls: cls, title: title, text: ci.lost === 0 ? "0/" + n + " ≤ " + fpct3(ci.one_sided_hi) : fpct3(ci.fer) + " (" + ci.lost + "/" + n + ")"};
+   return {cls: cls, title: title, text: ci.lost + " of " + n + " lost · " + ferBounds(ci)};
+ }
+@@ -503,11 +507,14 @@ function marginView(rf) {
+   return {v: fres(w, "db"), cls: cls, sub: "dB vs " + sens + (worst ? " · typ. " + fres(rf.margin_est_db, "db") + " dB" : ""),
+     title: (rf.margin_basis || "") + (worst ? "; typical sensitivity " + fu(rf.sensitivity_dbm, 1, "dBm") : "")};
+ }
++// The kernel's maximum / estimated error bound the clock only while it is synchronised: unsynchronised,
++// both sit at the kernel's 16 s ceiling (NTP_PHASE_LIMIT), which is no bound (LS-4, D-76).
++const CLOCK_NO_BOUND = "n/a (not synchronised: the kernel gives no bound)";
+ function clockView(ck) {
+   ck = ck || {};
+-  const err = num(ck.maxerror_us) ? "; kernel maximum error " + fx(ck.maxerror_us / 1000, 0) + " ms, estimated " + fx(ck.esterror_us / 1000, 0) + " ms" : "";
++  const err = ck.synced === true && num(ck.maxerror_us) ? "; kernel maximum error " + fx(ck.maxerror_us / 1000, 0) + " ms, estimated " + fx(ck.esterror_us / 1000, 0) + " ms" : "";
+   if (ck.synced === true) return {text: "synced", cls: "ok", title: "kernel: " + (ck.state || NA) + err};
+-  if (ck.synced === false) return {text: "NOT SYNCED", cls: "warn", title: "kernel: " + (ck.reason || ck.state || NA) + err + " - TDM records are refused until it is (check NTP)"};
++  if (ck.synced === false) return {text: "NOT SYNCED", cls: "warn", title: "kernel: " + (ck.reason || ck.state || NA) + "; maximum error " + CLOCK_NO_BOUND + " - TDM records are refused until it is (check NTP)"};
+   return {text: "unknown", cls: "dim", title: "station clock state unknown: " + (ck.reason || NA)};
+ }
+ // text + colour class + tooltip of a header value
+@@ -1497,11 +1504,14 @@ function renderReceiver() {
+   const nch = 84, gnd = new Array(nch).fill(null), scn = new Array(nch).fill(null);
+   if (ls && Array.isArray(ls.noise)) ls.noise.forEach((v, i) => { if (ls.first + i < nch) gnd[ls.first + i] = v; });
+   if (scv && Array.isArray(scv.noise)) scv.noise.forEach((v, i) => { if (scv.first_ch + i < nch && num(v)) scn[scv.first_ch + i] = v; });
+-  const allowed = R.allowed_channels || [];
++  const allowed = R.allowed_channels || [], rej = (ls && ls.rejected) || {};
+   barChart("rx-scan", {labels: [...Array(nch).keys()], lo: -130, hi: -50, unit: "dBm", marks: allowed, xTitle: "CH", every: 4,
+     sets: [{name: "ground GSCAN", v: gnd, color: COL.s1}, {name: "spacecraft RFSCAN", v: scn, color: COL.s2, dots: true}],
+-    extra: i => ["f = " + (410.125 + i).toFixed(3) + " MHz" + (allowed.includes(i) ? " (allowed)" : "")]});
+-  setText("rx-scan-note", (ls ? "GSCAN " + iso(ls.t) + ": quietest CH" + ls.quietest + ", quietest allowed CH" + ls.quietest_allowed + ", " + fu(ls.duration_s, 2, "s")
++    extra: i => ["f = " + (410.125 + i).toFixed(3) + " MHz" + (allowed.includes(i) ? " (allowed)" : "") + (rej[i] ? " · GSCAN " + rej[i] + ": no noise power (no bar)" : "")]});
++  // LS-5 (D-76): an end-of-range noise octet (or < −160 dBm) is no noise power: no bar, named here
++  const rejText = Object.entries(rej).map(([ch, c]) => "CH" + ch + " " + c).join(", ");
++  setText("rx-scan-note", (ls ? "GSCAN " + iso(ls.t) + ": quietest CH" + ls.quietest + ", quietest allowed CH" + ls.quietest_allowed + ", " + fu(ls.duration_s, 2, "s") +
++                           (rejText ? "; rejected (no noise power): " + rejText : "")
+     : "no ground survey (GSCAN" + (!sx && !R.rcu ? ": needs the Radio Control Unit, [gds] rcu = false)" : ")")) +
+           " · " + (scv ? "RFSCAN CH" + scv.first_ch + "..CH" + (scv.first_ch + scv.count - 1) + " in " + fint(scv.duration_ms, "ms") : "no spacecraft survey (RFSCAN)"));
+   // ---- radio configuration
+@@ -1665,7 +1675,9 @@ function renderReceiver() {
      ["Recommendation", (rec.action || NA) + (rec.value !== undefined ? " " + rec.value : "") + (rec.why ? " — " + rec.why : "")],
      ["Margin p10 (vs " + (rec.sensitivity_basis || "sensitivity") + " " + fu(rec.sensitivity_dbm, 1, "dBm") + ")", (rec.noise_state === "NOISE_FLOOR" ? "≤ " : "") + fu(rec.margin_p10_db, 1, "dB") +
        (rec.noise_state ? " · " + (MSTATE_TEXT[rec.noise_state] || rec.noise_state).split(":")[0] : "")],
@@ -70,6 +199,77 @@ index 609c76a..f44ccf5 100644
      ["Rate limits", (L2.rate_limits || []).join("..")], ["Hold-off", fu(L2.holdoff_s, 0, "s")]]);
    logLines("rx-events", (rx.events || []).slice().reverse(), e => h("div", {cls: e.event === "LOS" ? "warn" : "ok", text: iso(e.t) + " " + e.event + (e.duration_s !== undefined ? " (" + dur(e.duration_s) + ")" : "")}));
  }
+@@ -2345,7 +2357,7 @@ function clockRows(ck) {
+   ck = ck || {};
+   const v = clockView(ck);
+   return [["Station clock (kernel)", V(v.text + (ck.state ? " (" + ck.state + (ck.reason ? ": " + ck.reason : "") + ")" : ck.reason ? " (" + ck.reason + ")" : ""), v.cls)],
+-    ["Station clock maximum / estimated error", num(ck.maxerror_us) ? fu(ck.maxerror_us / 1000, 0, "ms") + " / " + fu(ck.esterror_us / 1000, 0, "ms") + " (kernel)" : NA],
++    ["Station clock maximum / estimated error", ck.synced === false ? CLOCK_NO_BOUND : ck.synced === true && num(ck.maxerror_us) ? fu(ck.maxerror_us / 1000, 0, "ms") + " / " + fu(ck.esterror_us / 1000, 0, "ms") + " (kernel)" : NA],
+     ["Station clock checked", num(ck.checked_t) ? iso(ck.checked_t) + " (every " + fu(ck.refresh_s, 0, "s") + ")" : "not yet"]];
+ }
+ function renderDictTable() {
+diff --git a/dssq-groundstation/python/dssq/display/web.py b/dssq-groundstation/python/dssq/display/web.py
+index f39b197..de9c908 100644
+--- a/dssq-groundstation/python/dssq/display/web.py
++++ b/dssq-groundstation/python/dssq/display/web.py
+@@ -415,7 +415,13 @@ def prometheus(s: Mapping[str, Any]) -> str:
+     p.gauge("radio_link_connected", (rx.get("radio_link") or {}).get("connected"),
+             "1 = the station radio backend is connected (serial port open / bridge up)")
+     rec = (s.get("linkmgr") or {}).get("recommendation") or {}
+-    p.gauge("linkmgr_margin_p10_db", rec.get("margin_p10_db"), "link manager: p10 margin of its last evaluation")
++    # D-76 (LS-6): at the noise floor the link manager's p10 margin is only an upper bound
++    # (noise - S): exported under its own name, never as a measured margin
++    bound = rec.get("noise_state") == "NOISE_FLOOR"
++    p.gauge("linkmgr_margin_p10_db", None if bound else rec.get("margin_p10_db"),
++            "link manager: p10 margin of its last evaluation (absent at the noise floor)")
++    p.gauge("linkmgr_margin_p10_max_db", rec.get("margin_p10_db") if bound else None,
++            "link manager: upper bound noise - S of the p10 margin at the noise floor (not measurable)")
+     p.gauge("linkmgr_executable", (s.get("linkmgr") or {}).get("executable"),
+             "1 = the GDS can execute a LINKRATE (radio control path present)")
+     p.gauge("station_io_connected", (s.get("station_io") or {}).get("connected"),
+diff --git a/dssq-groundstation/python/dssq/gds.py b/dssq-groundstation/python/dssq/gds.py
+index 9a7d5c3..1dc9370 100644
+--- a/dssq-groundstation/python/dssq/gds.py
++++ b/dssq-groundstation/python/dssq/gds.py
+@@ -1423,6 +1423,8 @@ class GroundStation:
+             if len(toks) != 2 or toks[1].upper() not in ("OFF", "ADVISE", "AUTO"):
+                 return {"status": "REJECTED", "message": "usage: LINKMGR OFF|ADVISE|AUTO"}
+             self.link_mgr.mode = toks[1].upper()
++            if self.link_mgr.mode == "OFF":           # no evaluation runs: its last one is no longer news (LS-6)
++                self.link_mgr.recommendation = None
+             self.event("INFO", "LINK", f"link manager -> {self.link_mgr.mode} ({source})")
+             return {"status": "OK", "message": f"link manager {self.link_mgr.mode}"}
+         if d in ("SPECREF", "SPECLIB"):
+@@ -1819,6 +1821,18 @@ class GroundStation:
+             res = rm.survey(arg[0], arg[1], home=home)
+             with self.lock:
+                 if res:
++                    # D-76 (LS-5): an E22 noise octet at the end of its range, or a reading below
++                    # -160 dBm, is no noise power (rxstats.classify_rssi, as on_noise_octet): it
++                    # is recorded in `rejected` and is no candidate for the quietest channel
++                    # (0x00 reads -256 dBm: the busiest channel would rank first).
++                    res["rejected"] = {}
++                    for i, n in enumerate(res["noise"]):
++                        c = rxs.classify_rssi(n, not rm.packet)
++                        if c not in (None, "OK"):
++                            res["rejected"][str(arg[0] + i)] = c
++                            res["noise"][i] = None
++                    valid = [(n, arg[0] + i) for i, n in enumerate(res["noise"]) if n is not None]
++                    res["quietest"] = min(valid)[1] if valid else None
+                     # The survey reads the raw radio (E22 register / SX126x RSSI median): calibrated
+                     # here like every other noise reading ([radio] rssi_cal_offset_db), so the
+                     # bars compare with the RECEIVER noise floor. The ordering is unchanged.
+@@ -1827,8 +1841,9 @@ class GroundStation:
+                     allowed = [(n, arg[0] + i) for i, n in enumerate(res["noise"])
+                                if n is not None and arg[0] + i in self.allowed_channels]
+                     res["quietest_allowed"] = min(allowed)[1] if allowed else None
++                    rej = "".join(f", CH{ch} {c} (no noise power)" for ch, c in res["rejected"].items())
+                     self.event("INFO", "RADIO", f"ground RF survey CH{arg[0]}-{arg[1]} in {res['duration_s']:.1f} s: "
+-                               f"quietest CH{res['quietest']}, quietest allowed CH{res['quietest_allowed']}")
++                               f"quietest CH{res['quietest']}, quietest allowed CH{res['quietest_allowed']}{rej}")
+                     if not res["home_restored"]:
+                         self.event("ERROR", "RADIO", f"ground RF survey: the station radio did not return to "
+                                    f"CH{home} - " + (
 diff --git a/dssq-groundstation/python/dssq/linkmgr.py b/dssq-groundstation/python/dssq/linkmgr.py
 index f89407c..93da819 100644
 --- a/dssq-groundstation/python/dssq/linkmgr.py
@@ -154,7 +354,7 @@ index 7523e61..9367bc5 100644
          ferr_med, ferr_state = self.freq_state()
          pkts = self.packets_ok + self.packets_crc_fail
 diff --git a/tests/test_link_legitimacy.py b/tests/test_link_legitimacy.py
-index e50e578..88499a1 100644
+index e50e578..69b51f0 100644
 --- a/tests/test_link_legitimacy.py
 +++ b/tests/test_link_legitimacy.py
 @@ -173,6 +173,30 @@ def test_noise_pairs_only_within_the_pass():
@@ -188,6 +388,64 @@ index e50e578..88499a1 100644
  def test_overload_and_invalid_readings_stay_out_of_every_statistic():
      r = _rx()
      r.on_noise(-118.0, T0)
+@@ -339,3 +363,57 @@ def test_apid_sequence_baseline_restarts_with_the_pass(tmp_path):
+     st = gs.apid_stats[0x010]
+     assert (st["lost"], st["seq_gaps"], st["aos_gap_packets"]) == (1, 1, 896)
+     assert st["iat_s"] == pytest.approx(1.0 + 0.2 * (2.0 - 1.0) + 0.2 * (10.0 - 1.2))   # the LOS gap is no IAT
++
++
++class _SurveyRm:
++    """A RadioManager stand-in whose survey reads the given raw noise values (dBm, as
++    RadioManager.survey returns them: E22 -(256 - octet), uncalibrated)."""
++
++    def __init__(self, raw, packet=False):
++        self.raw, self.packet, self.survey_refused, self.last_scan = raw, packet, None, None
++
++    def survey(self, first, last, home=None):
++        noise = list(self.raw)
++        valid = [(n, first + i) for i, n in enumerate(noise) if n is not None]
++        self.last_scan = {"t": T0, "first": first, "noise": noise, "quietest": min(valid)[1] if valid else None,
++                          "duration_s": 0.9, "home": home, "home_restored": True}
++        return self.last_scan
++
++
++def test_ground_survey_rejects_end_of_range_noise_octets(tmp_path):
++    """LS-5 (D-76): an E22 noise octet 0x00 (-256 dBm) or 0xFF (-1 dBm) is no noise power, as
++    in rxstats.on_noise_octet: the GSCAN keeps it out of the bars and of the quietest channel
++    (it ranked the busiest channel first) and names it; the SX126x has no such octet."""
++    gs = _gs(tmp_path, rssi_cal_offset_db=-2.0)                                    # allowed CH20-24
++    rm = _SurveyRm([-96.0, -256.0, -100.0, -1.0, -98.0, -170.0])                   # CH20..CH25
++    gs._run_job(rm, "GSCAN", (20, 25))
++    scan = rm.last_scan
++    assert scan["noise"] == [-98.0, None, -102.0, None, -100.0, None]
++    assert scan["rejected"] == {"21": "OVERLOAD", "23": "OVERLOAD", "25": "INVALID"}
++    assert (scan["quietest"], scan["quietest_allowed"]) == (22, 22)
++    ev = [e["text"] for e in gs.events if e["text"].startswith("ground RF survey")][-1]
++    assert "quietest CH22, quietest allowed CH22, CH21 OVERLOAD (no noise power)" in ev
++    sx = _SurveyRm([-117.5, -1.0, -256.0], packet=True)                            # SX126x: readings, not octets
++    gs._run_job(sx, "GSCAN", (20, 22))
++    assert sx.last_scan["rejected"] == {"22": "INVALID"} and sx.last_scan["noise"] == [-119.5, -3.0, None]
++    assert sx.last_scan["quietest"] == 20
++
++
++def test_link_manager_noise_floor_bound_is_no_p10_margin_on_metrics(tmp_path):
++    """LS-6 (D-76): at the noise floor the link manager's p10 margin is only the upper bound
++    noise - S: /metrics exports it as dssq_linkmgr_margin_p10_max_db, never as the p10 margin;
++    LINKMGR OFF clears the recommendation, so no stale gauge stays exported."""
++    def metrics(rec):
++        return web.prometheus({"linkmgr": {"recommendation": rec}})
++    text = metrics({"margin_p10_db": 7.8, "noise_state": "NOISE_FLOOR"})
++    assert "dssq_linkmgr_margin_p10_db" not in text and "\ndssq_linkmgr_margin_p10_max_db 7.8\n" in text
++    for state in ("SIGNAL", "NEAR_NOISE", "NOISE_UNKNOWN"):
++        text = metrics({"margin_p10_db": 12.0, "noise_state": state})
++        assert "\ndssq_linkmgr_margin_p10_db 12.0\n" in text and "dssq_linkmgr_margin_p10_max_db" not in text
++    gs = _gs(tmp_path)
++    gs.link_mgr.recommendation = {"action": "NONE", "margin_p10_db": 7.8, "noise_state": "NOISE_FLOOR"}
++    assert gs.submit_command("LINKMGR ADVISE")["status"] == "OK" and gs.link_mgr.recommendation is not None
++    assert gs.submit_command("LINKMGR OFF")["status"] == "OK"
++    s = json_safe(gs.snapshot())
++    assert s["linkmgr"]["mode"] == "OFF" and s["linkmgr"]["recommendation"] is None
++    assert "dssq_linkmgr_margin_p10" not in web.prometheus(s)
 diff --git a/tests/test_radio.py b/tests/test_radio.py
 index 9b62ec7..3534790 100644
 --- a/tests/test_radio.py
@@ -223,3 +481,53 @@ index 9b62ec7..3534790 100644
  # ================================================== automatic frequency control (24.8)
  # Limits recomputed here from the documents: SX1261/2 DS rev 2.2 Table 3-8 FERR_L = +-25 % of
  # BW, at SF12 also +-50 ppm, the tighter applying; Table 6-1 SF12 demodulator SNR -20 dB.
+diff --git a/tests/test_web.py b/tests/test_web.py
+index 9203730..4bebe0f 100644
+--- a/tests/test_web.py
++++ b/tests/test_web.py
+@@ -876,6 +876,9 @@ def test_dashboard_shows_only_what_the_receiver_can_measure(sim_station, tmp_pat
+     assert got["h-rssi"] == ["OVERLOAD", "bad"] and "-256" not in got["rx-now"][0].split("reads")[0]
+     assert "too strong to measure" in got["ov-tiles"][0] and got["h-margin"][0] == "n/a"
+     assert got["h-clock"] == ["NOT SYNCED", "warn"] and "TIME_ERROR" in got["cm-health"][0]
++    # LS-4: unsynchronised, the kernel's 16 s ceiling is no bound and is not shown as one
++    assert "16000 ms" not in got["cm-health"][0]
++    assert "maximum / estimated errorn/a (not synchronised: the kernel gives no bound)" in got["cm-health"][0]
+     assert got["h-fer"][0] == "0/178 ≤ 1.67 %"
+     assert "≤ 1.67 % (95 %, one-sided) · two-sided 95 % [0, 2.05 %]" in got["rx-frames"][0]
+     assert "not configured" in got["ls-time"][0]
+@@ -891,7 +894,11 @@ def test_dashboard_shows_only_what_the_receiver_can_measure(sim_station, tmp_pat
+     st["rx"]["rf"].update(margin_state="NOISE_UNKNOWN", margin_worst_est_db=30.0, margin_est_db=32.0)
+     assert _render(tmp_path, st, sci, ids)["h-margin"] == ["30 dB", "warn"]
+     st["rx"]["rf"]["margin_state"] = "SIGNAL"
+-    assert _render(tmp_path, st, sci, ids)["h-margin"] == ["30 dB", "ok"]
++    st["station_clock"] = {"synced": True, "state": "TIME_OK", "reason": None, "maxerror_us": 250_000,
++                           "esterror_us": 1_500, "checked_t": st["utc"], "refresh_s": 10.0}
++    got = _render(tmp_path, st, sci, ids)
++    assert got["h-margin"] == ["30 dB", "ok"] and got["h-clock"] == ["synced", "ok"]
++    assert "maximum / estimated error250 ms / 2 ms (kernel)" in got["cm-health"][0]
+     # an SX126x station: the measured SNR margin, the CRC verdict and the Doppler block
+     st = json.loads(json.dumps(snap))
+     st["radio"]["packet_mode"] = True
+@@ -901,6 +908,22 @@ def test_dashboard_shows_only_what_the_receiver_can_measure(sim_station, tmp_pat
+     assert got["h-margin"][0] == "12.25 dB SNR" and "CRC" in got["rx-now"][0] and "Doppler shift" in got["rx-dop"][0]
+ 
+ 
++@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
++def test_fer_is_green_only_when_the_frames_show_it(sim_station, tmp_path):
++    """LS-3 (D-76): amber / red follow the FER, green needs the evidence - the one-sided 95 %
++    upper bound at most 1 % (299 frames with none lost); "0/20 <= 13.9 %" is uncoloured."""
++    from dssq import rxstats
++    _, snap, sci = sim_station
++    st = json.loads(json.dumps(snap))
++    want = {(0, 1): "", (0, 20): "", (0, 178): "", (0, 299): "ok", (0, 344): "ok", (1, 100): "",
++            (1, 999): "ok", (3, 175): "warn", (30, 148): "bad"}
++    for (lost, received), cls in want.items():
++        st["rx"]["frames"]["fer_10m_ci"] = rxstats.fer_block(lost, received)
++        got = _render(tmp_path, st, sci, ["h-fer", "rx-frames"])
++        assert got["h-fer"][1] == cls, (lost, received, got["h-fer"])
++    assert got["h-fer"][0] == "16.9 % (30/178)"
++
++
+ TIMES = "\u00d7"                                       # the multiplication sign of "1.3 x 10^-15 W"
+ SUPERSCRIPT = str.maketrans("-0123456789", "\u207b\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079")
+ 

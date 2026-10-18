@@ -1,3 +1,89 @@
+diff --git a/docs/13_Web_UI_Reference.md b/docs/13_Web_UI_Reference.md
+index a0c6f33..c86f249 100644
+--- a/docs/13_Web_UI_Reference.md
++++ b/docs/13_Web_UI_Reference.md
+@@ -2108,13 +2108,18 @@ latest report per instrument. The flight sends these reports at boot (before the
+ and when an instrument is lost or found again, so a ground started after the spacecraft
+ booted may never see them: then every bus reads "unknown (no report)" and the separation
+ "unknown (no acquisition events received since the ground started)" until the next report.
++The Nicla Sense ME's recovery after a run-time loss, INFO 0x0607 "Nicla Sense ME responding
++again", names no bus: the GDS takes it as an acquisition on the bus of the Nicla's latest
++report (the flight keeps it there) and decides the separation again; without an earlier
++report it is not used (no bus is guessed). An acquisition report 0x060B that names the bus
++replaces it.
+ 
+ | Column / row | Keys | Meaning |
+ |---|---|---|
+ | instrument | `sensor_bus.instruments.<instrument>.name` | Nicla Sense ME, RM3100 outboard, RM3100 inboard, AS7265X (keys `nicla`, `rm3100_ob`, `rm3100_ib`, `as7265x`) |
+ | bus | `sensor_bus.instruments.<instrument>.bus`, `sensor_bus.instruments.<instrument>.wrong_bus`, `sensor_bus.instruments.<instrument>.warning` | the bus of the latest report (`null` = none received); amber "(not the recommended bus)" when it differs from the recommended one, with the flight's WARN 0x060D text as the tooltip (`warning`, shown while the instrument stays on that bus) |
+ | recommended | `sensor_bus.instruments.<instrument>.recommended` | A4/A5 for the Nicla Sense ME, Qwiic for the RM3100s; `null` = "any (no preferred bus)": the AS7265X is used on either bus without a warning |
+-| state | `sensor_bus.instruments.<instrument>.state`, `sensor_bus.instruments.<instrument>.event_id`, `sensor_bus.instruments.<instrument>.t`, `sensor_bus.instruments.<instrument>.playback`, `sensor_bus.instruments.<instrument>.hk_ok` | "acquired" (EVR 0x060B, 0x0706 for the AS7265X, or a WARN 0x060D naming it) or red "LOST" (0x0606 Nicla Sense ME, 0x060E RM3100), with the EVR id and its ground receive time; `playback` = the report came from the recorder (VC2: never replaces a real-time report, fills an instrument without one); `hk_ok` = the instrument's bit in the newest HK (amber "HK MISSING" next to an acquisition: the instrument went away, e.g. absent after a reboot) |
++| state | `sensor_bus.instruments.<instrument>.state`, `sensor_bus.instruments.<instrument>.event_id`, `sensor_bus.instruments.<instrument>.t`, `sensor_bus.instruments.<instrument>.playback`, `sensor_bus.instruments.<instrument>.hk_ok` | "acquired" (EVR 0x060B, 0x0706 for the AS7265X, a WARN 0x060D naming it, or the Nicla Sense ME's recovery 0x0607 on its last bus) or red "LOST" (0x0606 Nicla Sense ME, 0x060E RM3100), with the EVR id and its ground receive time; `playback` = the report came from the recorder (VC2: never replaces a real-time report, fills an instrument without one); `hk_ok` = the instrument's bit in the newest HK (amber "HK MISSING" next to an acquisition: the instrument went away, e.g. absent after a reboot) |
+ | Separated | `sensor_bus.separated`, `sensor_bus.separation`, `sensor_bus.shared_bus` | the separation rule: the Nicla Sense ME and the RM3100s must be on different buses. `true` "yes: ..." (green), `false` amber "NOT SEPARATED: ... both on <bus>" (YELLOW alarm reason `sensor wiring: RM3100 and Nicla not on separate buses`, [15](#15-alarm-logic); the data is still used), `null` "unknown (...)" with the reason. Counted like the flight's own check: only instruments whose latest report is an acquisition and that the newest HK does not report MISSING |
+ | Lost instruments | `sensor_bus.lost` | "<name> (<bus>)" of every instrument whose latest report is a loss |
+ | Last "not separated" WARN | `sensor_bus.last_not_separated` | `{text, t, playback}` of the newest flight WARN 0x060D "<Nicla> and <RM3100> both on <bus>: not separated (docs/03)", or `null` |
+@@ -2685,21 +2690,21 @@ of q).
+ | Row | Keys | Source | Meaning |
+ |---|---|---|---|
+ | Present in the BHI260AP firmware / valid | `imu.grv_present`, `imu.grv_valid`, `imu.flags`; HK `ME_GRV` | on board | ATT `imu_flags` b6 GRV_PRESENT (the BHI260AP firmware provides the game rotation vector; also clear when the ARU page 2 could not be read, e.g. an ARU firmware without it) and b0 GRV (fresh <= 200 ms, inside the norm gate); `imu.available` false = no ATT v4 yet (`imu.na` group `all`) |
+-| Quaternion w x y z | `imu.q_grv` | on board | the game rotation vector, normalised, 4 decimals (Q14 resolution) |
++| Quaternion w x y z (device→GRV world, scalar first, normalised) | `imu.q_grv` | on board | the game rotation vector, normalised (divided by its norm; the flight's gate passes norms 0.9 to 1.1), 4 decimals (Q14 resolution) |
+ | Accuracy estimate | `imu.grv_accuracy` | on board | always `null`: "n/a (the BHI260AP reports none for the game rotation vector: always 0, datasheet Table 89)" (`imu.na` group `grv_accuracy`) |
+ | Up vector, gravity reading | `imu.up`, `imu.gravity_g` | ground | u, and 1 g x u = what the accelerometer reads at rest (the sign of Android's gravity sensor) |
+ | Tilt / roll / pitch | `imu.tilt_deg`, `imu.roll_deg`, `imu.pitch_deg` | ground | as above, degrees (gravity-referenced, valid during motion because the fusion filters them) |
+ | Relative heading | `imu.heading_rel_deg` | ground | atan2(2(wz + xy), 1 - 2(y² + z²)): the body X axis in the horizontal plane, counter-clockwise seen from above, from the arbitrary game-rotation reference. **Not a compass heading**; it drifts with the gyro bias (bias stability `imu.gyro_bias_stability_dph` = 5 °/h, datasheet Table 119) |
+-| Heading offset | `imu.heading_offset_deg` | ground | only when `imu.paired` (ATT `imu_flags` b2: q_fus and q_grv from one ARU rebuild): dq = q_fus ⊗ conj(q_grv), ψ = atan2(2(dw dz + dx dy), 1 - 2(dy² + dz²)). Its change over time = game-rotation drift and / or a magnetic disturbance of the 9-DOF heading (T-SC-15) |
++| Heading offset | `imu.heading_offset_deg` | ground | only when `imu.paired` (ATT `imu_flags` b2: ARU pages 0 and 2, i.e. q_fus, acc and q_grv, from one ARU rebuild; the pairing alone) and ATT b0 QUAT (a valid 9-DOF rotation vector, else group `pair` "ATT b0 QUAT clear"): dq = q_fus ⊗ conj(q_grv), ψ = atan2(2(dw dz + dx dy), 1 - 2(dy² + dz²)). Its change over time = game-rotation drift and / or a magnetic disturbance of the 9-DOF heading (T-SC-15) |
+ | Tilt disagreement | `imu.tilt_disagreement_deg` | ground | acos(1 - 2(dx² + dy²)): the angle between the two up vectors; ~0 when both filters agree on gravity |
+ | Linear acceleration est. | `imu.lin_acc_mg`, `imu.lin_acc_abs_mg`, `imu.acc_offset_mg`, `imu.acc_sens_err_pct` | ground | ATT acc - 1 g x u in mg, with \|a\|, only when `imu.paired` and ATT b1 ACCEL. ATT v4 carries no window mean of the acceleration, so acc is the one page-0 sample of the same ARU rebuild. An **estimate, not a spacecraft acceleration**: zero-g offset up to ±50 mg over life, sensitivity error up to ±2 % (datasheet Table 117) |
+-| Windows aggregated | `imu.nwin`, `imu.gap`, `imu.acc_sat`, `imu.gyro_sat` | on board | ATT `imu_nwin` (1 s windows in the ATT period, 0 = none: group `stats`), with "windows or samples missed" (b5 GAP), "accelerometer / gyroscope near full scale" (b3 / b4) |
++| Windows aggregated | `imu.nwin`, `imu.gap`, `imu.acc_sat`, `imu.gyro_sat` | on board | ATT `imu_nwin` (1 s windows read in the ATT period, 0 = none: group `stats`), with "windows or samples missed" (b5 GAP), "accelerometer / gyroscope near full scale" (b3 / b4). The counter saturates at 255: 255 shows "≥ 255 (counter saturated; the statistics cover every window read)", as the flight's sums keep running (an ATT period over 255 s, e.g. `PKTRATE ATT 600`) |
+ | Vibration RMS / peak | `imu.vib_rms_mg`, `imu.vib_peak_mg`, `imu.vib_floor_mg`, `imu.bandwidth_hz` | on board | the RMS of the windows' acceleration RMS (window mean removed, three axes) and the largest deviation of one sample from its window mean, mg; bandwidth <= `imu.bandwidth_hz` = 12.5 Hz (half the 25 Hz sample rate). Noise floor est. 1.2 mg x √3 = 2.1 mg from the datasheet value at ODR 200 Hz (25 Hz: not specified, VERIFY T-SC-14). While the body turns, the change of the gravity projection inside a window counts as vibration |
+ | Mean rate | `imu.rate_mean_dps` | on board | mean of the window mean rates, °/s, 2 decimals |
+-| \|ω\| of the mean rate | `imu.rate_abs_dps`, `imu.rate_floor_dps` | ground | with the noise floor est. 0.07 °/s x √3 = 0.12 °/s (datasheet Table 119 at ODR 200 Hz). The residual gyro offset after the BHI260AP's own calibration is not specified (zero-rate offset ±1 °/s with its fast offset compensation off) |
+-| Spin axis | `imu.spin_axis`, `imu.spin_axis_min_dps` | ground | rate_mean / \|ω\|, only when \|ω\| > `imu.spin_axis_min_dps` = 10 x the floor = 1.21 °/s, else n/a with the value (group `spin`) |
+-| Peak \|rate\| | `imu.rate_peak_dps` | on board | the largest \|ω\| of one sample in the period, °/s |
+-| Motion state | `imu.motion`, `imu.still_rate_dps`, `imu.still_vib_mg` | ground | "stationary" when at least one window and rate_peak < `[science] still_rate_dps` (0.5 °/s) and vib_peak < `[science] still_vib_mg` (10 mg); "moving" otherwise; "unknown" without a window (group `motion`). The thresholds are about 3 σ of the datasheet noise, VERIFY T-SC-14 ([15_Configuration_Reference.md](15_Configuration_Reference.md)) |
++| \|ω\| of the mean rate | `imu.rate_abs_dps` | ground | \|rate_mean\|, °/s. No floor is shown: rate_mean averages 25 x `imu_nwin` samples, so the single-sample noise (Peak \|rate\| row) does not bound it, and its limit, the residual gyro offset after the BHI260AP's own calibration, is not specified (zero-rate offset ±1 °/s with its fast offset compensation off, datasheet Table 119; VERIFY T-SC-14) |
++| Spin axis | `imu.spin_axis`, `imu.spin_axis_min_dps` | ground | rate_mean / \|ω\|, only when \|ω\| > `imu.spin_axis_min_dps` = 1.21 °/s, the D-75 threshold (10 x the single-sample noise est.), else n/a with the value (group `spin`) |
++| Peak \|rate\| | `imu.rate_peak_dps`, `imu.rate_floor_dps` | on board | the largest \|ω\| of one sample in the period, °/s, with the single-sample \|ω\| noise est. `imu.rate_floor_dps` = 0.07 °/s x √3 = 0.12 °/s (datasheet Table 119 at ODR 200 Hz; 25 Hz: not specified, VERIFY T-SC-14) |
++| Motion state | `imu.motion`, `imu.motion_note`, `imu.still_rate_dps`, `imu.still_vib_mg` | ground | "stationary" when at least one window and rate_peak < `[science] still_rate_dps` (0.5 °/s) and vib_peak < `[science] still_vib_mg` (10 mg); "moving" otherwise; "unknown" without a window (group `motion`). Decided from the windows the flight read: with b5 GAP a "stationary" carries `imu.motion_note` (amber) "in the N window(s) read; IMU_F_GAP: windows or samples were missed, a motion in them is not seen" (`null` otherwise). The thresholds are about 3 σ of the datasheet noise, VERIFY T-SC-14 ([15_Configuration_Reference.md](15_Configuration_Reference.md)) |
+ | IMU flags | `imu.flags` | on board | the names of the set ATT `imu_flags` bits (GAP and *_SAT amber) |
+ 
+ Every key of the block: `imu.available`, `imu.flags`, `imu.grv_present`, `imu.grv_valid`,
+@@ -2707,10 +2712,10 @@ Every key of the block: `imu.available`, `imu.flags`, `imu.grv_present`, `imu.gr
+ `imu.roll_deg`, `imu.pitch_deg`, `imu.heading_rel_deg`, `imu.heading_offset_deg`,
+ `imu.tilt_disagreement_deg`, `imu.lin_acc_mg`, `imu.lin_acc_abs_mg`, `imu.nwin`, `imu.gap`,
+ `imu.acc_sat`, `imu.gyro_sat`, `imu.vib_rms_mg`, `imu.vib_peak_mg`, `imu.rate_mean_dps`,
+-`imu.rate_abs_dps`, `imu.spin_axis`, `imu.rate_peak_dps`, `imu.motion`, `imu.still_rate_dps`,
+-`imu.still_vib_mg`, `imu.vib_floor_mg`, `imu.rate_floor_dps`, `imu.spin_axis_min_dps`,
+-`imu.bandwidth_hz`, `imu.acc_offset_mg`, `imu.acc_sens_err_pct`, `imu.gyro_bias_stability_dph`,
+-`imu.na`.
++`imu.rate_abs_dps`, `imu.spin_axis`, `imu.rate_peak_dps`, `imu.motion`, `imu.motion_note`,
++`imu.still_rate_dps`, `imu.still_vib_mg`, `imu.vib_floor_mg`, `imu.rate_floor_dps`,
++`imu.spin_axis_min_dps`, `imu.bandwidth_hz`, `imu.acc_offset_mg`, `imu.acc_sens_err_pct`,
++`imu.gyro_bias_stability_dph`, `imu.na`.
+ 
+ `imu.na` holds one reason per group that cannot be produced: `all` (no ATT v4 yet), `grv`
+ (no valid game rotation vector: IMU_F_GRV_PRESENT or IMU_F_GRV clear, or outside the norm
+@@ -3254,7 +3259,7 @@ header pill, the OVERVIEW reasons list, the station ALARM lamp and buzzer
+ | `receiver overload (<n> in 10 min): received signal too strong to measure: increase distance or add attenuation (receiver damage limit +10 dBm)` | an RSSI reading at the top of the radio's scale within the last 600 s (`rxstats.OVERLOAD_RECENT_S`; D-76, [4.2](#42-rf-now) "RSSI reading") |
+ | `FDIR <names>` | any HK fault-protection flag except HIBERNATE and TX_INHIBIT ([7.5](#75-fault-protection-flags)) |
+ | `spacecraft reset cause BROWNOUT (check the radio supply)` | HK `reset_cause` = BROWNOUT |
+-| `sensor wiring: RM3100 and Nicla not on separate buses` | `sensor_bus.separated` is false: the flight reported the Nicla Sense ME and an RM3100 on the same bus (WARN EVR 0x060D "... not separated", or acquisitions naming one bus), D-73; the data is still used ([7.6](#76-sensors)) |
++| `sensor wiring: RM3100 and Nicla not on separate buses` | `sensor_bus.separated` is false: the flight reported the Nicla Sense ME and an RM3100 on the same bus (WARN EVR 0x060D "... not separated", or acquisitions naming one bus), D-73; the data is still used ([7.6](#76-sensors)). While the Nicla Sense ME is lost (0x0606) the verdict is unknown and the reason is not raised; it returns with the recovery 0x0607 |
+ | `<n> SDLS TM rejects in the last 60 s` | TM frames refused by SDLS recently ([5.3](#53-sdls-tm-rejections)) |
+ | `SDLS service mismatch suspected (spacecraft TM without AE header)` | 3 data frames in a row rejected as BAD_SPI / BAD_IV |
+ | `radio model mismatch: spacecraft <m>, station <n>` | RF `radio_model` differs from the station's model |
+@@ -3437,7 +3442,7 @@ document.
+ | `apids` | one entry per packet name (apid, count, seq_gaps, lost, aos_gap_packets, last_seq, age_s, iat_s, latency, size, vcid) | [6.3](#63-packets-by-apid) |
+ | `tlm` | HK, RF, CMDVER, TIMECORR, RFSCAN, MAG, ATT, SPEC, ENV, SPECBURST: the newest real-time packet of each type received (each apid, values, limits, units, ert, scet, sclk, seq, vcid) | [7](#7-spacecraft-tab), [9](#9-science-tab) |
+ | `decoded` | mode, fdir, sensors_ok, sensors_missing, reset_cause, farm_state, radio_fault, radio_model, framing, rate_label, air_rate_bps, sdls_tc_service, sdls_tm_service, sdls_tm_state, cfdp_state, seq_state, beacon, mag_bist, magcal, rf_flags, mag_flags | [7.8](#78-onboard-state-and-the-decoded-block) |
+-| `imu` | available, flags, grv_present, grv_valid, paired, q_grv, grv_accuracy, up, gravity_g, tilt_deg, roll_deg, pitch_deg, heading_rel_deg, heading_offset_deg, tilt_disagreement_deg, lin_acc_mg, lin_acc_abs_mg, nwin, gap, acc_sat, gyro_sat, vib_rms_mg, vib_peak_mg, rate_mean_dps, rate_abs_dps, spin_axis, rate_peak_dps, motion, still_rate_dps, still_vib_mg, vib_floor_mg, rate_floor_dps, spin_axis_min_dps, bandwidth_hz, acc_offset_mg, acc_sens_err_pct, gyro_bias_stability_dph, na | [9.4](#94-imu-6-dof) |
++| `imu` | available, flags, grv_present, grv_valid, paired, q_grv, grv_accuracy, up, gravity_g, tilt_deg, roll_deg, pitch_deg, heading_rel_deg, heading_offset_deg, tilt_disagreement_deg, lin_acc_mg, lin_acc_abs_mg, nwin, gap, acc_sat, gyro_sat, vib_rms_mg, vib_peak_mg, rate_mean_dps, rate_abs_dps, spin_axis, rate_peak_dps, motion, motion_note, still_rate_dps, still_vib_mg, vib_floor_mg, rate_floor_dps, spin_axis_min_dps, bandwidth_hz, acc_offset_mg, acc_sens_err_pct, gyro_bias_stability_dph, na | [9.4](#94-imu-6-dof) |
+ | `sensor_bus` | instruments (nicla, rm3100_ob, rm3100_ib, as7265x: name, bus, recommended, wrong_bus, warning, state, hk_ok, event_id, t, playback), separated, separation, shared_bus, lost, last_not_separated, reports | [7.6](#76-sensors) |
+ | `time` | partition, last_sclk, scet_of_last_sclk, corr_samples, drift_ppm, residual_rms_ms, owlt_s, timecorr_key, sclk_estimate_s | [5.8](#58-time-correlation) |
+ | `cop` | vs, nr, lockout, suspended, retransmit, queued, outstanding, pending_bypass, farm_b, t1_s, verify_timeout_s, uplink_blocked, build_errors, records, recent, tc_framing, sdls_service, sdls_sn, frame_limit | [5.5](#55-cop-1-fop), [13.3](#133-command-history) |
 diff --git a/dssq-groundstation/python/dssq/dictionary.py b/dssq-groundstation/python/dssq/dictionary.py
 index b5ee502..385ac80 100644
 --- a/dssq-groundstation/python/dssq/dictionary.py
@@ -39,11 +125,91 @@ index b5ee502..385ac80 100644
  def decode_bits(value: int | None, names: list[str]) -> list[str]:
      """Names of the set bits of a 0..2^32-1 bit mask, least significant first; a set bit
      without a name is reported as 'b<i>' (never silently dropped). None -> []."""
+diff --git a/dssq-groundstation/python/dssq/display/dashboard.html b/dssq-groundstation/python/dssq/display/dashboard.html
+index 609c76a..7d059f1 100644
+--- a/dssq-groundstation/python/dssq/display/dashboard.html
++++ b/dssq-groundstation/python/dssq/display/dashboard.html
+@@ -231,7 +231,7 @@ input[type=number]{width:90px}
+     <div class="panel"><h3>Telecom <small>APID 0x011, every field</small></h3><div class="tw"><table id="sc-rf"></table></div></div>
+     <div class="panel"><h3>Fault protection <small>HK fdir_flags</small></h3><div class="bits" id="sc-fdir"></div>
+       <h3 style="margin-top:10px">Sensors <small>HK sensor_health</small></h3><div class="bits" id="sc-sens"></div>
+-      <h3 style="margin-top:10px">Sensor buses <small>from the flight's bus EVRs 0x060B / 0x060D / 0x060E / 0x0606 / 0x0706 (D-73)</small></h3><div class="tw"><table id="sc-bus"></table></div></div>
++      <h3 style="margin-top:10px">Sensor buses <small>from the flight's bus EVRs 0x060B / 0x060D / 0x060E / 0x0606 / 0x0607 / 0x0706 (D-73)</small></h3><div class="tw"><table id="sc-bus"></table></div></div>
+     <div class="panel"><h3>Beacon <small>Deep Space 1 style urgency level from HK (history of changes)</small></h3><canvas id="sc-beacon" class="short"></canvas><div class="tw"><table id="sc-beacon-tab"></table></div></div>
+     <div class="panel"><h3>Onboard state <small>sequence, MAG BIST, MAGCAL, CFDP</small></h3><div class="tw"><table id="sc-state"></table></div></div>
+     <div class="panel"><h3>Other packets <small>CMDVER, TIMECORR, RFSCAN</small></h3><div class="tw"><table id="sc-other"></table></div></div>
+@@ -2060,7 +2060,7 @@ function renderImu() {
+   table("si-imu", ["", "value", "source"], [
+     {section: "game rotation vector (accelerometer + gyroscope, no magnetometer)"},
+     ["Present in the BHI260AP firmware / valid", fyn(m.grv_present) + " / " + fyn(m.grv_valid) + " (HK ME_GRV " + grvHk + ")", OB],
+-    ["Quaternion w x y z (device→GRV world, as sent)", m.q_grv ? vec3(m.q_grv, 4) : naR(g), OB],
++    ["Quaternion w x y z (device→GRV world, scalar first, normalised)", m.q_grv ? vec3(m.q_grv, 4) : naR(g), OB],
+     ["Accuracy estimate", naR(na.grv_accuracy), OB],
+     ["Up vector in body axes (x y z)", m.up ? vec3(m.up, 4) : naR(g), GR],
+     ["Gravity reading (g, x y z)", m.gravity_g ? vec3(m.gravity_g, 3) : naR(g), GR],
+@@ -2071,13 +2071,14 @@ function renderImu() {
+     ["Tilt disagreement", num(m.tilt_disagreement_deg) ? fu(m.tilt_disagreement_deg, 2, "°") : naR(na.pair), GR],
+     ["Linear acceleration est. (acc − gravity, one sample; mg x y z)", m.lin_acc_mg ? vec3(m.lin_acc_mg, 0) + "  |a| " + fx(m.lin_acc_abs_mg, 0) + " mg (zero-g offset ±" + fx(m.acc_offset_mg, 0) + " mg, sensitivity ±" + fx(m.acc_sens_err_pct, 0) + " %: not a spacecraft acceleration)" : naR(na.lin_acc), GR],
+     {section: "window statistics (1 s windows of 25 Hz samples over the ATT period)"},
+-    ["Windows aggregated", num(m.nwin) ? fx(m.nwin, 0) + (sat.length ? " (" + sat.join(", ") + ")" : "") : NA, OB],
++    // imu_nwin saturates at 255 (D-75): the statistics still cover every window read in the period
++    ["Windows aggregated", num(m.nwin) ? (m.nwin >= 255 ? "≥ 255 (counter saturated; the statistics cover every window read)" : fx(m.nwin, 0)) + (sat.length ? " (" + sat.join(", ") + ")" : "") : NA, OB],
+     ["Vibration RMS / peak (≤ " + fx(m.bandwidth_hz, 1) + " Hz)", num(m.vib_rms_mg) ? fx(m.vib_rms_mg, 1) + " / " + fx(m.vib_peak_mg, 0) + " mg (noise floor est. " + fx(m.vib_floor_mg, 1) + " mg)" : naR(na.stats), OB],
+     ["Mean rate (°/s, x y z)", m.rate_mean_dps ? vec3(m.rate_mean_dps, 2) : naR(na.stats), OB],
+-    ["|ω| of the mean rate", num(m.rate_abs_dps) ? fu(m.rate_abs_dps, 2, "°/s") + " (noise floor est. " + fx(m.rate_floor_dps, 2) + " °/s)" : naR(na.stats), GR],
++    ["|ω| of the mean rate", num(m.rate_abs_dps) ? fu(m.rate_abs_dps, 2, "°/s") + " (limited by the residual gyro offset, not specified: VERIFY T-SC-14)" : naR(na.stats), GR],
+     ["Spin axis (unit vector, body x y z)", m.spin_axis ? vec3(m.spin_axis, 3) : naR(na.spin), GR],
+-    ["Peak |rate|", num(m.rate_peak_dps) ? fu(m.rate_peak_dps, 1, "°/s") : naR(na.stats), OB],
+-    ["Motion state", V(mot === "unknown" ? "unknown (" + (na.motion || "no window") + ")" : mot + " (stationary: peak rate < " + fx(m.still_rate_dps, 2) + " °/s and peak vibration < " + fx(m.still_vib_mg, 1) + " mg, [science], VERIFY T-SC-14)", mot === "unknown" ? "dim" : ""), GR],
++    ["Peak |rate|", num(m.rate_peak_dps) ? fu(m.rate_peak_dps, 1, "°/s") + " (single-sample noise est. " + fx(m.rate_floor_dps, 2) + " °/s)" : naR(na.stats), OB],
++    ["Motion state", V(mot === "unknown" ? "unknown (" + (na.motion || "no window") + ")" : mot + (m.motion_note ? " " + m.motion_note : "") + " (stationary: peak rate < " + fx(m.still_rate_dps, 2) + " °/s and peak vibration < " + fx(m.still_vib_mg, 1) + " mg, [science], VERIFY T-SC-14)", mot === "unknown" ? "dim" : m.motion_note ? "warn" : ""), GR],
+     ["IMU flags", N((m.flags || []).map(b => badge(b, b === "GAP" || b.endsWith("_SAT") ? "warn" : "dim"))), OB],
+     ["Packet time", att ? iso(att.ert) : NA, ""]]);
+ }
 diff --git a/dssq-groundstation/python/dssq/sensors.py b/dssq-groundstation/python/dssq/sensors.py
-index c71b81c..98c5f4b 100644
+index c71b81c..df3282f 100644
 --- a/dssq-groundstation/python/dssq/sensors.py
 +++ b/dssq-groundstation/python/dssq/sensors.py
-@@ -49,16 +49,18 @@ sensor-bus state (D-73). Pure Python, standard library only.
+@@ -20,7 +20,8 @@ sensor-bus state (D-73). Pure Python, standard library only.
+      horizontal plane, counter-clockwise seen from above, from the game rotation vector's
+      arbitrary reference - NOT a compass heading, and it drifts (gyro bias stability 5 deg/h,
+      BHI260AP datasheet Table 119).
+-   * 9-DOF vs 6-DOF, only when IMU_F_PAIRED (both quaternions from one ARU rebuild):
++   * 9-DOF vs 6-DOF, only when IMU_F_PAIRED (ARU pages 2 and 0 from one rebuild, equal seq:
++     the pairing alone, whatever the 9-DOF validity) and ATT b0 QUAT (a valid rotation vector):
+      dq = q_fus (x) conj(q_grv) maps the game-rotation world to the rotation-vector world;
+      heading offset psi = atan2(2(dw dz + dx dy), 1 - 2(dy^2 + dz^2)); tilt disagreement
+      delta = acos(1 - 2(dx^2 + dy^2)) = the angle between the two up vectors. A change of psi
+@@ -32,33 +33,40 @@ sensor-bus state (D-73). Pure Python, standard library only.
+      acceleration: the accelerometer's zero-g offset is up to +/-50 mg over life and its
+      sensitivity error up to +/-2 % (Table 117).
+    * rate: |omega| of the mean rate vector; spin axis = rate / |omega| only when |omega| >
+-     SPIN_AXIS_FACTOR x RATE_FLOOR_DPS.
++     SPIN_AXIS_FACTOR x RATE_FLOOR_DPS (a D-75 design threshold).
+    * motion state over the ATT period: "stationary" when imu_nwin >= 1 and rate_peak <
+      [science] still_rate_dps and vib_peak < still_vib_mg, "moving" otherwise, "unknown"
+-     without a window. While the body turns, the change of the gravity projection inside a
+-     1 s window counts in vib_rms / vib_peak (the ARU removes the window mean only).
++     without a window. It is decided from the windows the flight read: with IMU_F_GAP
++     (windows or samples missed) a "stationary" comes with motion_note, since a motion in
++     the missed windows is not seen. While the body turns, the change of the gravity
++     projection inside a 1 s window counts in vib_rms / vib_peak (the ARU removes the window
++     mean only).
+    * the game rotation vector has no accuracy estimate (the BHI260AP reports 0 for it,
+      datasheet Table 89): no accuracy is produced, the snapshot says why.
+    Floors (estimates from the datasheet values at ODR 200 Hz; at the ARU's 25 Hz they are
+    not specified, VERIFY T-SC-14): accelerometer output noise 1.2 mg rms per axis (Table
+-   117) -> vibration floor ~2.1 mg; gyroscope output noise 0.07 deg/s rms per axis (Table
+-   119) -> |omega| floor ~0.12 deg/s. The residual gyro offset after the BHI260AP's own
+-   calibration is not specified (zero-rate offset +/-1 deg/s with its fast offset
+-   compensation off, Table 119).
++   117) -> vibration floor ~2.1 mg (vib_rms and vib_peak are per-sample quantities);
++   gyroscope output noise 0.07 deg/s rms per axis (Table 119) -> single-sample |omega|
++   noise ~0.12 deg/s, the floor of rate_peak. rate_mean averages 25 x imu_nwin samples, so
++   that noise does not bound it: its limit is the residual gyro offset after the BHI260AP's
++   own calibration, which is not specified (zero-rate offset +/-1 deg/s with its fast offset
++   compensation off, Table 119), so no floor is given for |omega| of the mean rate.
+    Every value is None when it cannot be produced; `na` names the reason per group.
  
  2. Sensor-bus state (SensorBusState). The flight names the bus of every instrument in its
     event reports (dictionary.SENSOR_BUS_EVRS): acquisition 0x060B, AS7265X identity 0x0706,
@@ -72,7 +238,51 @@ index c71b81c..98c5f4b 100644
  """
  from __future__ import annotations
  
-@@ -307,6 +309,13 @@ class SensorBusState:
+@@ -78,8 +86,8 @@ ACC_SENS_ERR_PCT = 2.0               # sensitivity error, max, %
+ GYRO_NOISE_DPS = 0.07                # output noise per axis, deg/s rms (74.6 Hz, ODR 200 Hz)
+ GYRO_BIAS_STABILITY_DPH = 5.0        # vibration-free, 25 C, deg/h
+ VIB_FLOOR_MG = ACC_NOISE_MG * math.sqrt(3.0)       # ~2.08 mg est.: vib_rms adds the three axes' variances
+-RATE_FLOOR_DPS = GYRO_NOISE_DPS * math.sqrt(3.0)   # ~0.121 deg/s est.: |omega| of three noisy axes
+-SPIN_AXIS_FACTOR = 10.0              # spin axis only when |omega| > 10 x the floor (D-75)
++RATE_FLOOR_DPS = GYRO_NOISE_DPS * math.sqrt(3.0)   # ~0.121 deg/s est.: |omega| of ONE sample (rate_peak)
++SPIN_AXIS_FACTOR = 10.0              # spin axis only when |omega| > 10 x that figure (D-75 threshold)
+ ARU_ODR_HZ = 25.0                    # ARU page-2 window samples (D-75): bandwidth <= ODR / 2
+ QUAT_NORM2 = (0.81, 1.21)            # the flight's quaternion norm gate (|q|^2), ARU decoders
+ G_MG = 1000.0                        # 1 g in mg (the accelerometer's unit)
+@@ -188,13 +196,14 @@ def imu_products(att: Mapping[str, Any] | None, still_rate_dps: float, still_vib
+         "lin_acc_mg": None, "lin_acc_abs_mg": None,
+         "nwin": None, "gap": None, "acc_sat": None, "gyro_sat": None,
+         "vib_rms_mg": None, "vib_peak_mg": None, "rate_mean_dps": None, "rate_abs_dps": None, "spin_axis": None,
+-        "rate_peak_dps": None, "motion": "unknown",
++        "rate_peak_dps": None, "motion": "unknown", "motion_note": None,
+         "still_rate_dps": still_rate_dps, "still_vib_mg": still_vib_mg,
+         "vib_floor_mg": VIB_FLOOR_MG, "rate_floor_dps": RATE_FLOOR_DPS,
+         "spin_axis_min_dps": SPIN_AXIS_FACTOR * RATE_FLOOR_DPS, "bandwidth_hz": ARU_ODR_HZ / 2.0,
+         "acc_offset_mg": ACC_OFFSET_LIFE_MG, "acc_sens_err_pct": ACC_SENS_ERR_PCT,
+         "gyro_bias_stability_dph": GYRO_BIAS_STABILITY_DPH, "na": na}
+     if not known:
++        # imu_flags missing: defensive only (the Decommutator rejects an ATT that is not v4)
+         why = "no ATT packet yet" if att is None else "imu_flags missing: no 6-DOF part in this ATT"
+         for group in ("all", "grv", "pair", "lin_acc", "stats", "spin", "motion"):
+             na[group] = why
+@@ -252,10 +261,15 @@ def imu_products(att: Mapping[str, Any] | None, still_rate_dps: float, still_vib
+             out["spin_axis"] = [c / mag for c in rate]
+         else:
+             na["spin"] = (f"|omega| {mag:.2f} deg/s is not above {SPIN_AXIS_FACTOR * RATE_FLOOR_DPS:.2f} deg/s, "
+-                          f"{SPIN_AXIS_FACTOR:.0f} x the estimated {RATE_FLOOR_DPS:.2f} deg/s noise floor")
++                          f"the D-75 threshold: {SPIN_AXIS_FACTOR:.0f} x the {RATE_FLOOR_DPS:.2f} deg/s "
++                          "single-sample noise est.")
+     out["motion"] = motion_state(nwin, rate_peak, vib_peak, still_rate_dps, still_vib_mg)
+     if out["motion"] == "unknown":
+         na["motion"] = "rate_peak or vib_peak not available in this ATT"
++    elif out["motion"] == "stationary" and out["gap"]:
++        seen = ">= 255" if nwin >= 255 else str(nwin)
++        out["motion_note"] = (f"in the {seen} window(s) read; IMU_F_GAP: windows or samples were missed, "
++                              "a motion in them is not seen")
+     return out
+ 
+ 
+@@ -307,6 +321,13 @@ class SensorBusState:
                  self.last_not_separated = {"text": text, "t": t, "playback": playback}
              self.used += 1
              return True
@@ -86,3 +296,232 @@ index c71b81c..98c5f4b 100644
          lost = dd.evr_instrument_lost(event_id, text)
          if lost is not None and lost[0] in _BY_NAME:
              self._put(_BY_NAME[lost[0]], lost[1], "lost", event_id, t, playback)
+diff --git a/dssq-groundstation/python/dssq/sim.py b/dssq-groundstation/python/dssq/sim.py
+index 2cae341..9515a30 100644
+--- a/dssq-groundstation/python/dssq/sim.py
++++ b/dssq-groundstation/python/dssq/sim.py
+@@ -79,7 +79,7 @@ from .ccsds.tm import (Clcw, build_frame, build_oid_frame, build_uslp_frame, bui
+ from .cmdparse import check_user_data, unpack_seqload
+ from .dictionary import (APID_ATT, APID_CFDP, APID_CMDVER, APID_ENV, APID_EVR, APID_HK, APID_MAG, APID_RF,
+                          APID_RFSCAN, APID_SPEC, APID_SPECBURST, APID_TIMECORR, CMD_SOURCE_AD, CMD_SOURCE_BD,
+-                         CMD_SOURCE_STORED, FDIR_CLEARED_BY_RSTCNT, FDIR_HIBERNATE, PERIODIC_APIDS)
++                         CMD_SOURCE_STORED, FDIR_CLEARED_BY_RSTCNT, FDIR_HIBERNATE, IMU_FLAG_BITS, PERIODIC_APIDS)
+ from .radio.e22 import regs_from_cfg
+ 
+ # Flight datalink.cpp kModeCadence (s, 0 = off), PeriodicIdx order HK RF TIMECORR MAG ATT SPEC ENV.
+@@ -123,6 +123,9 @@ GYRO_NOISE_DPS = 0.07
+ BMM150_NOISE_UT = 0.3
+ ARU_WINDOW_HZ = 25                                      # samples per 1.000 s window
+ IMU_FLAGS_SIM = 0x47                                    # GRV | STATS | PAIRED | GRV_PRESENT
++IMU_F_STATS = 1 << IMU_FLAG_BITS.index("STATS")         # flight: set exactly when imu_nwin >= 1
++IMU_SIM_MAX_WINDOWS = 3600                              # windows simulated per ATT at most (PKTRATE max 3600 s)
++ATT_IDX = PERIODIC_APIDS.index(APID_ATT)
+ BOOT_BUS_EVRS = ((0x060B, "instrument acquired: Nicla Sense ME on A4/A5"),
+                  (0x060B, "instrument acquired: RM3100 outboard on Qwiic"),
+                  (0x060B, "instrument acquired: RM3100 inboard on Qwiic"),
+@@ -646,6 +649,8 @@ class SimSpacecraft(link.RadioBackend):
+                                                      self._spec, self._env)
+         for i, period in enumerate(CADENCE[self.mode]):
+             p = 0 if self.hibernating else self.period_override.get(i, period)   # beacon HK: below
++            if i == ATT_IDX and not p:
++                self.imu_win_end = int(t)    # D-75: no window kept while ATT is off (flight ImuStats reset)
+             lg = self.last_gen[i]
+             if p and (lg is None or t - lg >= p):
+                 self.last_gen[i] = t
+@@ -1226,18 +1231,21 @@ class SimSpacecraft(link.RadioBackend):
+                 round(10 * rate_peak))
+ 
+     def _imu_stats(self, t: float) -> dict[str, Any]:
+-        """The ATT v4 window statistics of the period since the previous ATT: the completed
+-        1 s windows (SCLK whole seconds), aggregated like the flight's ImuStats (RMS of the
+-        windows' vib_rms, maximum peaks, mean of the window rate means). At most the newest
+-        255 windows are simulated (imu_nwin saturates at 255)."""
++        """The ATT v4 window statistics of the period since the previous ATT, or since ATT
++        generation was (re)enabled (the scheduler moves imu_win_end while ATT is off): the
++        completed 1 s windows (SCLK whole seconds), aggregated like the flight's ImuStats (RMS
++        of the windows' vib_rms, maximum peaks, mean of the window rate means) over every
++        window, imu_nwin saturating at 255 as the flight's counter does (D-75). As a bound on
++        the work at most the newest IMU_SIM_MAX_WINDOWS windows are simulated."""
+         end = int(t)
+-        first = max(self.imu_win_end, end - 255)
++        n_all = max(0, end - self.imu_win_end)
++        first = max(self.imu_win_end, end - IMU_SIM_MAX_WINDOWS)
+         self.imu_win_end = end
+         wins = [self._imu_window(float(k)) for k in range(first, end)]
+         if not wins:
+             return {"imu_nwin": 0}
+         n = len(wins)
+-        return {"imu_nwin": n, "vib_rms": round(math.sqrt(sum(w[0] ** 2 for w in wins) / n)) / 10,
++        return {"imu_nwin": min(n_all, 255), "vib_rms": round(math.sqrt(sum(w[0] ** 2 for w in wins) / n)) / 10,
+                 "vib_peak": max(w[1] for w in wins),
+                 **{f"rate_mean_{a}": _round_half_away(sum(w[2][k] for w in wins), n) / 100
+                    for k, a in enumerate("xyz")},
+@@ -1257,7 +1265,10 @@ class SimSpacecraft(link.RadioBackend):
+             v[f"acc_{axis}"] = round(up[k] + g(0, ACC_NOISE_MG / 1000), 3)
+             v[f"gyro_{axis}"] = round(math.degrees(rates[k]) + g(0, GYRO_NOISE_DPS), 1)
+             v[f"mag_{axis}"] = round(field[k] + g(0, BMM150_NOISE_UT), 1)
+-        v.update(self._imu_stats(t))
++        stats = self._imu_stats(t)
++        v.update(stats)
++        if not stats["imu_nwin"]:
++            v["imu_flags"] = IMU_FLAGS_SIM & ~IMU_F_STATS    # the flight: STATS only with a window
+         # q = body -> NED (the simulator's world is NED: MAG_FIELD_DIR points down). The flight
+         # fields differ in convention: q_fus = BHI260 device -> ENU (Android world), q_triad =
+         # TRIAD NED -> body (attitude.h triad_ned). ENU <-> NED is a 180 deg turn about (1,1,0).
+diff --git a/tests/test_sensors.py b/tests/test_sensors.py
+index f12f90d..1a12a03 100644
+--- a/tests/test_sensors.py
++++ b/tests/test_sensors.py
+@@ -6,6 +6,8 @@ through the real packet path (decom.encode -> Space Packet -> Decommutator) so t
+ not-available sentinels (0x7FFF, 0xFFFF) arrive as the GDS sees them.
+ """
+ import math
++import re
++from pathlib import Path
+ 
+ import pytest
+ 
+@@ -15,6 +17,7 @@ from dssq.ccsds.packets import SpacePacket, build_packet
+ from dssq.ccsds.timecode import CucTime
+ from dssq.decom import Decommutator, encode
+ 
++REPO = Path(__file__).resolve().parents[1]
+ STILL = (0.5, 10.0)                     # [science] still_rate_dps, still_vib_mg defaults
+ H = math.sqrt(0.5)
+ 
+@@ -55,7 +58,8 @@ def test_level_body_and_stationary_window():
+     assert p["heading_offset_deg"] == pytest.approx(0) and p["tilt_disagreement_deg"] == pytest.approx(0, abs=1e-3)
+     # |rate| = sqrt(0.03^2 + 0.04^2) = 0.05 deg/s: below 10 x 0.07 sqrt(3) = 1.212 deg/s -> no spin axis
+     assert p["rate_abs_dps"] == pytest.approx(0.05) and p["spin_axis"] is None
+-    assert p["na"]["spin"] == "|omega| 0.05 deg/s is not above 1.21 deg/s, 10 x the estimated 0.12 deg/s noise floor"
++    assert p["na"]["spin"] == ("|omega| 0.05 deg/s is not above 1.21 deg/s, the D-75 threshold: 10 x the 0.12 deg/s "
++                               "single-sample noise est.")
+     # rate_peak 0.3 < 0.5 deg/s and vib_peak 7 < 10 mg -> stationary
+     assert p["motion"] == "stationary" and p["vib_rms_mg"] == pytest.approx(2.1) and p["vib_peak_mg"] == 7
+     assert p["grv_accuracy"] is None and "Table 89" in p["na"]["grv_accuracy"]
+@@ -97,9 +101,12 @@ def test_nine_vs_six_dof_offset_and_tilt_disagreement():
+     p = sn.imu_products(_att(imu_flags=0x43), *STILL)
+     assert p["heading_offset_deg"] is None and p["lin_acc_mg"] is None and p["tilt_deg"] == pytest.approx(0)
+     assert "IMU_F_PAIRED clear" in p["na"]["pair"] and "IMU_F_PAIRED clear" in p["na"]["lin_acc"]
+-    # paired but the 9-DOF quaternion not valid (ATT b0 clear): no comparison, linear acceleration kept
++    # paired (IMU_F_PAIRED = one ARU rebuild only, D-75) but the 9-DOF rotation vector not valid (ATT b0
++    # clear, e.g. stale while acc and q_grv are fresh): no comparison, the linear acceleration is kept
+     p = sn.imu_products(_att(flags=0x1E, q_fus=(None, None, None, None)), *STILL)
+-    assert p["heading_offset_deg"] is None and "QUAT clear" in p["na"]["pair"] and p["lin_acc_mg"] is not None
++    assert p["heading_offset_deg"] is None and p["tilt_disagreement_deg"] is None
++    assert p["na"]["pair"] == "ATT b0 QUAT clear: no valid 9-DOF rotation vector" and "lin_acc" not in p["na"]
++    assert p["lin_acc_mg"] == pytest.approx([0, 0, 0], abs=1e-6)
+ 
+ 
+ def test_linear_acceleration_is_acc_minus_gravity():
+@@ -127,6 +134,13 @@ def test_rates_spin_axis_and_motion_state():
+     assert sn.imu_products(_att(vib_peak=10), 0.5, 10.5)["motion"] == "stationary"
+     assert sn.motion_state(3, 0.49, 9.9, *STILL) == "stationary"
+     assert sn.motion_state(3, 0.5, 9.9, *STILL) == "moving" and sn.motion_state(0, 0.1, 1, *STILL) == "unknown"
++    # windows or samples missed (IMU_F_GAP 0x20): "stationary" holds only for the windows read, "moving" was seen
++    p = sn.imu_products(_att(imu_flags=0x47 | 0x20), *STILL)
++    assert p["motion"] == "stationary" and p["motion_note"] == (
++        "in the 8 window(s) read; IMU_F_GAP: windows or samples were missed, a motion in them is not seen")
++    assert sn.imu_products(_att(), *STILL)["motion_note"] is None
++    assert sn.imu_products(_att(imu_flags=0x67, rate_peak=5.5), *STILL)["motion_note"] is None
++    assert sn.imu_products(_att(imu_flags=0x67, imu_nwin=255), *STILL)["motion_note"].startswith("in the >= 255 ")
+     # flags pass through
+     p = sn.imu_products(_att(imu_flags=0x47 | 0x08 | 0x10 | 0x20), *STILL)
+     assert p["acc_sat"] and p["gyro_sat"] and p["gap"]
+@@ -153,9 +167,13 @@ def test_sentinels_give_reasons_never_numbers():
+     # a quaternion outside the norm gate is not an attitude
+     p = sn.imu_products(_att(q_grv=(0.5, 0.0, 0.0, 0.0)), *STILL)
+     assert p["q_grv"] is None and "norm gate" in p["na"]["grv"]
+-    # an older ATT without the 6-DOF part
++    # values without imu_flags: a defensive branch only. The GDS never passes such an ATT: the
++    # Decommutator rejects one that is not the 59-octet v4 layout (a 37-octet ATT v3 is a decom error)
+     p = sn.imu_products({"flags": 0x1F}, *STILL)
+     assert p["available"] is False and "imu_flags missing" in p["na"]["all"]
++    v3 = SpacePacket.parse(build_packet(dd.APID_ATT, 1, encode(dd.APID_ATT, _att())[:37], CucTime.from_seconds(1.0)))
++    with pytest.raises(ValueError, match="ATT: 37 octets of user data, the layout has 59"):
++        Decommutator().decode(v3)
+ 
+ 
+ # ------------------------------------------------------------------ sensor-bus state
+@@ -222,8 +240,47 @@ def test_lost_instruments_and_recovery():
+     s.on_evr(0x0606, "Nicla Sense ME stopped responding on A4/A5", 300.0)
+     snap = s.snapshot(ALL_OK)
+     assert snap["separated"] is None and "Nicla Sense ME (A4/A5)" in snap["lost"]
+-    s.on_evr(0x060B, "instrument acquired: Nicla Sense ME on A4/A5", 400.0)                  # re-acquired
+-    assert s.snapshot(ALL_OK)["instruments"]["nicla"]["state"] == "acquired"
++    # the flight's recovery report after a run-time loss names no bus: the bus it was lost on
++    assert s.on_evr(0x0607, "Nicla Sense ME responding again", 400.0) is True
++    snap = s.snapshot(ALL_OK)
++    nicla = snap["instruments"]["nicla"]
++    assert (nicla["state"], nicla["bus"], nicla["event_id"], nicla["t"]) == ("acquired", "A4/A5", 0x0607, 400.0)
++    assert snap["lost"] == ["RM3100 outboard (Qwiic)"] and snap["separated"] is True
++
++
++def test_nicla_recovery_restores_the_not_separated_verdict():
++    """D-73: the Nicla Sense ME and the RM3100 outboard share A4/A5 (docs/08 T-FD-04 with that
++    layout): loss 0x0606, recovery 0x0607 -> NOT SEPARATED again, not "unknown"."""
++    sep = "Nicla Sense ME and RM3100 outboard both on A4/A5: not separated (docs/03)"
++    s, snap = _bus([(0x060B, "instrument acquired: Nicla Sense ME on A4/A5"),
++                    (0x060B, "instrument acquired: RM3100 outboard on A4/A5"), (0x060D, sep)])
++    assert snap["separated"] is False
++    s.on_evr(0x0606, "Nicla Sense ME stopped responding on A4/A5", 300.0)
++    assert s.separated(ALL_OK & ~1) is None
++    s.on_evr(0x0607, "Nicla Sense ME responding again", 310.0)
++    snap = s.snapshot(ALL_OK)
++    assert snap["separated"] is False and snap["shared_bus"] == "A4/A5" and snap["lost"] == []
++    assert snap["separation"] == "NOT SEPARATED: Nicla Sense ME and RM3100 outboard both on A4/A5"
++    # an acquisition report of the recovery (D1) names the bus and replaces it
++    s.on_evr(0x060B, "instrument acquired: Nicla Sense ME on Qwiic", 311.0)
++    assert s.snapshot(ALL_OK)["separated"] is True
++    # without an earlier report there is no bus to give: not used, nothing guessed
++    s2 = sn.SensorBusState()
++    assert s2.on_evr(0x0607, "Nicla Sense ME responding again", 1.0) is False and s2.reports == {}
++    # a recorder copy of a recovery never replaces a real-time loss
++    s3, _ = _bus([*BOOT, (0x0606, "Nicla Sense ME stopped responding on A4/A5")])
++    s3.on_evr(0x0607, "Nicla Sense ME responding again", 900.0, playback=True)
++    assert s3.snapshot(ALL_OK)["instruments"]["nicla"]["state"] == "lost"
++
++
++def test_every_flight_instrument_report_is_a_sensor_bus_evr():
++    """Every flight EVR whose literal text names the Nicla Sense ME or an RM3100 is one the
++    ground's SensorBusState reads (dictionary.SENSOR_BUS_EVRS): a loss, a recovery or a bus."""
++    flight = (REPO / "vgq1-spacecraft" / "sketch" / "src" / "fsw" / "flight.cpp").read_text()
++    calls = re.findall(r'evr\(\d,\s*(0x[0-9A-Fa-f]+)\s*,\s*"([^"]*)"', flight)
++    named = [(int(e, 16), f) for e, f in calls if "Nicla Sense ME" in f or "RM3100" in f]
++    assert {e for e, _ in named} >= {0x0606, 0x0607, 0x060E}
++    assert [(hex(e), f) for e, f in named if f not in dd.SENSOR_BUS_EVRS.get(e, ())] == []
+ 
+ 
+ def test_playback_never_overrides_a_real_time_report():
+@@ -349,3 +406,31 @@ def test_gds_imu_and_sensor_bus_end_to_end(monkeypatch, tmp_path):
+     s = w.gs.snapshot()
+     assert s["sensor_bus"]["separated"] is False and s["sensor_bus"]["shared_bus"] == "A4/A5"
+     assert sn.NOT_SEPARATED_REASON in s["alarm_reasons"] and s["alarm"] in ("YELLOW", "RED")
++
++
++def test_gds_wiring_alarm_returns_after_a_nicla_recovery(tmp_path):
++    """The YELLOW reason follows the verdict through a loss and the recovery 0x0607 (D-73)."""
++    from dssq.config import load_config
++    from dssq.gds import GroundStation
++
++    cfg = load_config()
++    cfg["gds"]["archive_dir"] = str(tmp_path / "archive")
++    cfg["sdls"]["key_file"] = str(tmp_path / "missing_key.hex")
++    gs = GroundStation(cfg, archive=False)
++    try:
++        def evr(eid: int, text: str, t: float) -> None:
++            gs._on_evr({"severity": "INFO", "event_id": eid, "text": text}, t, None, None, 0)
++
++        def reasons() -> list[str]:
++            return gs._compute_alarm(10.0)[1]
++
++        evr(0x060B, "instrument acquired: Nicla Sense ME on A4/A5", 1.0)
++        evr(0x060B, "instrument acquired: RM3100 outboard on A4/A5", 2.0)
++        assert sn.NOT_SEPARATED_REASON in reasons()
++        evr(0x0606, "Nicla Sense ME stopped responding on A4/A5", 3.0)
++        assert sn.NOT_SEPARATED_REASON not in reasons()                       # no current Nicla report
++        evr(0x0607, "Nicla Sense ME responding again", 4.0)
++        assert sn.NOT_SEPARATED_REASON in reasons()
++        assert gs.snapshot()["sensor_bus"]["instruments"]["nicla"]["state"] == "acquired"
++    finally:
++        gs.close()
