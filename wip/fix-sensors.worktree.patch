@@ -39,3 +39,36 @@ index b5ee502..385ac80 100644
  def decode_bits(value: int | None, names: list[str]) -> list[str]:
      """Names of the set bits of a 0..2^32-1 bit mask, least significant first; a set bit
      without a name is reported as 'b<i>' (never silently dropped). None -> []."""
+diff --git a/dssq-groundstation/python/dssq/sensors.py b/dssq-groundstation/python/dssq/sensors.py
+index c71b81c..d901d94 100644
+--- a/dssq-groundstation/python/dssq/sensors.py
++++ b/dssq-groundstation/python/dssq/sensors.py
+@@ -49,9 +49,11 @@ sensor-bus state (D-73). Pure Python, standard library only.
+ 
+ 2. Sensor-bus state (SensorBusState). The flight names the bus of every instrument in its
+    event reports (dictionary.SENSOR_BUS_EVRS): acquisition 0x060B, AS7265X identity 0x0706,
+-   the wrong-bus WARN and the "not separated" WARN 0x060D, losses 0x0606 / 0x060E. The ground
+-   keeps the latest report per instrument and decides whether the Nicla Sense ME and the
+-   RM3100s are on separate buses (the D-73 separation rule) as the flight does: only
++   the wrong-bus WARN and the "not separated" WARN 0x060D, losses 0x0606 / 0x060E, and the
++   Nicla Sense ME's recovery 0x0607, which names no bus: an acquisition on the bus of its
++   latest report (the flight keeps it there). The ground keeps the latest report per
++   instrument and decides whether the Nicla Sense ME and the RM3100s are on separate buses
++   (the D-73 separation rule) as the flight does: only
+    instruments whose latest report is an acquisition count, and an instrument the newest HK
+    reports MISSING (sensor_health) does not. A reboot re-reports every instrument it finds
+    (before its BOOT EVR), so the latest report per instrument is current; an instrument
+@@ -307,6 +309,13 @@ class SensorBusState:
+                 self.last_not_separated = {"text": text, "t": t, "playback": playback}
+             self.used += 1
+             return True
++        if dd.evr_nicla_recovered(event_id, text):
++            old = self.reports.get("nicla")        # D-73: no bus in the text; never a guessed one
++            if old is None:
++                return False
++            self._put("nicla", old["bus"], "acquired", event_id, t, playback)
++            self.used += 1
++            return True
+         lost = dd.evr_instrument_lost(event_id, text)
+         if lost is not None and lost[0] in _BY_NAME:
+             self._put(_BY_NAME[lost[0]], lost[1], "lost", event_id, t, playback)
