@@ -1,0 +1,41 @@
+diff --git a/dssq-groundstation/python/dssq/dictionary.py b/dssq-groundstation/python/dssq/dictionary.py
+index b5ee502..385ac80 100644
+--- a/dssq-groundstation/python/dssq/dictionary.py
++++ b/dssq-groundstation/python/dssq/dictionary.py
+@@ -142,11 +142,14 @@ RF_FLAG_BITS = ["RX_BOOST", "LBT"]
+ # "A4/A5" (NICLA bus, Wire2) or "Qwiic" (MAG bus, Wire1); evr_instrument_bus() gives the
+ # instrument and its bus named by a text, evr_not_separated() the pair a WARN 0x060D names
+ # when the Nicla Sense ME and an RM3100 share a bus, evr_instrument_lost() the instrument of
+-# a loss report. The AS7265X has no preferred bus (0x0706 names it, never a 0x060D).
++# a loss report, evr_nicla_recovered() the Nicla Sense ME's recovery after a run-time loss
++# (0x0607 names no bus: the Nicla answers again on the bus it was lost on). The AS7265X has
++# no preferred bus (0x0706 names it, never a 0x060D).
+ SENSOR_BUSES = ("A4/A5", "Qwiic")
+ SENSOR_BUS_EVRS: dict[int, tuple[str, ...]] = {
+     0x0605: ("I2C bus fault on %s (%u consecutive errors) - %s",),
+     0x0606: ("Nicla Sense ME stopped responding on %s",),
++    0x0607: ("Nicla Sense ME responding again",),
+     0x060A: ("I2C bus clear on %s: SDA or SCL still low after %u clocks",),
+     0x060B: ("instrument acquired: %s on %s",),
+     0x060D: ("%s found on %s; the recommended bus is %s (docs/03)",
+@@ -155,6 +158,7 @@ SENSOR_BUS_EVRS: dict[int, tuple[str, ...]] = {
+     0x0706: ("AS7265X HW %02X/%02X FW %u.%u.%u devices %s on %s",),
+ }
+ EVR_NICLA_LOST = 0x0606
++EVR_NICLA_RECOVERED = 0x0607
+ EVR_INSTRUMENT_ACQUIRED = 0x060B
+ EVR_WRONG_BUS = 0x060D
+ EVR_RM3100_LOST = 0x060E
+@@ -206,6 +210,12 @@ def evr_instrument_lost(event_id: int, text: str) -> tuple[str, str] | None:
+     return (name, bus) if name and bus in SENSOR_BUSES else None
+ 
+ 
++def evr_nicla_recovered(event_id: int, text: str) -> bool:
++    """True for the INFO 0x0607 "Nicla Sense ME responding again": the Nicla Sense ME
++    answers again after a run-time loss (0x0606), on the bus it was lost on (D-73)."""
++    return event_id == EVR_NICLA_RECOVERED and text.startswith("Nicla Sense ME responding again")
++
++
+ def decode_bits(value: int | None, names: list[str]) -> list[str]:
+     """Names of the set bits of a 0..2^32-1 bit mask, least significant first; a set bit
+     without a name is reported as 'b<i>' (never silently dropped). None -> []."""

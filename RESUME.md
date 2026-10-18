@@ -36,3 +36,14 @@ running: 5 lenses -> verify -> fixer (worktree, branch v31-fixes). If the fixer 
 worktree (cwd not a git repo), resume with resumeFromRunId. Then: merge v31-fixes, CHANGELOG 3.1
 section + intro, rebuild dist zips + SHA256SUMS (tools/package_apps.py), final checks, push = Drop 1.
 Then Drop 2 docs (task #62), and add the 6 DSN-inspired candidates to version4/PLAN.md if the owner says yes.
+
+STATE 2026-10-18 ~01:30 UTC (owner: "spin up more agents"; all approvals given):
+Stopped the single fixer. Findings split into scratchpad/v4/fix31/{flight,station,sensors,link,docs,all}.json.
+Running in parallel (each agent makes its own worktree under .claude/worktrees/, base 98887f5):
+ - fix workflows (script unoq-31-fixgroups-wf_801217af-f75.js): [flight, station] wf_801217af-f75,
+   [sensors, link] wf_8b564b3a-672 -> branches v31-fix-<group>; progress fix31/<group>.patch/.status
+ - docs workflows (script unoq-31-docs-wf_e97dd2a7-426.js): [W1a,W1b] wf_e97dd2a7-426, [W2,W3]
+   wf_6167cb55-fed, [W4,W5] wf_0fb65488-28a, [W6,W7] wf_0281c9b6-95d, [W8,W9] wf_1e4fa730-9fe
+   -> branches v31-doc-<W>; W1b writes docs/03_part2.fragment.md to splice at "<!-- DOCS03-PART2 -->"
+Then: merge all (fixes first), splice docs/03, regenerate docs/05, docs/13 final pass, reference sweep
+(xrefs/code_refs from writers), CHANGELOG 3.1, refresh counts, all checks + real builds, dist zips, push.

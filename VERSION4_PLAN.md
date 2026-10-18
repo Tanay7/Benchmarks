@@ -68,3 +68,17 @@ always 0). Only for the SX126x option.
     unless the packet rate supports it.
 20. Clock: Allan deviation only for multi-hour runs (1 ms tag jitter -> ~1.7e-6 at tau 1000 s); drift vs
     board temperature with a quadratic fit; needs a synced station clock.
+
+## Added 2026-10-18 (owner approved): ideas from the DSN (DSS-43, Voyager 2) receiver screens
+21. Measured vs predicted pairs everywhere (received power vs link budget, frame rate vs schedule,
+    symbol/bit rate vs nominal), side by side as the DSN shows bit rate vs predicted bit rate.
+22. Circular polarization at the ground: crossed Yagi with a phasing harness (RCP/LCP) turns a
+    rotating linear payload's 0 to 20+ dB polarization loss into a steady 3 dB; link budget term.
+23. SX126x option only: system noise temperature (K) and C/N0 (dB-Hz) from the noise floor and the
+    known LoRa bandwidth: T = 10^((N_dBm - 30 - 10log10(BW) + 228.6)/10); "n/a" on the E22 (no SNR,
+    unpublished measurement bandwidth). Label estimate (RSSI accuracy).
+24. Independent estimates shown side by side, never forced to agree (e.g. SNR from RSSI - noise vs
+    the radio's packet SNR on the SX126x; Eb/N0 from two paths); the disagreement is information.
+25. Frequency-offset trend vs board temperature (SX126x AFC frequency error = the spacecraft crystal's
+    offset, like the DSN carrier residual); E22: n/a.
+26. Optional day-of-year time format (DOY HH:MM:SS, e.g. "102 23:38:19") in the dashboard.

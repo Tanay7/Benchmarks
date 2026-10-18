@@ -1,0 +1,111 @@
+diff --git a/docs/13_Web_UI_Reference.md b/docs/13_Web_UI_Reference.md
+index a0c6f33..b32b039 100644
+--- a/docs/13_Web_UI_Reference.md
++++ b/docs/13_Web_UI_Reference.md
+@@ -719,7 +719,7 @@ checks in [4.6](#46-radio-configuration).
+ | Shown as | "Signal power est. (noise removed)" |
+ | Key | `rx.rf.pr_est_dbm` |
+ | Unit, display | dBm at the readings' resolution (1.5) |
+-| Formula | P_r = 10 log10(10^(RSSI_cal/10) - 10^(noise_cal/10)) with the noise reading of the same pass: the RSSI includes the noise power in the bandwidth, so the noise is subtracted on a linear scale. "—" when RSSI <= noise (the difference is not positive) or a value is missing. The margin uses it when the RSSI is 3-10 dB above the noise (NEAR_NOISE, below) |
++| Formula | P_r = 10 log10(10^(RSSI_cal/10) - 10^(noise_cal/10)) with the noise reading of the same pass: the RSSI includes the noise power in the bandwidth, so the noise is subtracted on a linear scale. "—" when RSSI - noise < 3 dB (NOISE_FLOOR of the noise-floor rule below: the signal is below the noise, and with the E22's 1 dB steps a difference of 1 or 2 dB is a quantisation artefact, not a signal power; LS-1) or a value is missing. The margin uses it when the RSSI is 3-10 dB above the noise (NEAR_NOISE, below) |
+ | Updates | every reception |
+ | This hardware | equals RSSI within 0.1 dB when the RSSI is 15 dB or more above the noise; undefined for LoRa packets received below the noise floor |
+ | Meaning | the carrier power alone; the E22 C/N0 est. is built on it |
+@@ -747,11 +747,11 @@ checks in [4.6](#46-radio-configuration).
+ | Shown as | "C/N₀ est.", "C/N₀ basis" |
+ | Keys | `rx.rf.cn0_est_dbhz`, `rx.rf.cn0_source` |
+ | Unit, display | dB-Hz at the readings' resolution (1.5); text |
+-| Formula | SX126x: C/N0 = SNR_meas + 10 log10(B) (basis "measured SNR + 10 log10(profile BW)"); E22: C/N0 = P_r - N0 (basis "estimate: (RSSI - noise) / assumed noise bandwidth") |
++| Formula | SX126x: C/N0 = SNR_meas + 10 log10(B) (basis "measured SNR + 10 log10(profile BW)"); E22: C/N0 = P_r - N0 (basis "estimate: (RSSI - noise) / assumed noise bandwidth"), "—" when P_r is (at the noise floor, D-76) |
+ | Updates | every reception |
+ | This hardware | the LoRa demodulator limit SNRmin (Semtech, `LORA_SNR_MIN_DB`) corresponds to C/N0 = SNRmin + 10 log10(B): 25.0 dB-Hz (profile 0), 28.0 (1), 31.0 (2), 33.5 (3), 36.0 (4), 38.5 (5), 41.0 (6), 43.5 dB-Hz (7). More than 6 dB above that is comfortable, 3 to 6 dB marginal, less than 3 dB poor (the dashboard's margin bands). For the E22 there is no published threshold: use the link margin |
+ | Meaning | carrier power per unit noise density: independent of the bandwidth, so it compares different radio settings |
+-| If abnormal | E22 "—": RSSI was not above the noise (P_r undefined) |
++| If abnormal | E22 "—": the RSSI was less than 3 dB above the noise reading of the same pass (NOISE_FLOOR: P_r not measurable) or no noise reading pairs with it |
+ | Related | SNR, N0 est., Eb/N0 est. |
+ | Example | E22: -114.2563 - (-169.9691) = 55.7128 dB-Hz; SX126x profile 1: -6.25 + 47.9588 = 41.7088 dB-Hz (13.75 dB above the 27.96 dB-Hz limit) |
+ 
+@@ -762,7 +762,7 @@ checks in [4.6](#46-radio-configuration).
+ | Shown as | "Eᵦ/N₀ est." |
+ | Key | `rx.rf.ebn0_est_db` |
+ | Unit, display | dB at the readings' resolution (1.5) |
+-| Formula | Eb/N0 = C/N0 - 10 log10(Rb), Rb = the air data rate above (nominal LoRa bit rate for the SX126x) |
++| Formula | Eb/N0 = C/N0 - 10 log10(Rb), Rb = the air data rate above (nominal LoRa bit rate for the SX126x); "—" without a C/N0 (E22: at the noise floor, D-76) |
+ | Updates | every reception |
+ | This hardware | at the LoRa demodulator limit every profile needs about 6.0 to 6.3 dB (SNRmin + 10 log10(B) - 10 log10(Rb)); SF12 profiles 6.30 dB |
+ | Meaning | energy per bit relative to the noise density: the figure coding textbooks use |
+diff --git a/dssq-groundstation/python/dssq/rxstats.py b/dssq-groundstation/python/dssq/rxstats.py
+index 7523e61..9367bc5 100644
+--- a/dssq-groundstation/python/dssq/rxstats.py
++++ b/dssq-groundstation/python/dssq/rxstats.py
+@@ -58,7 +58,9 @@ N = the noise reading of the same pass, both calibrated):
+   3 <= R - N < 10  NEAR_NOISE     the noise reading is removed: signal power est.
+                                   S = 10 log10(10^(R/10) - 10^(N/10)) (pr_est_dbm)
+   R - N < 3 dB     NOISE_FLOOR    S < N: the margin is not measurable; it is at most
+-                                  N - sensitivity (an upper bound, never shown as a margin)
++                                  N - sensitivity (an upper bound, never shown as a margin);
++                                  nor is the signal power (pr_est_dbm and the E22 C/N0 and
++                                  Eb/N0 built on it are None)
+   no N in the pass NOISE_UNKNOWN  the RSSI, not checked against the noise floor
+ Margins are given against the worst-case sensitivity (link.sensitivity_worst(), the
+ datasheet "min") and the typical one; the worst case is the one the displays colour.
+@@ -877,7 +879,13 @@ class ReceiverStats:
+         # RSSI - noise only when both readings belong to the same pass (noise_for): the last
+         # packet's RSSI minus a noise reading taken hours later was never a measured SNR.
+         noise_pair = None if rx_t is None else self.noise_for(rx_t)
+-        pr = signal_power_dbm(rssi, noise_pair)
++        sens, sens_src = s.sensitivity
++        worst, worst_src = s.sensitivity_worst
++        ma = margin_assessment(rssi, noise_pair, sens, worst)
++        # D-76: the signal power (and the E22 C/N0 and Eb/N0 built on it) only where the rule
++        # says the RSSI measures the signal; at the noise floor (R - N < 3 dB, one or two E22
++        # steps) the difference is a quantisation artefact, not a signal power.
++        pr = signal_power_dbm(rssi, noise_pair) if ma["state"] in ("SIGNAL", "NEAR_NOISE") else None
+         bw, bw_src = self.noise_bw
+         n0 = None if self.noise_dbm is None else self.noise_dbm - 10 * math.log10(bw)
+         if m.packet_mode:
+@@ -888,9 +896,6 @@ class ReceiverStats:
+             cn0_src = "estimate: (RSSI - noise) / assumed noise bandwidth"
+         rb = link.rate_bps(m, s.rate_code)
+         ebn0 = None if cn0 is None else cn0 - 10 * math.log10(rb)
+-        sens, sens_src = s.sensitivity
+-        worst, worst_src = s.sensitivity_worst
+-        ma = margin_assessment(rssi, noise_pair, sens, worst)
+         required = link.LORA_SNR_MIN_DB[prof.sf] if prof is not None else None
+         ferr_med, ferr_state = self.freq_state()
+         pkts = self.packets_ok + self.packets_crc_fail
+diff --git a/tests/test_link_legitimacy.py b/tests/test_link_legitimacy.py
+index e50e578..88499a1 100644
+--- a/tests/test_link_legitimacy.py
++++ b/tests/test_link_legitimacy.py
+@@ -173,6 +173,30 @@ def test_noise_pairs_only_within_the_pass():
+     assert r.w["10m"]["snr_est"].stats(T0 + 3601)["n"] == 0             # window: the paired one aged out
+ 
+ 
++def test_no_signal_power_c_n0_or_eb_n0_at_the_noise_floor():
++    """D-76 (LS-1): at the noise floor (R - N < 3 dB) the signal is below the noise, so the E22's
++    signal power est. and the C/N0 and Eb/N0 built on it are not measurable (None, and absent
++    from /metrics); 3-10 dB above the noise they are the noise-removed estimates."""
++    r = _rx()                                                                       # E22-400T33D
++    r.tick(T0, 90.0)
++    r.on_noise(-118.0, T0)
++    for i, rssi in enumerate((-117.0, -116.0)):                                      # 1 and 2 dB above
++        r.on_reception(T0 + 1 + i, rssi)
++        rf = r.snapshot(T0 + 1 + i)["rf"]
++        assert rf["margin_state"] == "NOISE_FLOOR" and rf["snr_est_db"] == rssi + 118.0
++        assert (rf["pr_est_dbm"], rf["cn0_est_dbhz"], rf["ebn0_est_db"]) == (None, None, None)
++        text = web.prometheus({"rx": {"state": {"los": False}, "rf": rf}})
++        assert "dssq_rf_pr_est_dbm" not in text and "dssq_rf_cn0_est_dbhz" not in text
++        assert "dssq_rf_ebn0_est_db" not in text
++    r.on_reception(T0 + 3, -112.0)                                                  # 6 dB above: NEAR_NOISE
++    rf = r.snapshot(T0 + 3)["rf"]
++    pr = 10 * math.log10(10 ** -11.2 - 10 ** -11.8)
++    assert rf["margin_state"] == "NEAR_NOISE" and rf["pr_est_dbm"] == pytest.approx(pr)
++    n0 = -118.0 - 10 * math.log10(r.cfg_noise_bw_hz)
++    assert rf["cn0_est_dbhz"] == pytest.approx(pr - n0)
++    assert rf["ebn0_est_db"] == pytest.approx(pr - n0 - 10 * math.log10(2400))
++
++
+ def test_overload_and_invalid_readings_stay_out_of_every_statistic():
+     r = _rx()
+     r.on_noise(-118.0, T0)
