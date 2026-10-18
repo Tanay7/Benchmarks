@@ -1,5 +1,5 @@
 diff --git a/docs/13_Web_UI_Reference.md b/docs/13_Web_UI_Reference.md
-index a0c6f33..b32b039 100644
+index a0c6f33..4dfd1c0 100644
 --- a/docs/13_Web_UI_Reference.md
 +++ b/docs/13_Web_UI_Reference.md
 @@ -719,7 +719,7 @@ checks in [4.6](#46-radio-configuration).
@@ -34,6 +34,85 @@ index a0c6f33..b32b039 100644
  | Updates | every reception |
  | This hardware | at the LoRa demodulator limit every profile needs about 6.0 to 6.3 dB (SNRmin + 10 log10(B) - 10 log10(Rb)); SF12 profiles 6.30 dB |
  | Meaning | energy per bit relative to the noise density: the figure coding textbooks use |
+@@ -1394,14 +1394,17 @@ Keys `linkmgr` and `rx.events`.
+ | Evaluation window | `linkmgr.recommendation.window_s` | W = max(600 s, 10 x the longest expected frame period) (F-P1-1): at the slow SX126x profiles 10 minutes hold fewer than the 10 frames needed |
+ | Recommendation | `linkmgr.recommendation` (`action`; `value` and `why` when there is a proposal or a reason to give) | NONE or "LINKRATE n", with the reason; null before the first evaluation |
+ | Margin p10 (vs worst case / typical S) | `linkmgr.recommendation.margin_p10_db`, `linkmgr.recommendation.sensitivity_dbm`, `linkmgr.recommendation.sensitivity_basis`, `linkmgr.recommendation.noise_state`, `linkmgr.recommendation.rssi_p10_dbm`, `linkmgr.recommendation.noise_mean_dbm` | 10th-percentile RSSI of the window minus the sensitivity - the worst case where the datasheet gives one (D-76) - after the noise-floor rule applied to the p10 and the window's noise mean ("≤" at the noise floor: an upper bound), rounded to 0.1 dB |
+-| FER in the window | `linkmgr.recommendation.frames`, `linkmgr.recommendation.lost`, `linkmgr.recommendation.fer` | frames received and lost in the window (without the inter-pass gaps) and their FER |
++| FER in the window | `linkmgr.recommendation.frames`, `linkmgr.recommendation.lost`, `linkmgr.recommendation.fer` | frames decoded and lost in the window (without the inter-pass gaps) and their FER; "n/a (no decoded frame in the window)" when no frame was decoded (receptions that decode to no frame give no FER, LS-2) |
+ | (snapshot) | `target_db`, `rate_code`, `power_code`, `model` in `linkmgr.recommendation` | the target, the station's rate code, the spacecraft's TX power code (RF `tx_power_code`) and the model used for that evaluation |
+ | Rate limits | `linkmgr.rate_limits` | [lowest, highest] code the manager may choose: E22 from code 2 (0 and 1 are aliases of 2.4 kbit/s), SX126x from profile 0, up to `[linkmgr] max_rate` (default 4) |
+ | Hold-off | `linkmgr.holdoff_s` | minimum time between two AUTO changes (default 600 s) |
+ | (snapshot) | `linkmgr.model` | the model whose sensitivities the manager uses |
+ 
+-Rules (every `[linkmgr] period_s`, default 60 s; at least 10 RSSI samples in the window W,
+-else "insufficient data (< 10 frames in W s)"): margin p10 < target - 3 dB, or FER > 10 %:
++Rules (every `[linkmgr] period_s`, default 60 s; at least 10 receptions with an RSSI in the
++window W, else "insufficient data (< 10 receptions in W s)", and at least 10 decoded frames,
++else "insufficient data (< 10 decoded frames in W s)": a reception is not a decoded frame - an
++SX126x station also counts foreign and CRC-failed packets - and no decoded frame is no FER,
++never a FER of 0 %): margin p10 < target - 3 dB, or FER > 10 %:
+ one code slower (more sensitive), or at the slowest usable code "improve the antennas,
+ height or feeders" (at the noise floor the margin's upper bound can still show this);
+ margin p10 > target + 9 dB and FER < 1 %: one code faster, if the margin predicted at the
+diff --git a/dssq-groundstation/python/dssq/display/dashboard.html b/dssq-groundstation/python/dssq/display/dashboard.html
+index 609c76a..f44ccf5 100644
+--- a/dssq-groundstation/python/dssq/display/dashboard.html
++++ b/dssq-groundstation/python/dssq/display/dashboard.html
+@@ -1665,7 +1665,9 @@ function renderReceiver() {
+     ["Recommendation", (rec.action || NA) + (rec.value !== undefined ? " " + rec.value : "") + (rec.why ? " — " + rec.why : "")],
+     ["Margin p10 (vs " + (rec.sensitivity_basis || "sensitivity") + " " + fu(rec.sensitivity_dbm, 1, "dBm") + ")", (rec.noise_state === "NOISE_FLOOR" ? "≤ " : "") + fu(rec.margin_p10_db, 1, "dB") +
+       (rec.noise_state ? " · " + (MSTATE_TEXT[rec.noise_state] || rec.noise_state).split(":")[0] : "")],
+-    ["FER in the window", num(rec.frames) ? fint(rec.lost) + " lost of " + fint(rec.lost + rec.frames) + " (" + fpct3(rec.fer) + ")" : NA],
++    // no decoded frame is no FER (LS-2, D-76): "0 lost of 0 (0 %)" would be a value where nothing was measured
++    ["FER in the window", num(rec.frames) && rec.frames > 0 ? fint(rec.lost) + " lost of " + fint(rec.lost + rec.frames) + " (" + fpct3(rec.fer) + ")"
++      : rec.frames === 0 ? "n/a (no decoded frame in the window)" : NA],
+     ["Rate limits", (L2.rate_limits || []).join("..")], ["Hold-off", fu(L2.holdoff_s, 0, "s")]]);
+   logLines("rx-events", (rx.events || []).slice().reverse(), e => h("div", {cls: e.event === "LOS" ? "warn" : "ok", text: iso(e.t) + " " + e.event + (e.duration_s !== undefined ? " (" + dur(e.duration_s) + ")" : "")}));
+ }
+diff --git a/dssq-groundstation/python/dssq/linkmgr.py b/dssq-groundstation/python/dssq/linkmgr.py
+index f89407c..93da819 100644
+--- a/dssq-groundstation/python/dssq/linkmgr.py
++++ b/dssq-groundstation/python/dssq/linkmgr.py
+@@ -17,7 +17,8 @@ Input (rxstats.ReceiverStats.lm_input()): the RSSI and noise statistics, frames
+ lost over the evaluation window W = max(600 s, 10 x the longest expected frame period) - a
+ fixed 10 minutes holds fewer than the 10 frames needed at the slow SX126x profiles (F-P1-1).
+ 
+-Policy (evaluated every `period_s`, at most one change per `holdoff_s`):
++Policy (evaluated every `period_s`, at most one change per `holdoff_s`; nothing is advised
++before the window holds MIN_FRAMES receptions with an RSSI and MIN_FRAMES decoded frames):
+   sensitivity S  = the worst case (link.sensitivity_worst(), the datasheet "min") where the
+                    datasheet gives one, else the typical value (D-76)
+   margin_p10     = RSSI p10 over W - S (fade-aware), with the D-76 noise-floor rule
+@@ -90,10 +91,18 @@ class LinkManager:
+             self.recommendation = {"action": "NONE", "why": f"rate code {rate_code!r} unknown", "window_s": window_s}
+             return None
+         rs = rx.get("rssi") or {}
++        span = f"{window_s:.0f} s" if isinstance(window_s, (int, float)) else "the window"
+         if rs.get("n", 0) < MIN_FRAMES:
+-            span = f"{window_s:.0f} s" if isinstance(window_s, (int, float)) else "the window"
+             self.recommendation = {"action": "NONE", "window_s": window_s,
+-                                   "why": f"insufficient data (< {MIN_FRAMES} frames in {span})"}
++                                   "why": f"insufficient data (< {MIN_FRAMES} receptions in {span})"}
++            return None
++        # A reception is not a decoded frame (an SX126x station also counts foreign and
++        # CRC-failed packets): no frame decoded is no FER at all, never a FER of 0 % (D-76).
++        fer = rx.get("fer")
++        if rx.get("frames", 0) < MIN_FRAMES or fer is None:
++            self.recommendation = {"action": "NONE", "window_s": window_s, "frames": rx.get("frames"),
++                                   "lost": rx.get("lost"), "fer": fer,
++                                   "why": f"insufficient data (< {MIN_FRAMES} decoded frames in {span})"}
+             return None
+         sens, basis = self._sens(rate_code)
+         noise = (rx.get("noise") or {}).get("mean") if (rx.get("noise") or {}).get("n") else None
+@@ -101,7 +110,6 @@ class LinkManager:
+         state = a["state"]
+         # at the noise floor the margin is only an upper bound: it can still show "low"
+         margin_p10 = a["margin_db"] if a["margin_db"] is not None else a["max_db"]
+-        fer = rx.get("fer") or 0.0
+         rec: dict[str, Any] = {"action": "NONE", "margin_p10_db": round(margin_p10, 1), "fer": fer,
+                                "target_db": self.target, "rate_code": rate_code, "power_code": power_code,
+                                "model": self.model.name, "window_s": window_s, "frames": rx.get("frames"),
 diff --git a/dssq-groundstation/python/dssq/rxstats.py b/dssq-groundstation/python/dssq/rxstats.py
 index 7523e61..9367bc5 100644
 --- a/dssq-groundstation/python/dssq/rxstats.py
@@ -109,3 +188,38 @@ index e50e578..88499a1 100644
  def test_overload_and_invalid_readings_stay_out_of_every_statistic():
      r = _rx()
      r.on_noise(-118.0, T0)
+diff --git a/tests/test_radio.py b/tests/test_radio.py
+index 9b62ec7..3534790 100644
+--- a/tests/test_radio.py
++++ b/tests/test_radio.py
+@@ -691,11 +691,29 @@ def test_link_manager_margin_against_the_worst_case_and_the_noise_floor():
+     lm.evaluate(4.5, _lm_input(-117.0, noise=-118.0), rate_code=2, power_code=0)  # upper bound 8 dB: not low,
+     assert lm.recommendation["action"] == "NONE"                                  # and never "high"
+     lm.evaluate(5.0, _lm_input(-100.0, noise=-118.0, n=9), rate_code=2, power_code=0)
+-    assert lm.recommendation["why"] == "insufficient data (< 10 frames in 600 s)"
++    assert lm.recommendation["why"] == "insufficient data (< 10 receptions in 600 s)"
+     assert lm.state("LINKRATE needs the Radio Control Unit")["executable"] is False
+     assert lm.state()["executable"] is True and lm.state()["why_not"] is None
+ 
+ 
++def test_link_manager_needs_decoded_frames_not_receptions():
++    """LS-2 (D-76): receptions are not decoded frames. 12 foreign SX126x packets at -95 dBm
++    (noise -120 dBm) and no frame decoded give no FER at all - never a FER of 0 % and a faster
++    rate; the dashboard sees the counts of the window."""
++    lm = LinkManager(target_margin_db=6.0, period_s=0, holdoff_s=0, model="SX126x", min_rate=0)
++    lm.mode = "AUTO"
++    rx = {"window_s": 600.0, "rssi": {"n": 12, "p10": -95.0}, "noise": {"n": 5, "mean": -120.0},
++          "frames": 0, "lost": 0, "fer": None}
++    assert lm.evaluate(1.0, rx, rate_code=1, power_code=0) is None
++    rec = lm.recommendation
++    assert rec["action"] == "NONE" and rec["why"] == "insufficient data (< 10 decoded frames in 600 s)"
++    assert (rec["frames"], rec["lost"], rec["fer"]) == (0, 0, None) and "margin_p10_db" not in rec
++    lm.evaluate(2.0, {**rx, "frames": 9, "lost": 0, "fer": 0.0}, rate_code=1, power_code=0)
++    assert lm.recommendation["why"] == "insufficient data (< 10 decoded frames in 600 s)"
++    rec = lm.evaluate(3.0, {**rx, "frames": 10, "lost": 0, "fer": 0.0}, rate_code=1, power_code=0)
++    assert rec is not None and rec["action"] == "LINKRATE" and rec["value"] == 2 and rec["fer"] == 0.0
++
++
+ # ================================================== automatic frequency control (24.8)
+ # Limits recomputed here from the documents: SX1261/2 DS rev 2.2 Table 3-8 FERR_L = +-25 % of
+ # BW, at SF12 also +-50 ppm, the tighter applying; Table 6-1 SF12 demodulator SNR -20 dB.
