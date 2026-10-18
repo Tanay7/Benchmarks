@@ -1,5 +1,5 @@
 diff --git a/docs/13_Web_UI_Reference.md b/docs/13_Web_UI_Reference.md
-index a0c6f33..c86f249 100644
+index a0c6f33..e5a1e28 100644
 --- a/docs/13_Web_UI_Reference.md
 +++ b/docs/13_Web_UI_Reference.md
 @@ -2108,13 +2108,18 @@ latest report per instrument. The flight sends these reports at boot (before the
@@ -37,7 +37,7 @@ index a0c6f33..c86f249 100644
  | Tilt disagreement | `imu.tilt_disagreement_deg` | ground | acos(1 - 2(dx² + dy²)): the angle between the two up vectors; ~0 when both filters agree on gravity |
  | Linear acceleration est. | `imu.lin_acc_mg`, `imu.lin_acc_abs_mg`, `imu.acc_offset_mg`, `imu.acc_sens_err_pct` | ground | ATT acc - 1 g x u in mg, with \|a\|, only when `imu.paired` and ATT b1 ACCEL. ATT v4 carries no window mean of the acceleration, so acc is the one page-0 sample of the same ARU rebuild. An **estimate, not a spacecraft acceleration**: zero-g offset up to ±50 mg over life, sensitivity error up to ±2 % (datasheet Table 117) |
 -| Windows aggregated | `imu.nwin`, `imu.gap`, `imu.acc_sat`, `imu.gyro_sat` | on board | ATT `imu_nwin` (1 s windows in the ATT period, 0 = none: group `stats`), with "windows or samples missed" (b5 GAP), "accelerometer / gyroscope near full scale" (b3 / b4) |
-+| Windows aggregated | `imu.nwin`, `imu.gap`, `imu.acc_sat`, `imu.gyro_sat` | on board | ATT `imu_nwin` (1 s windows read in the ATT period, 0 = none: group `stats`), with "windows or samples missed" (b5 GAP), "accelerometer / gyroscope near full scale" (b3 / b4). The counter saturates at 255: 255 shows "≥ 255 (counter saturated; the statistics cover every window read)", as the flight's sums keep running (an ATT period over 255 s, e.g. `PKTRATE ATT 600`) |
++| Windows aggregated | `imu.nwin`, `imu.gap`, `imu.acc_sat`, `imu.gyro_sat` | on board | ATT `imu_nwin` (1 s windows read since the previous ATT, or since ATT generation was (re)enabled, whichever is later: the first ATT after SAFE has none or one, never the SAFE period's windows; 0 = none: group `stats`), with "windows or samples missed" (b5 GAP), "accelerometer / gyroscope near full scale" (b3 / b4). The counter saturates at 255: 255 shows "≥ 255 (counter saturated; the statistics cover every window read)", as the flight's sums keep running (an ATT period over 255 s, e.g. `PKTRATE ATT 600`) |
  | Vibration RMS / peak | `imu.vib_rms_mg`, `imu.vib_peak_mg`, `imu.vib_floor_mg`, `imu.bandwidth_hz` | on board | the RMS of the windows' acceleration RMS (window mean removed, three axes) and the largest deviation of one sample from its window mean, mg; bandwidth <= `imu.bandwidth_hz` = 12.5 Hz (half the 25 Hz sample rate). Noise floor est. 1.2 mg x √3 = 2.1 mg from the datasheet value at ODR 200 Hz (25 Hz: not specified, VERIFY T-SC-14). While the body turns, the change of the gravity projection inside a window counts as vibration |
  | Mean rate | `imu.rate_mean_dps` | on board | mean of the window mean rates, °/s, 2 decimals |
 -| \|ω\| of the mean rate | `imu.rate_abs_dps`, `imu.rate_floor_dps` | ground | with the noise floor est. 0.07 °/s x √3 = 0.12 °/s (datasheet Table 119 at ODR 200 Hz). The residual gyro offset after the BHI260AP's own calibration is not specified (zero-rate offset ±1 °/s with its fast offset compensation off) |
@@ -66,7 +66,44 @@ index a0c6f33..c86f249 100644
  
  `imu.na` holds one reason per group that cannot be produced: `all` (no ATT v4 yet), `grv`
  (no valid game rotation vector: IMU_F_GRV_PRESENT or IMU_F_GRV clear, or outside the norm
-@@ -3254,7 +3259,7 @@ header pill, the OVERVIEW reasons list, the station ALARM lamp and buzzer
+@@ -2719,13 +2724,14 @@ ACCEL clear), `stats` (`imu_nwin` 0), `spin` (no window, or \|ω\| not above the
+ minimum), `motion` (no window) and always `grv_accuracy`. The ATT sentinels (0x7FFF,
+ 0xFFFF) decode to `null` and never become numbers.
+ 
+-Example (E22 sim, TEST mode; the simulator tumbles the spacecraft at 5-8 °/s, so the period
+-is "moving" and the turn of gravity inside each 1 s window dominates the vibration):
+-q_grv valid and paired, tilt / roll / pitch 100.58 / 106.77 / -50.48°, heading offset
+-+25.05° (the simulator's game-rotation reference starts 25° from the rotation vector and
+-drifts 2 °/h), tilt disagreement 0.00°, linear acceleration 2 mg (the simulated noise),
+-9 windows, vibration 24.6 / 45 mg, mean rate -0.27 -5.02 4.36 °/s, \|ω\| 6.65 °/s, spin
+-axis -0.041 -0.754 0.655, peak 7.7 °/s.
++Example (E22 sim, TEST mode, the eighth ATT of the run in [9.5](#95-imu-6-dof-over-the-session);
++the simulator tumbles the spacecraft at about 5-10 °/s (5.4 to 10.1 °/s), so the period is
++"moving" and the turn of gravity inside each 1 s window dominates the vibration): q_grv
++valid and paired, tilt / roll / pitch 100.58 / 106.77 / -50.48°, heading offset +25.05° (the
++simulator's game-rotation reference starts 25° from the rotation vector and drifts 2 °/h),
++tilt disagreement 0.00°, linear acceleration 2 mg (the simulated noise), 9 windows,
++vibration 24.6 / 44 mg, mean rate -0.27 -5.03 4.35 °/s, \|ω\| 6.66 °/s, spin axis -0.041
++-0.756 0.654, peak 7.7 °/s.
+ 
+ ### 9.5 IMU (6-DOF) over the session
+ 
+@@ -2781,9 +2787,11 @@ says how many; the table in 9.4 also shows real-time ATT only.
+ 
+ Example (E22 sim, `MODE TEST` 40 s after the start, 100 s in all): 11 points from 08:00:44
+ to 08:02:04 UTC, 4.8 to 9.6 s apart (the TEST ATT period is 8 s), no break; tilt 117.258,
+-136.374, 121.172 ... 25.846°, \|ω\| 1.872, 8.163, 9.31 ... 6.089 °/s, vibration RMS 23.4,
+-25.7, 24.0 ... 23.4 mg (the newest point equals the 9.4 table: tilt 25.85°, \|ω\| 6.09 °/s,
+-23.4 mg).
++136.374, 121.172 ... 25.846°, \|ω\| n/a, 8.157, 9.313 ... 6.105 °/s, vibration RMS n/a,
++25.7, 24.1 ... 23.3 mg. The first ATT, generated as `MODE TEST` turned ATT on, covers only
++the windows since then (none: `imu_nwin` 0, "n/a (imu_nwin 0: no complete 1 s IMU window in
++this ATT period)"), so the \|ω\| and vibration strips start at the second point. The
++newest point equals the 9.4 table: tilt 25.85°, \|ω\| 6.11 °/s, 23.3 mg.
+ 
+ ---
+ 
+@@ -3254,7 +3262,7 @@ header pill, the OVERVIEW reasons list, the station ALARM lamp and buzzer
  | `receiver overload (<n> in 10 min): received signal too strong to measure: increase distance or add attenuation (receiver damage limit +10 dBm)` | an RSSI reading at the top of the radio's scale within the last 600 s (`rxstats.OVERLOAD_RECENT_S`; D-76, [4.2](#42-rf-now) "RSSI reading") |
  | `FDIR <names>` | any HK fault-protection flag except HIBERNATE and TX_INHIBIT ([7.5](#75-fault-protection-flags)) |
  | `spacecraft reset cause BROWNOUT (check the radio supply)` | HK `reset_cause` = BROWNOUT |
@@ -75,7 +112,7 @@ index a0c6f33..c86f249 100644
  | `<n> SDLS TM rejects in the last 60 s` | TM frames refused by SDLS recently ([5.3](#53-sdls-tm-rejections)) |
  | `SDLS service mismatch suspected (spacecraft TM without AE header)` | 3 data frames in a row rejected as BAD_SPI / BAD_IV |
  | `radio model mismatch: spacecraft <m>, station <n>` | RF `radio_model` differs from the station's model |
-@@ -3437,7 +3442,7 @@ document.
+@@ -3437,7 +3445,7 @@ document.
  | `apids` | one entry per packet name (apid, count, seq_gaps, lost, aos_gap_packets, last_seq, age_s, iat_s, latency, size, vcid) | [6.3](#63-packets-by-apid) |
  | `tlm` | HK, RF, CMDVER, TIMECORR, RFSCAN, MAG, ATT, SPEC, ENV, SPECBURST: the newest real-time packet of each type received (each apid, values, limits, units, ert, scet, sclk, seq, vcid) | [7](#7-spacecraft-tab), [9](#9-science-tab) |
  | `decoded` | mode, fdir, sensors_ok, sensors_missing, reset_cause, farm_state, radio_fault, radio_model, framing, rate_label, air_rate_bps, sdls_tc_service, sdls_tm_service, sdls_tm_state, cfdp_state, seq_state, beacon, mag_bist, magcal, rf_flags, mag_flags | [7.8](#78-onboard-state-and-the-decoded-block) |
@@ -368,8 +405,101 @@ index 2cae341..9515a30 100644
          # q = body -> NED (the simulator's world is NED: MAG_FIELD_DIR points down). The flight
          # fields differ in convention: q_fus = BHI260 device -> ENU (Android world), q_triad =
          # TRIAD NED -> body (attitude.h triad_ned). ENU <-> NED is a 180 deg turn about (1,1,0).
+diff --git a/tests/test_imu_chart.py b/tests/test_imu_chart.py
+index b773f73..18cc9b2 100644
+--- a/tests/test_imu_chart.py
++++ b/tests/test_imu_chart.py
+@@ -121,7 +121,9 @@ def test_simulator_playback_is_never_drawn(monkeypatch, tmp_path):
+     w.run(60)
+     before = w.gs.science_snapshot()["imu_history"]
+     assert before["received"] >= 5 and before["playback_excluded"] == 0
+-    assert all(v is not None for k in ("tilt_deg", "rate_abs_dps", "vib_rms_mg") for v in before[k])
++    # the first ATT covers only the windows since ATT generation was enabled (D-75): none or one
++    assert all(v is not None for v in before["tilt_deg"])
++    assert all(v is not None for k in ("rate_abs_dps", "vib_rms_mg") for v in before[k][1:])
+     assert w.command("PLAYBACK START") == "EXECUTED"
+     w.run(120)
+     h = w.gs.science_snapshot()["imu_history"]
+@@ -178,19 +180,21 @@ def _harness() -> str:
+     return out
+ 
+ 
+-def _render(tmp_path: Path, state: dict, sci: dict) -> dict:
++def _render(tmp_path: Path, state: dict, sci: dict, tables: tuple[str, ...] = ()) -> dict:
++    """The note and the strips' canvas operations; with `tables`, also those elements'
++    (text, classes)."""
+     (tmp_path / "harness.js").write_text(_harness())
+     (tmp_path / "dict.json").write_bytes(web.dump_json(web.dictionary_doc()))
+     (tmp_path / "sci.json").write_text(json.dumps(sci))
+     (tmp_path / "state.json").write_text(json.dumps(state))
+-    ids = ["si-imuh-note", *STRIPS]
++    ids = ["si-imuh-note", *STRIPS, *tables]
+     out = subprocess.run(["node", str(tmp_path / "harness.js"), str(web.HTML_PATH), str(tmp_path / "state.json"),
+                           str(tmp_path / "sci.json"), str(tmp_path / "dict.json"), json.dumps(ids)],
+                          capture_output=True, text=True, timeout=120)
+     res = json.loads(out.stdout.strip().splitlines()[-1])
+     assert "fatal" not in res, res
+     assert res["tabs"] == 11 and res["errors"] == [] and res["leaks"] == [] and res["innerHTMLUsed"] == 0, res
+-    return {"note": res["ids"]["si-imuh-note"][0], **res["canvas"]}
++    return {"note": res["ids"]["si-imuh-note"][0], **res["canvas"], **{t: res["ids"][t] for t in tables}}
+ 
+ 
+ def _colours() -> list[str]:
+@@ -226,15 +230,20 @@ def test_strips_draw_the_session_on_one_time_axis(station_snapshots, tmp_path):
+     assert got["note"].startswith(f"Real-time ATT packets: {n} (bound 1,800 points), ")
+     assert "0 breaks" in got["note"] and "playback" not in got["note"]
+     clock = re.compile(r"^\d\d:\d\d:\d\d$")
+-    firsts = []
+-    for k, (cid, colour, unit) in enumerate(zip(STRIPS, _colours(), ("°", "°/s", "mg"), strict=True)):
++    xs: list[dict[int, float]] = []
++    for k, (cid, colour, unit, key) in enumerate(zip(STRIPS, _colours(), ("°", "°/s", "mg"),
++                                                     ("tilt_deg", "rate_abs_dps", "vib_rms_mg"), strict=True)):
+         s = _series(got[cid], colour)
+-        assert len(s["move"]) == 1 and len(s["line"]) == n - 1 and s["dots"] == [], (cid, s)
++        # the first ATT after MODE TEST covers only the windows since ATT generation was enabled
++        # (D-75): without one its |omega| and vibration are n/a, not drawn
++        first = next(i for i, v in enumerate(h[key]) if v is not None)
++        assert first <= (0 if key == "tilt_deg" else 1) and None not in h[key][first:], (key, h[key])
++        assert len(s["move"]) == 1 and len(s["line"]) == n - 1 - first and s["dots"] == [], (cid, s)
+         assert unit in s["text"] and EMPTY not in s["text"]
+-        # one time axis: the same first and last x in every strip, the time labels on the bottom one
+-        firsts.append((s["move"][0], s["line"][-1]))
++        xs.append(dict(enumerate([s["move"][0], *s["line"]], start=first)))
+         assert any(clock.match(x) for x in s["text"]) == (k == 2), (cid, s["text"])
+-    assert firsts[0] == firsts[1] == firsts[2]
++    # one time axis: every point at the same x in every strip, the time labels on the bottom one
++    assert all(xs[0][i] == x for strip in xs[1:] for i, x in strip.items())
+ 
+ 
+ @node
+@@ -278,3 +287,25 @@ def test_empty_and_all_n_a_strips_say_so(station_snapshots, tmp_path):
+     tilt = _series(got["si-imuh-tilt"], _colours()[0])
+     assert f"n/a in all 3 real-time ATT packets (newest: {why})" in tilt["text"] and tilt["line"] == []
+     assert len(_series(got["si-imuh-rate"], _colours()[1])["line"]) == 2
++
++
++@node
++def test_imu_table_labels_what_each_value_is(station_snapshots, tmp_path):
++    """The SCIENCE IMU table (9.4): a saturated window count is a bound, the single-sample noise
++    sits with the peak rate (not with the mean), a "stationary" from a period with missed windows
++    is qualified, and the game rotation vector is shown normalised."""
++    state, sci = station_snapshots
++    st = json.loads(json.dumps(state))
++    note = "in the >= 255 window(s) read; IMU_F_GAP: windows or samples were missed, a motion in them is not seen"
++    st["imu"].update(nwin=255, gap=True, rate_abs_dps=0.05, spin_axis=None, rate_peak_dps=0.3, vib_peak_mg=7,
++                     motion="stationary", motion_note=note)
++    text, classes = _render(tmp_path, st, sci, ("si-imu",))["si-imu"]
++    assert "≥ 255 (counter saturated; the statistics cover every window read) (windows or samples missed)" in text
++    assert "0.05 °/s (limited by the residual gyro offset, not specified: VERIFY T-SC-14)" in text
++    assert "0.3 °/s (single-sample noise est. 0.12 °/s)" in text and "noise floor est. 0.12" not in text
++    assert "stationary " + note + " (stationary: peak rate < 0.50 °/s" in text and "warn" in classes.split()
++    assert "Quaternion w x y z (device→GRV world, scalar first, normalised)" in text and "as sent" not in text
++    # an exact count below the bound, no note without a missed window
++    st["imu"].update(nwin=254, gap=False, motion_note=None)
++    text, _ = _render(tmp_path, st, sci, ("si-imu",))["si-imu"]
++    assert "Windows aggregated254" in text and "counter saturated" not in text and "IMU_F_GAP" not in text
 diff --git a/tests/test_sensors.py b/tests/test_sensors.py
-index f12f90d..1a12a03 100644
+index f12f90d..319b110 100644
 --- a/tests/test_sensors.py
 +++ b/tests/test_sensors.py
 @@ -6,6 +6,8 @@ through the real packet path (decom.encode -> Space Packet -> Decommutator) so t
@@ -493,7 +623,86 @@ index f12f90d..1a12a03 100644
  
  
  def test_playback_never_overrides_a_real_time_report():
-@@ -349,3 +406,31 @@ def test_gds_imu_and_sensor_bus_end_to_end(monkeypatch, tmp_path):
+@@ -304,7 +361,8 @@ def test_simulated_att_is_physically_consistent():
+     # q_grv = q_fus turned about the vertical: heading offset = 25 deg + 2 deg/h x 100 s, no tilt difference
+     psi, delta = sn.nine_vs_six_deg(q_fus, sn.unit_quat(v, "q_grv"))
+     assert psi == pytest.approx(GRV_YAW0_DEG + GRV_DRIFT_DPH * t / 3600, abs=0.02) and delta < 0.02
+-    # window statistics: 100 whole 1 s windows since boot; rate mean = mean body rate over them
++    # window statistics (_att called directly, as if ATT ran since boot): 100 whole 1 s windows since
++    # boot; rate mean = mean body rate over them
+     assert v["imu_flags"] == 0x47 and v["imu_nwin"] == 100
+     mean = [sum(math.degrees(_body_rates(k + (i + 0.5) / 25)[a]) for k in range(100) for i in range(25)) / 2500
+             for a in range(3)]
+@@ -318,6 +376,68 @@ def test_simulated_att_is_physically_consistent():
+     assert v["imu_nwin"] == 8
+ 
+ 
++def test_simulated_imu_stats_flag_only_with_a_window():
++    """The flight sets IMU_F_STATS exactly when imu_nwin >= 1: an ATT before the first whole SCLK
++    second has neither, its statistics are the sentinels."""
++    sim, v = _sim_att(0.4)
++    assert v["imu_nwin"] == 0 and v["imu_flags"] == 0x45 and "vib_rms" not in v
++    p = sn.imu_products(_att(imu_flags=v["imu_flags"], imu_nwin=0, vib_rms=None, vib_peak=None, rate_mean_x=None,
++                             rate_mean_y=None, rate_mean_z=None, rate_peak=None), *STILL)
++    assert p["flags"] == ["GRV", "PAIRED", "GRV_PRESENT"] and "imu_nwin 0" in p["na"]["stats"]
++    sim._emit_values = lambda apid, vals, vc, now: v.update(vals)
++    sim._att(sim.t0 + 3.2)
++    assert v["imu_nwin"] == 3 and v["imu_flags"] == 0x47
++
++
++def _sim_run(sim, clock, seconds: float, step: float = 0.25) -> list[dict]:
++    """The simulator's own scheduler for `seconds`; the ATT values it generated."""
++    got: list[dict] = []
++    sim._emit_values = lambda apid, v, vc, now: got.append(dict(v)) if apid == dd.APID_ATT else None
++    end = clock[0] + seconds
++    while clock[0] < end:
++        sim._run_spacecraft(clock[0])
++        clock[0] += step
++    return got
++
++
++def test_simulated_att_windows_start_when_att_is_enabled():
++    """D-75: no window is kept while ATT is off (SAFE): the first ATT after MODE TEST covers only the
++    windows since ATT generation was enabled, not the SAFE period (at most one window here)."""
++    from dssq.config import load_config
++    from dssq.sim import SimSpacecraft
++
++    clock = [1_800_000_000.0]
++    sim = SimSpacecraft(load_config(), clock=lambda: clock[0], seed=3)
++    assert _sim_run(sim, clock, 600.0) == []                             # SAFE: ATT off
++    sim._effect(0x02, bytes([4]), clock[0])                              # MODE TEST
++    atts = _sim_run(sim, clock, 20.0)
++    assert len(atts) == 3 and atts[0]["imu_nwin"] <= 1 and [a["imu_nwin"] for a in atts[1:]] == [8, 8]
++    assert all(bool(a["imu_flags"] & 0x02) == (a["imu_nwin"] >= 1) for a in atts)
++
++
++def test_simulated_att_period_over_255_s_saturates_the_count_only():
++    """imu_nwin saturates at 255 as the flight's counter does; the statistics cover every window
++    (PKTRATE ATT 600: 600 windows)."""
++    from dssq.config import load_config
++    from dssq.sim import ATT_IDX, SimSpacecraft, _body_rates
++
++    clock = [1_800_000_000.0]
++    sim = SimSpacecraft(load_config(), clock=lambda: clock[0], seed=3)
++    sim._effect(0x02, bytes([4]), clock[0])                              # MODE TEST
++    sim.period_override[ATT_IDX] = 600                                   # PKTRATE ATT 600
++    atts = _sim_run(sim, clock, 601.0, step=1.0)
++    assert len(atts) == 2 and atts[1]["imu_nwin"] == 255
++    end = int(clock[0] - 1.0 - sim.t0)
++
++    def mean(first: int) -> list[float]:
++        return [sum(math.degrees(_body_rates(k + (i + 0.5) / 25)[a]) for k in range(first, end) for i in range(25))
++                / (25 * (end - first)) for a in range(3)]
++
++    got = [atts[1][f"rate_mean_{a}"] for a in "xyz"]
++    assert got == pytest.approx(mean(end - 600), abs=0.02)
++    assert max(abs(g - m) for g, m in zip(got, mean(end - 255), strict=True)) > 0.1    # not the newest 255 only
++
++
+ def test_simulator_boot_reports_the_recommended_bus_layout():
+     sim, _ = _sim_att(1.0)
+     evrs = [(eid, text) for _sev, eid, text in sim.evr_q]
+@@ -349,3 +469,31 @@ def test_gds_imu_and_sensor_bus_end_to_end(monkeypatch, tmp_path):
      s = w.gs.snapshot()
      assert s["sensor_bus"]["separated"] is False and s["sensor_bus"]["shared_bus"] == "A4/A5"
      assert sn.NOT_SEPARATED_REASON in s["alarm_reasons"] and s["alarm"] in ("YELLOW", "RED")

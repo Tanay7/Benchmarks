@@ -1,0 +1,114 @@
+diff --git a/vgq1-spacecraft/sketch/src/fsw/attitude.cpp b/vgq1-spacecraft/sketch/src/fsw/attitude.cpp
+index 8384d1a..43c1908 100644
+--- a/vgq1-spacecraft/sketch/src/fsw/attitude.cpp
++++ b/vgq1-spacecraft/sketch/src/fsw/attitude.cpp
+@@ -179,17 +179,22 @@ void ImuStats::reset() {
+ }
+ 
+ bool ImuStats::add(const AruImu& m) {
+-  if (seen_ && m.win_seq == last_win_) return false;          // the same window again
+-  // win_seq 0 with nothing counted is the ARU before its first window: nothing to add yet.
++  // win_seq 0 with nothing counted (n 0, neither STATS nor MISSED) is the ARU before its
++  // first window: nothing to add. After a window was seen it means that the ARU restarted
++  // (the page shows that state for ~1 s after every start): the windows of the outage went
++  // by unread, a gap. A completed window 0 (after 255) has n > 0 and STATS or MISSED.
+   if (m.win_seq == 0 && m.n == 0 && !(m.flags & (ARU_IMU_STATS | ARU_IMU_MISSED))) {
+-    seen_ = true;
++    if (seen_ && !pre_) gap_ = true;
++    seen_ = pre_ = true;
+     last_win_ = 0;
+     return false;
+   }
++  if (seen_ && !pre_ && m.win_seq == last_win_) return false;   // the same window again
+   // Windows that completed between two readings went by unread (modulo 256: a counter
+-  // that moved backwards - an ARU restart - also shows as a gap).
++  // that moved backwards - an ARU restart read after its first window - also shows as a gap).
+   if (seen_ && (uint8_t)(m.win_seq - last_win_) != 1u) gap_ = true;
+   seen_ = true;
++  pre_ = false;
+   last_win_ = m.win_seq;
+   if (m.flags & ARU_IMU_MISSED) gap_ = true;
+   if (m.flags & ARU_IMU_ACC_SAT) acc_sat_ = true;
+diff --git a/vgq1-spacecraft/sketch/src/fsw/attitude.h b/vgq1-spacecraft/sketch/src/fsw/attitude.h
+index 64fba59..76b8639 100644
+--- a/vgq1-spacecraft/sketch/src/fsw/attitude.h
++++ b/vgq1-spacecraft/sketch/src/fsw/attitude.h
+@@ -72,7 +72,9 @@ struct AruImu {
+   uint8_t  seq = 0;                       // ARU rebuild counter (the same as pages 0 / 1)
+   uint8_t  flags = 0;                     // AruImuFlag (ARU_IMU_GRV withdrawn by the norm gate)
+   int16_t  q_grv[4] = {16384, 0, 0, 0};   // w, x, y, z x 16384
+-  uint8_t  win_seq = 0;                   // +1 per completed window (0: none completed yet)
++  uint8_t  win_seq = 0;                   // +1 per completed window, mod 256 (0 with n 0 and
++                                          // neither STATS nor MISSED: none completed since the
++                                          // ARU started; a completed window 0 follows 255)
+   uint8_t  n = 0;                         // samples in that window, min(accel, gyro)
+   int16_t  acc_mean_mg[3] = {0, 0, 0};
+   uint16_t vib_rms_dmg = 0;               // 0.1 mg
+@@ -87,19 +89,52 @@ struct AruImu {
+ // for the page-0 rotation vector (payload.cpp read_motion).
+ bool aru_decode_imu(const uint8_t* page, AruImu& out);
+ 
++// D-75 pairing of page 2 with page 0 (Flight::start_mag_sample). `motion` holds the page 0
++// just read (any type with a uint8_t `seq`, the ARU rebuild counter); read_imu(AruImu&) reads
++// page 2 right after it. When page 2 comes from a later rebuild, read_motion(Motion&) reads
++// page 0 once more - it then normally comes from page 2's rebuild - and replaces `motion`
++// only when that read succeeds. `paired` = both pages from one rebuild (equal seq), whatever
++// their content: it does not depend on the 9-DOF quaternion or any other validity flag.
++struct AruPairing {
++  bool imu_ok = false;     // page 2 read and decoded (`imu` set)
++  bool paired = false;     // imu_ok and imu.seq == motion.seq
++};
++template <class Motion, class ReadMotion, class ReadImu>
++AruPairing aru_read_paired(Motion& motion, AruImu& imu, ReadMotion read_motion, ReadImu read_imu) {
++  AruPairing p;
++  p.imu_ok = read_imu(imu);
++  if (p.imu_ok && imu.seq != motion.seq) {
++    Motion again = motion;
++    if (read_motion(again)) motion = again;
++  }
++  p.paired = p.imu_ok && imu.seq == motion.seq;
++  return p;
++}
++
++// The flight reads page 2 at least every kAruImuReadMs, PA keyed or not, and again with
++// page 0 in its 1 Hz sample (D-75). Page 2 holds no magnetometer data - statistics the
++// Nicla computed over its own windows - so the PA-off rule of the samples (D-45) does not
++// apply to it. Twice per second, not once: the ARU shows only its last completed window
++// and rebuilds its pages at 10 Hz on its own clock, so a 1 Hz read whose phase sits near
++// the window edge skips windows (host test imu_window_reads); at 500 ms a window goes by
++// unread only when the loop is held for more than ~400 ms.
++static const uint32_t kAruImuReadMs = 500;
++
+ // Aggregation of ARU page-2 windows over one ATT period, i.e. the time since the previous
+-// ATT packet (D-75). The flight reads page 2 at its 1 Hz sample, taken in a PA-off window
+-// and therefore not locked to the Nicla's windows: a window is counted once
+-// (win_seq de-duplication) and windows that went by unread are gaps. Over the valid windows
+-// (ARU_IMU_STATS): vib_rms = RMS of the windows' vibration RMS, peaks = maximum,
+-// rate_mean = mean of the window means; saturation flags are ORed over every new window.
+-// No windows -> the ATT sentinels. Pure (host-tested).
++// ATT packet or since ATT generation was (re)enabled, whichever is later (D-75: the flight
++// resets it every second while ATT is off). The reads are not locked to the Nicla's windows:
++// a window is counted once (win_seq de-duplication) and windows that went by unread are
++// gaps. Over the valid windows (ARU_IMU_STATS): vib_rms = RMS of the windows' vibration
++// RMS, peaks = maximum, rate_mean = mean of the window means; saturation flags are ORed over
++// every new window. No windows -> the ATT sentinels. Pure (host-tested).
+ class ImuStats {
+  public:
+   // Starts a new ATT period. The last win_seq seen is kept, so a window already counted is
+   // not counted again in the next period.
+   void reset();
+-  // One page-2 reading; true when it brought a window not seen before.
++  // One page-2 reading; true when it brought a window not seen before. An ARU that went
++  // back to its state before the first window (win_seq 0, n 0, after windows were seen) has
++  // restarted: the windows of the outage are a gap.
+   bool add(const AruImu& m);
+   uint8_t windows() const { return (uint8_t)(n_ > 255u ? 255u : n_); }   // valid windows (ATT imu_nwin)
+   bool gap() const { return gap_; }
+@@ -119,6 +154,7 @@ class ImuStats {
+   int64_t rate_sum_[3] = {0, 0, 0};       // sum of the window means, 0.01 deg/s
+   bool gap_ = false, acc_sat_ = false, gyro_sat_ = false;
+   bool seen_ = false;                     // last_win_ valid
++  bool pre_ = false;                      // the last reading was the ARU before its first window
+   uint8_t last_win_ = 0;
+ };
+ 

@@ -1,3 +1,138 @@
+diff --git a/docs/08_Verification_and_Test.md b/docs/08_Verification_and_Test.md
+index 327f3e6..10c9dc9 100644
+--- a/docs/08_Verification_and_Test.md
++++ b/docs/08_Verification_and_Test.md
+@@ -146,8 +146,11 @@ arduino-cli's prototype generation.
+ Builds the **real** station sketch for the PC (stub core, a recording Bridge, a fake SX126x on
+ the SPI) and runs it on real threads: CardKB key-test mode, the RPC mailbox (a handler called
+ from another thread runs on the loop thread; an unserved request times out and never runs),
+-the `rf_rx` length bound, TX-fault handling, the `S|` status line fields. **26 checks**, 0
+-failures; CI also runs it under AddressSanitizer + UBSan and under ThreadSanitizer.
++the `rf_rx` length bound, TX-fault handling, the `S|` status line fields, the Radio Control
++Unit state in the hello and the LED-matrix link status (D-78), whose blinks and RCU age are
++stepped through `loop()` on a manual clock, one pass per millisecond, across the 2^32
++`millis()` wrap. **57 checks**, 0 failures; CI also runs it under AddressSanitizer + UBSan and
++under ThreadSanitizer.
+ 
+ ### 2.5 RouterBridge harness and stack bound (`tools/host_test/routerbridge`)
+ 
+@@ -256,7 +259,7 @@ CCSDS121_TESTDATA=/path/to/libaec/data/121B2TestData tools/host_test/host_test /
+ bash tools/host_test/check_firmware.sh                             # every line "ok", exit 0
+ 
+ # 4. Station sketch harness (CI adds SAN="-fsanitize=address,undefined ..." and SAN=-fsanitize=thread)
+-bash tools/host_test/station/run.sh                                # "26 checks passed, 0 failed"
++bash tools/host_test/station/run.sh                                # "57 checks passed, 0 failed"
+ 
+ # 5. Real build, as App Lab (arduino-cli with the "Arduino Q Boards" platform arduino:zephyr)
+ for app in vgq1-spacecraft dssq-groundstation; do
+diff --git a/docs/13_Web_UI_Reference.md b/docs/13_Web_UI_Reference.md
+index a0c6f33..299c40c 100644
+--- a/docs/13_Web_UI_Reference.md
++++ b/docs/13_Web_UI_Reference.md
+@@ -1089,8 +1089,8 @@ gain, CAD before TX, FERR_L, frequency offset calibration) are replaced by one l
+ |---|---|---|
+ | Backend (serial port open / bridge attached) | `radio.backend_available`, `radio.backend_error` | whether the GDS has a radio backend; "UNAVAILABLE" with the reason (red badge and a RED alarm "radio backend unavailable: ..."): E22 serial port missing (`[radio] port`, permissions), or no Router Bridge for the SX126x. "available" means the port is open, not that a module answers behind the USB-UART bridge |
+ | Module answering (F-P1-4) | `radio.module_answering` (true / null), `radio.module_evidence` | E22: "yes" when the module produced output - a CADU or a noise reply - within 3 x `[radio] noise_poll_s`; otherwise "unknown" (no evidence either way: the noise query goes out only after a received frame, so between passes nothing asks). SX126x: the station MCU's status line within 15 s (false when older). The evidence text says which |
+-| Radio Control Unit | `radio.rcu` | E22: the station MCU drives the module's M0 / M1 and reads AUX ("active"); needed for GSCAN, WAKE, LINKRATE, LINKCHAN and the configuration read-back; without it "off ([gds] rcu = false): no register read-back, GSCAN, WAKE, LINKRATE or LINKCHAN" (the shipped E15-USB-T2 default). SX126x: "n/a" |
+-| Register check | `radio.register_check` | E22 with an RCU: "read back: matches station.toml" (green) or "read back: MISMATCH <fields>" (red) after VERIFY / RADIO, "not read back yet" before; without an RCU: "not read back: no Radio Control Unit ([gds] rcu = false) - RSSI byte and noise enable assumed from station.toml" (amber): every RSSI and noise value then rests on the module being configured as station.toml says. SX126x: "n/a (the station MCU sketch configures the radio)" |
++| Radio Control Unit | `radio.rcu`, `radio.rcu_unavailable` | E22: the station MCU drives the module's M0 / M1 and reads AUX ("active"); needed for GSCAN, WAKE, LINKRATE, LINKCHAN and the configuration read-back; without it "off ([gds] rcu = false): no register read-back, GSCAN, WAKE, LINKRATE or LINKCHAN" (the shipped E15-USB-T2 default). With `[gds] rcu = true` but no RCU in use, amber "NOT AVAILABLE ([gds] rcu = true): <reason>: ..." with `radio.rcu_unavailable`: "no radio backend (<serial port error>)" (the E22 serial port did not open: see Backend) or "no Router Bridge to the station MCU" (event WARN GDS "router bridge unavailable"); station.toml is then already right. `radio.rcu_unavailable` is null when the RCU is active, with `rcu = false` and for the SX126x. SX126x: "n/a" |
++| Register check | `radio.register_check` | E22 with an RCU: "read back: matches station.toml" (green) or "read back: MISMATCH <fields>" (red) after VERIFY / RADIO, "not read back yet" before; without an RCU: "not read back: no Radio Control Unit ([gds] rcu = false) - RSSI byte and noise enable assumed from station.toml" (amber), or with `rcu = true` and the RCU not available "not read back: Radio Control Unit not available ([gds] rcu = true: <reason as `radio.rcu_unavailable`>) - ..." (amber): every RSSI and noise value then rests on the module being configured as station.toml says. SX126x: "n/a (the station MCU sketch configures the radio)" |
+ | Configured (station.toml) | `radio.configured` (`channel`, `air_rate`, `power`, `lbt`) | the values in the configuration file at start-up |
+ | Allowed channels | `radio.allowed_channels` | `[radio] allowed_channels`: CHANNEL and LINKCHAN outside this list are refused (licence and band plan) |
+ | Coordinated change | `radio.link_change` (`kind`, `value`, `state`, ...) | a LINKRATE / LINKCHAN in progress: state WAIT_EXEC (the AIRRATE / CHANNEL command is on its way), WAIT_SWITCH (executed on board; the spacecraft switches after 2 more frames), SWITCHED (the ground switched and sent a NOOP; waiting for the first frame on the new setting). "none" otherwise. No frame after the switch within `revert_s` + 30 s + 2 frame periods: the ground switches back (the spacecraft also reverts by itself without uplink) |
+diff --git a/dssq-groundstation/python/dssq/display/dashboard.html b/dssq-groundstation/python/dssq/display/dashboard.html
+index 609c76a..f51be47 100644
+--- a/dssq-groundstation/python/dssq/display/dashboard.html
++++ b/dssq-groundstation/python/dssq/display/dashboard.html
+@@ -1502,7 +1502,7 @@ function renderReceiver() {
+     sets: [{name: "ground GSCAN", v: gnd, color: COL.s1}, {name: "spacecraft RFSCAN", v: scn, color: COL.s2, dots: true}],
+     extra: i => ["f = " + (410.125 + i).toFixed(3) + " MHz" + (allowed.includes(i) ? " (allowed)" : "")]});
+   setText("rx-scan-note", (ls ? "GSCAN " + iso(ls.t) + ": quietest CH" + ls.quietest + ", quietest allowed CH" + ls.quietest_allowed + ", " + fu(ls.duration_s, 2, "s")
+-    : "no ground survey (GSCAN" + (!sx && !R.rcu ? ": needs the Radio Control Unit, [gds] rcu = false)" : ")")) +
++    : "no ground survey (GSCAN" + (!sx && !R.rcu ? ": needs the Radio Control Unit, " + (R.rcu_unavailable ? "not available: " + R.rcu_unavailable : "[gds] rcu = false") + ")" : ")")) +
+           " · " + (scv ? "RFSCAN CH" + scv.first_ch + "..CH" + (scv.first_ch + scv.count - 1) + " in " + fint(scv.duration_ms, "ms") : "no spacecraft survey (RFSCAN)"));
+   // ---- radio configuration
+   const rr = [];
+@@ -1538,7 +1538,9 @@ function renderReceiver() {
+     ["Backend (serial port open / bridge attached)", N([R.backend_available ? "available" : "UNAVAILABLE", R.backend_error ? badge(R.backend_error, "bad") : null])],
+     ["Module answering (F-P1-4)", V(R.module_answering === true ? "yes: " + (R.module_evidence || "") : R.module_answering === false ? "NO: " + (R.module_evidence || "") : "unknown: " + (R.module_evidence || NA),
+       R.module_answering === true ? "ok" : R.module_answering === false ? "bad" : "dim")],
+-    ["Radio Control Unit", R.packet_mode ? "n/a (SX126x: no M0/M1/AUX)" : R.rcu ? "active" : "off ([gds] rcu = false): no register read-back, GSCAN, WAKE, LINKRATE or LINKCHAN"],
++    ["Radio Control Unit", R.packet_mode ? "n/a (SX126x: no M0/M1/AUX)" : R.rcu ? "active"
++      : R.rcu_unavailable ? V("NOT AVAILABLE ([gds] rcu = true): " + R.rcu_unavailable + ": no register read-back, GSCAN, WAKE, LINKRATE or LINKCHAN", "warn")
++      : "off ([gds] rcu = false): no register read-back, GSCAN, WAKE, LINKRATE or LINKCHAN"],
+     ["Register check", V(R.register_check || NA, /MISMATCH/.test(R.register_check || "") ? "bad" : /^read back: matches/.test(R.register_check || "") ? "ok" : "warn")],
+     ["Configured (station.toml)", R.configured ? "CH" + R.configured.channel + " code " + R.configured.air_rate + " pwr " + R.configured.power + " LBT " + fyn(R.configured.lbt) : NA],
+     ["Allowed channels", (R.allowed_channels || []).join(" ")],
+diff --git a/dssq-groundstation/python/dssq/gds.py b/dssq-groundstation/python/dssq/gds.py
+index 9a7d5c3..cb8e0e9 100644
+--- a/dssq-groundstation/python/dssq/gds.py
++++ b/dssq-groundstation/python/dssq/gds.py
+@@ -2241,6 +2241,10 @@ class GroundStation:
+     def _matrix_status(self, now: float) -> dict[str, Any]:
+         """The station MCU's LED-matrix fields (D-78; frontpanel.matrix_line). Only what this
+         GDS measures; None = not produced, and the MCU leaves that row blank:
++          sync          the frame synchronizer's state while radio units arrive: SEARCH once
++                        none came within the LOS timeout (the synchronizer changes state only
++                        on received octets, so it would keep its last LOCK through LOS);
++                        PACKET for the SX126x packet radio
+           tx            the GDS handed CLTUs or the identification to the radio and their
+                         planned air time is not over, held PANEL_TX_HOLD_S (one status line)
+                         so a short burst shows (the SX126x sketch adds its own TX state)
+@@ -2265,7 +2269,8 @@ class GroundStation:
+         floor = a["state"] == "NOISE_FLOOR"
+         margin = (a["worst_max_db"] if a["worst_max_db"] is not None else a["max_db"]) if floor \
+             else rxs.margin_colour_db(a)
+-        return {"sync": "PACKET" if self.settings.model.packet_mode else self.sync.state,
++        sync = "PACKET" if self.settings.model.packet_mode else (self.sync.state if recent else "SEARCH")
++        return {"sync": sync,
+                 "tx": self.mono() < self._uplink_tx_until + PANEL_TX_HOLD_S,
+                 "rssi_dbm": rx.last_rx.get("rssi_dbm"),
+                 "rssi_recent": recent,
+@@ -2276,16 +2281,31 @@ class GroundStation:
+                 "clock_synced": self.station_clock.synced}
+ 
+     # -------------------------------------------------------------- snapshot
++    def _rcu_unavailable(self) -> str | None:
++        """radio.rcu_unavailable (D-78): why the Radio Control Unit is not in use although
++        [gds] rcu = true - no radio backend (the E22 serial port did not open: the RadioManager
++        needs both), or no Router Bridge to the station MCU (the Runner then builds no RCU).
++        None when it is in use, with [gds] rcu = false and for the SX126x (no M0/M1/AUX)."""
++        rm = self.radio_mgr
++        if self.settings.model.packet_mode or not self.cfg["gds"]["rcu"] or (rm is not None and rm.rcu is not None):
++            return None
++        if self.radio_backend is None:
++            return "no radio backend" + (f" ({self.radio_unavailable})" if self.radio_unavailable else "")
++        return "no Router Bridge to the station MCU"
++
+     def _register_check(self) -> str:
+         """radio.register_check (F-P1-4): whether the station module's registers were read
+-        back and match station.toml - with [gds] rcu = false nothing is read back, so the RSSI
+-        octet and the noise register are what station.toml says, not verified."""
++        back and match station.toml - without an RCU in use ([gds] rcu = false, or the RCU not
++        available) nothing is read back, so the RSSI octet and the noise register are what
++        station.toml says, not verified."""
+         if self.settings.model.packet_mode:
+             return "n/a (SX126x: the station MCU sketch configures the radio; see the SX126x station MCU panel)"
+         rm = self.radio_mgr
+         if rm is None or rm.rcu is None:
+-            return ("not read back: no Radio Control Unit ([gds] rcu = false) - RSSI byte and noise enable "
+-                    "assumed from station.toml")
++            why = self._rcu_unavailable()
++            rcu = f"Radio Control Unit not available ([gds] rcu = true: {why})" if why \
++                else "no Radio Control Unit ([gds] rcu = false)"
++            return f"not read back: {rcu} - RSSI byte and noise enable assumed from station.toml"
+         cfg = self.ground_radio
+         if cfg is None:
+             return "not read back yet (VERIFY / RADIO pending or the module did not answer)"
+@@ -2421,6 +2441,7 @@ class GroundStation:
+                           # The RCU drives the E22 M0/M1/AUX lines; a packet (SX126x) manager has none.
+                           "model_mismatch": self.model_mismatch,
+                           "rcu": bool(rm and rm.rcu is not None and rm.available),
++                          "rcu_unavailable": self._rcu_unavailable(),
+                           "backend_available": self.radio_backend is not None,
+                           "backend_error": self.radio_unavailable,
+                           "ground_config": self.ground_radio,
 diff --git a/dssq-groundstation/sketch/sketch.ino b/dssq-groundstation/sketch/sketch.ino
 index 3d72ea1..42bafc6 100644
 --- a/dssq-groundstation/sketch/sketch.ino
@@ -72,6 +207,117 @@ index 3d72ea1..42bafc6 100644
    g_matrix.draw(g_frame);
  }
  
+diff --git a/tests/test_station_io.py b/tests/test_station_io.py
+index e147ce7..dfc73c5 100644
+--- a/tests/test_station_io.py
++++ b/tests/test_station_io.py
+@@ -11,6 +11,7 @@ import time
+ 
+ import pytest
+ 
++from dssq.ccsds.tm import FHP_ONLY_IDLE_DATA, build_frame, encode_cadu
+ from dssq.config import load_config
+ from dssq.display import frontpanel as fp
+ from dssq.gds import GroundStation
+@@ -144,3 +145,49 @@ def test_panel_status_matrix_fields_without_reception(tmp_path, monkeypatch):
+     assert m == {"sync": "SEARCH", "tx": False, "rssi_dbm": None, "rssi_recent": False, "rssi_overload": None,
+                  "margin_db": None, "margin_floor": None, "lost_10m": 0, "clock_synced": None}
+     assert fp.matrix_line(gs.panel_status()) == "M|S|0|-|?|0|?"
++
++
++def test_matrix_frame_sync_row_goes_dark_at_los(tmp_path, monkeypatch):
++    """The frame synchronizer changes state only on received octets, so after a pass it keeps
++    its last LOCK; the M line sends SEARCH once no radio unit came within the LOS timeout."""
++    t0 = 1_800_000_000.0
++    now = [t0 + 3]
++    monkeypatch.setattr(time, "time", lambda: now[0])
++    gs = _gs(tmp_path, monkeypatch, rcu=False)
++    for i in range(3):                                     # [CADU][RSSI octet 156 = -100 dBm]
++        gs.ingest(encode_cadu(build_frame(0, i, i, FHP_ONLY_IDLE_DATA, bytes(188), 0)) + bytes([156]), t0 + i)
++    gs.housekeeping(now[0])
++    assert gs.sync.state == "LOCK" and gs.panel_status()["matrix"]["sync"] == "LOCK"
++    assert fp.matrix_line(gs.panel_status()).startswith("M|L|")
++    los = gs.rx.los_timeout_s                              # set by housekeeping()
++    assert los is not None
++    now[0] = t0 + 2 + los + 1                              # past the LOS timeout, nothing received
++    gs.ingest(b"", now[0])
++    gs.housekeeping(now[0])
++    assert gs.rx.los and gs.sync.state == "LOCK"            # the synchronizer itself is unchanged
++    m = gs.panel_status()["matrix"]
++    assert (m["sync"], m["rssi_recent"]) == ("SEARCH", False)
++    assert fp.matrix_line(gs.panel_status()).startswith("M|S|0|-|")
++
++
++
++def test_rcu_configured_but_not_available_is_not_called_rcu_false(tmp_path, monkeypatch):
++    """D-78: with [gds] rcu = true and no RCU in use, radio.rcu_unavailable and the register
++    check give the reason - no radio backend (serial port) or no Router Bridge - instead of
++    sending the operator to a station.toml that already says true."""
++    gs = _gs(tmp_path, monkeypatch, rcu=True)
++    gs.attach_radio(None, None, "E22-400T33D serial port: [Errno 2] No such file or directory")
++    r = gs.snapshot()["radio"]
++    assert r["rcu"] is False and gs.snapshot()["station_io"]["rcu_configured"] is True
++    assert r["rcu_unavailable"] == "no radio backend (E22-400T33D serial port: [Errno 2] No such file or directory)"
++    assert r["register_check"] == ("not read back: Radio Control Unit not available ([gds] rcu = true: no radio "
++                                   "backend (E22-400T33D serial port: [Errno 2] No such file or directory)) - RSSI "
++                                   "byte and noise enable assumed from station.toml")
++    gs.attach_radio(object(), None)                          # port open, no Router Bridge: no RCU built
++    r = gs.snapshot()["radio"]
++    assert r["rcu_unavailable"] == "no Router Bridge to the station MCU" and "rcu = false" not in r["register_check"]
++    off = _gs(tmp_path / "off", monkeypatch, rcu=False)
++    off.attach_radio(object(), None)
++    r = off.snapshot()["radio"]
++    assert r["rcu_unavailable"] is None
++    assert r["register_check"].startswith("not read back: no Radio Control Unit ([gds] rcu = false) - ")
+diff --git a/tests/test_web.py b/tests/test_web.py
+index 9203730..fc11d66 100644
+--- a/tests/test_web.py
++++ b/tests/test_web.py
+@@ -839,6 +839,24 @@ def test_dashboard_renders_every_tab_in_node(sim_station, tmp_path):
+             assert res["injected"] >= 6                                         # shown as text, never parsed
+ 
+ 
++@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
++def test_radio_panel_says_why_a_configured_rcu_is_not_available(sim_station, tmp_path):
++    """D-78: with [gds] rcu = true but no Radio Control Unit in use, the RECEIVER radio panel and
++    the RF-survey note give the reason (radio.rcu_unavailable) instead of "[gds] rcu = false",
++    which they show only when station.toml says false."""
++    _, snap, sci = sim_station
++    st = json.loads(json.dumps(snap))
++    st["radio"].update(rcu=False, rcu_unavailable="no Router Bridge to the station MCU", last_scan=None)
++    got = _render(tmp_path, st, sci, ["rx-radio", "rx-scan-note"])
++    assert "NOT AVAILABLE ([gds] rcu = true): no Router Bridge to the station MCU" in got["rx-radio"][0]
++    assert "needs the Radio Control Unit, not available: no Router Bridge to the station MCU" in got["rx-scan-note"][0]
++    assert "rcu = false" not in got["rx-radio"][0] + got["rx-scan-note"][0]
++    st["radio"]["rcu_unavailable"] = None
++    got = _render(tmp_path, st, sci, ["rx-radio", "rx-scan-note"])
++    assert "off ([gds] rcu = false)" in got["rx-radio"][0] and "NOT AVAILABLE" not in got["rx-radio"][0]
++    assert "needs the Radio Control Unit, [gds] rcu = false" in got["rx-scan-note"][0]
++
++
+ def _render(tmp_path, state, sci, ids):
+     harness = tmp_path / "harness.js"
+     harness.write_text(NODE_HARNESS)
+diff --git a/tools/host_test/station/run.sh b/tools/host_test/station/run.sh
+index 7b0cad1..ae580fc 100755
+--- a/tools/host_test/station/run.sh
++++ b/tools/host_test/station/run.sh
+@@ -9,12 +9,13 @@
+ #                 mailbox (C50 / decision I4): a handler called from another thread is
+ #                 executed by the loop thread; an unserved request times out and never
+ #                 runs; pin plan H (D-72); the RCU state in the hello and the LED-matrix
+-#                 link status (D-78)
++#                 link status (D-78), the matrix blinks and the RCU age stepped through
++#                 loop() on a manual clock, across the 2^32 millis() wrap
+ #   test_sx.cpp   SX126x build (DSSQ_RADIO_SX126X=1) for the SX1268 and the SX1262,
+ #                 compiled with the bundled patched RadioLib: rf_rx length bound (C54),
+ #                 TX-fault dequeue (C25), S| status fields (I3), SX126x pins, time on air,
+ #                 the matrix uplink row in TX
+-# 31 checks + 2 x 10 checks = 51. CI runs it under AddressSanitizer + UBSan and under
++# 37 checks + 2 x 10 checks = 57. CI runs it under AddressSanitizer + UBSan and under
+ # ThreadSanitizer (the mailbox is a cross-thread protocol).
+ #
+ # Usage: tools/host_test/station/run.sh [OUT_DIR]
 diff --git a/tools/host_test/station/runtime.cpp b/tools/host_test/station/runtime.cpp
 index 6f6d652..aa3da1a 100644
 --- a/tools/host_test/station/runtime.cpp
@@ -144,7 +390,7 @@ index 40700ac..4711760 100644
  inline int g_failures = 0;
  #define CHECK(c, what)                    \
 diff --git a/tools/host_test/station/test_e22.cpp b/tools/host_test/station/test_e22.cpp
-index e995b36..6484d09 100644
+index e995b36..890b819 100644
 --- a/tools/host_test/station/test_e22.cpp
 +++ b/tools/host_test/station/test_e22.cpp
 @@ -7,15 +7,20 @@
@@ -292,7 +538,7 @@ index e995b36..6484d09 100644
 +    loop();
 +    ++waited;
 +  }
-+  CHECK(waited == kMxTickMs - at % kMxTickMs && g_matrix_rec.draws == draws + 1,
++  CHECK(waited == 25u - at % 25u && g_matrix_rec.draws == draws + 1,
 +        "loop(): a change is drawn once, at the next 25 ms tick");
 +  line("S|1|2|0|0");
 +  (void)step_loop(kMxTickMs);

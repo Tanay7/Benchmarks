@@ -134,10 +134,28 @@ index a0c6f33..56afc70 100644
  | `dssq_beacon_level`, `dssq_alarm_level` (0 NONE, 1 YELLOW, 2 RED), `dssq_uptime_s` | top level |
  | `dssq_sdls_<key>` | numeric `link.sdls` values |
 diff --git a/dssq-groundstation/python/dssq/display/dashboard.html b/dssq-groundstation/python/dssq/display/dashboard.html
-index 609c76a..9b115ee 100644
+index 609c76a..f3b0e81 100644
 --- a/dssq-groundstation/python/dssq/display/dashboard.html
 +++ b/dssq-groundstation/python/dssq/display/dashboard.html
-@@ -475,9 +475,13 @@ function ferBounds(ci) {
+@@ -455,6 +455,17 @@ function powerNa(state) {
+   return state === "OVERLOAD" ? "n/a (overload: too strong to measure)" : state === "INVALID" ? "n/a (invalid reading: no received power)"
+     : state ? NA : "n/a (no reception yet)";
+ }
++// Why the spacecraft's uplink RSSI is no measurement (rx.budget.uplink): none of this pass (LS-7), an
++// overload or an invalid reading at the S/C (D-76); null when it is one.
++function upNa(up) {
++  return !up.measured_this_pass ? "n/a (no uplink received this pass)" : up.measured_uplink_rssi_state === "OVERLOAD" ? "n/a (overload at the S/C)"
++    : up.measured_uplink_rssi_state === "INVALID" ? "n/a (invalid reading at the S/C)" : null;
++}
++// Why there is no signal power est. (LS-1, D-76): below 3 dB above the noise the signal is below it.
++function prNa(rf) {
++  return rf.margin_state === "NOISE_FLOOR" ? "n/a (noise floor: the signal is below the noise)"
++    : rf.margin_state === "NOISE_UNKNOWN" ? "n/a (no noise reading in this pass)" : powerNa(rf.rssi_state);
++}
+ // ---- D-76: what the receiver can and cannot measure ----
+ // The operator text of an RSSI overload (= rxstats.OVERLOAD_TEXT; tests/test_web.py checks it).
+ const OVERLOAD_TEXT = "received signal too strong to measure: increase distance or add attenuation (receiver damage limit +10 dBm)";
+@@ -475,9 +486,13 @@ function ferBounds(ci) {
  function ferText(ci, compact) {
    if (!ferOk(ci)) return {text: NA, title: "no frame in the window", cls: ""};
    const n = ci.lost + ci.received, conf = fx(100 * ci.confidence, 0) + " %";
@@ -153,7 +171,7 @@ index 609c76a..9b115ee 100644
    if (compact) return {cls: cls, title: title, text: ci.lost === 0 ? "0/" + n + " ≤ " + fpct3(ci.one_sided_hi) : fpct3(ci.fer) + " (" + ci.lost + "/" + n + ")"};
    return {cls: cls, title: title, text: ci.lost + " of " + n + " lost · " + ferBounds(ci)};
  }
-@@ -503,11 +507,14 @@ function marginView(rf) {
+@@ -503,11 +518,14 @@ function marginView(rf) {
    return {v: fres(w, "db"), cls: cls, sub: "dB vs " + sens + (worst ? " · typ. " + fres(rf.margin_est_db, "db") + " dB" : ""),
      title: (rf.margin_basis || "") + (worst ? "; typical sensitivity " + fu(rf.sensitivity_dbm, 1, "dBm") : "")};
  }
@@ -170,25 +188,126 @@ index 609c76a..9b115ee 100644
    return {text: "unknown", cls: "dim", title: "station clock state unknown: " + (ck.reason || NA)};
  }
  // text + colour class + tooltip of a header value
-@@ -1497,11 +1504,14 @@ function renderReceiver() {
+@@ -1327,7 +1345,8 @@ const RF_KEYS = [
+   ["rssi_resolution_db", "RSSI resolution", "dB", 2], ["rssi_cal_offset_db", "RSSI calibration offset (T-RF-02)", "dB", 4],
+   ["noise_dbm", "Noise floor (calibrated, latest reading)", "dBm", "D"], ["noise_dbm", "Noise floor (calibrated, latest reading), in watts", "W", "D", "pwd"],
+   ["noise_source", "Noise source"], ["noise_age_s", "Noise reading age", "s", 1], ["noise_rejected", "Noise readings rejected (end of range)", "", 0],
+-  ["snr_est_db", "SNR est. (RSSI − noise, same pass)", "dB", "D"], ["pr_est_dbm", "Signal power est. (noise removed)", "dBm", "D"],
++  ["snr_est_db", "SNR est. (RSSI − noise, same pass)", "dB", "D"], ["pr_est_dbm", "Signal power est. (noise removed)", "dBm", "D", "pr"],
++  ["pr_est_dbm", "Signal power est. (noise removed), in watts", "W", "R", "pwp"],
+   ["n0_est_dbm_hz", "N₀ est.", "dBm/Hz", "D"], ["cn0_est_dbhz", "C/N₀ est.", "dB-Hz", "D"], ["cn0_source", "C/N₀ basis"],
+   ["ebn0_est_db", "Eᵦ/N₀ est.", "dB", "D"], ["noise_bw_hz", "Noise bandwidth", "Hz", 1], ["noise_bw_source", "Noise-bandwidth basis"],
+   ["sensitivity_dbm", "Sensitivity, typical", "dBm", 1, "src"], ["sensitivity_source", "Sensitivity source"],
+@@ -1365,6 +1384,8 @@ function rfCell(rf, k, unit, d, kind) {
+   const v = rf[k];
+   if (kind === "pw") return num(v) ? fwatt(v / 1000, d === "R" ? "rssi" : "db") : powerNa(rf.rssi_state);     // mW -> W (D-76)
+   if (kind === "pwd") return num(v) ? fwatt(dbmW(v), d === "R" ? "rssi" : "db") : "n/a (no noise reading)";
++  // signal power est.: an estimate from the RSSI, so its watts have the RSSI's figures (2)
++  if (kind === "pr" || kind === "pwp") return !num(v) ? prNa(rf) : kind === "pwp" ? fwatt(dbmW(v), "rssi") : fres(v, "db", unit);
+   if (kind === "sci" || kind === "sxsci") return fsci(v);
+   if (kind === "state" || kind === "sxstate") return V(v || NA, v === "ALARM" ? "bad" : v === "WARN" ? "warn" : v === "OK" ? "ok" : "");
+   if (kind === "rstate") return V(v === "OVERLOAD" ? "OVERLOAD: " + OVERLOAD_TEXT : v === "INVALID" ? "INVALID (below −160 dBm: no received power)" : v || NA, RSTATE_CLS[v] || "", v === "OVERLOAD" ? OVERLOAD_TEXT : "");
+@@ -1399,7 +1420,8 @@ function renderReceiver() {
+   const nested = new Set(["packet", "snr_db", "freq_err_hz", "doppler", "afc"]);       // shown in their own sections
+   for (const [k, v] of Object.entries(rf)) if (!known.has(k) && !nested.has(k) && (typeof v !== "object" || v === null)) rows.push([k, typeof v === "number" ? fx(v, 4) : v === null ? NA : String(v)]);
+   const pk = rf.packet || {};
+-  rows.push({section: "last packet (rf.packet)"}, ["RSSI", rf.rssi_state === "OVERLOAD" ? V("OVERLOAD (too strong to measure)", "bad") : fres(pk.rssi_dbm, "rssi", "dBm")]);
++  rows.push({section: "last packet (rf.packet)"}, ["RSSI", rf.rssi_state === "OVERLOAD" ? V("OVERLOAD (too strong to measure)", "bad") : fres(pk.rssi_dbm, "rssi", "dBm")],
++            ["RSSI, in watts", num(pk.rssi_dbm) ? fwatt(dbmW(pk.rssi_dbm), "rssi") : powerNa(rf.rssi_state)]);
+   if (sx) rows.push(["SNR (SnrPkt/4)", fu(pk.snr_db, 2, "dB")], ["Frequency error (raw)", fu(pk.freq_err_hz, 1, "Hz")],
+                     ["CRC", V(pk.crc_ok === false ? "FAILED" : pk.crc_ok ? "ok" : NA, pk.crc_ok === false ? "warn" : "")]);
+   else rows.push(["CRC", E22_NO_CRC]);
+@@ -1433,7 +1455,18 @@ function renderReceiver() {
+   // measured terms follow the noise-floor rule (D-76): none at the noise floor or after an overload
+   const plMeas = num(b.measured_path_loss_db_est) ? fres(b.measured_path_loss_db_est, "db") + " (last" + (b.measured_power_state === "NEAR_NOISE" ? ", noise removed" : "") + ")"
+     : b.measured_power_state === "NOISE_FLOOR" ? "n/a (noise floor)" : rf.rssi_state === "OVERLOAD" ? "n/a (overload)" : NA;
+-  const ulMeas = up.measured_uplink_rssi_state === "OVERLOAD" ? "n/a (overload at the S/C)" : up.measured_margin_state === "NOISE_FLOOR" ? "≤ " + fres(up.measured_margin_max_db, "db") + " (noise floor)" : fres(up.measured_margin_db, "db");
++  // the uplink RSSI is the S/C's LAST uplink packet: a measurement of this pass only after an uplink reached it (LS-7)
++  const ulNa = upNa(up);
++  const ulMeas = ulNa || (up.measured_margin_state === "NOISE_FLOOR" ? "≤ " + fres(up.measured_margin_max_db, "db") + " (noise floor)" : fres(up.measured_margin_db, "db"));
++  // LS-9: the 10-minute mean the noise-floor rule accepts (noise removed in NEAR_NOISE, none at the noise floor);
++  // in watts the linear mean of the readings (rx.budget.measured_pr_mean10m_mw), not 10^(mean dBm)
++  const st10 = b.measured_power_state_10m, nr10 = st10 === "NEAR_NOISE" ? ", noise removed" : "";
++  const pr10 = num(b.measured_pr_mean10m_dbm) ? fres(b.measured_pr_mean10m_dbm, "rssi") + " (10-min mean" + nr10 + ", n=" + r10.n + ")"
++    : st10 === "NOISE_FLOOR" ? "n/a (noise floor)" : r10.n ? NA : "n/a (no reading in 10 min)";
++  const pr10W = num(b.measured_pr_mean10m_mw) ? V(fwatt(b.measured_pr_mean10m_mw / 1000, "rssi") + " (linear mean" + nr10 + ")", "", "mean of the readings in W, not 10^(mean dBm)")
++    : st10 === "NOISE_FLOOR" ? "n/a (noise floor)" : r10.n ? NA : "n/a (no reading in 10 min)";
++  const n10W = num(n10.mean_mw) ? V(fwatt(n10.mean_mw / 1000, "db") + " (linear mean)", "", "mean of the readings in W, not 10^(mean dBm)") : n10.n ? NA : "n/a (no noise reading in 10 min)";
++  const cm = N([badge("computed", "info"), " ", badge("measured", "ok")]);
+   table("rx-budget", ["term", "design", "measured", "unit", "basis"], [
+     {section: "downlink (spacecraft → station)"},
+     ["S/C transmitter power (" + (b.sc_model || NA) + ")", fx(b.sc_tx_power_dbm_nominal, 2), NA, "dBm", N(pv ? badge("datasheet", "info") : badge("VERIFY T-RF-07", "warn"))],
+@@ -1445,9 +1478,11 @@ function renderReceiver() {
+     ["  path loss 10-min mean", NA, fres(b.measured_path_loss_mean10m_db, "db"), "dB", N(badge("measured", "ok"))],
+     ["+ Ground antenna gain", fx(b.ground_gain_dbi, 2), NA, "dBi", N(badge("configured"))],
+     ["− Ground line loss", fx(b.ground_line_loss_db, 2), NA, "dB", N(badge("configured"))],
+-    ["= Received power", fx(b.predicted_pr_dbm, 4), pmres(r10, "rssi"), "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
++    ["= Received power", fx(b.predicted_pr_dbm, 4), pr10, "dBm", cm],
++    ["  received power in watts", fwatt(dbmW(b.predicted_pr_dbm), "rssi"), pr10W, "W", cm],
+     ["Excess loss (measured − free space)", NA, V(fres(b.excess_loss_db_est, "db"), num(b.excess_loss_db_est) && b.excess_loss_db_est > 20 ? "warn" : ""), "dB", N(badge("est.", "warn"))],
+-    ["Thermal noise kTB" + (num(b.noise_figure_assumed_db) ? " (NF " + fx(b.noise_figure_assumed_db, 1) + " dB assumed)" : " (B assumed: the E22's LoRa bandwidth is not published)"), fx(b.thermal_noise_dbm, 1), pmres(n10, "db"), "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
++    ["Thermal noise kTB" + (num(b.noise_figure_assumed_db) ? " (NF " + fx(b.noise_figure_assumed_db, 1) + " dB assumed)" : " (B assumed: the E22's LoRa bandwidth is not published)"), fx(b.thermal_noise_dbm, 1), pmres(n10, "db"), "dBm", cm],
++    ["  noise in watts", fwatt(dbmW(b.thermal_noise_dbm), "db"), n10W, "W", cm],
+     ["SNR", fx(b.predicted_snr_db, 1), m10.n ? pm(m10, 2) + " meas" : pmres(s10, "db") + " est.", "dB", N(badge(m10.n ? "measured" : "est.", m10.n ? "ok" : "warn"))],
+     ["Sensitivity, typical", fx(b.sensitivity_dbm, 1), NA, "dBm", N(srcBadge(b.sensitivity_source))],
+     ["Sensitivity, worst case (datasheet min)", worstB ? fx(b.sensitivity_worst_dbm, 1) : "n/a (no worst case published for this radio)", NA, "dBm", N(srcBadge(b.sensitivity_worst_source))],
+@@ -1459,7 +1494,8 @@ function renderReceiver() {
+     ["Station transmitter power", fx(up.gs_power_dbm, 2), NA, "dBm", N(up.gs_power_verified ? badge("datasheet", "info") : badge("VERIFY T-RF-07", "warn"))],
+     ["Station EIRP", fx(up.gs_eirp_dbm_est, 2), NA, "dBm", N(badge("est.", "warn"))],
+     ["S/C sensitivity", fx(up.sc_sensitivity_dbm, 1), NA, "dBm", N(srcBadge(up.sc_sensitivity_source))],
+-    ["Received power at the S/C", fx(up.predicted_pr_dbm, 4), up.measured_uplink_rssi_state === "OVERLOAD" ? "n/a (overload at the S/C)" : fres(up.measured_uplink_rssi_dbm, "rssi") + " (RF uplink_rssi)", "dBm", N([badge("computed", "info"), " ", badge("measured", "ok")])],
++    ["Received power at the S/C", fx(up.predicted_pr_dbm, 4), ulNa || fres(up.measured_uplink_rssi_dbm, "rssi") + " (RF uplink_rssi)", "dBm", cm],
++    ["  received power at the S/C in watts", fwatt(dbmW(up.predicted_pr_dbm), "rssi"), ulNa || fwatt(dbmW(up.measured_uplink_rssi_dbm), "rssi"), "W", cm],
+     ["Uplink margin", fx(up.predicted_margin_db, 1), ulMeas, "dB", N(badge("est.", "warn"))],
+   ]);
+   // ---- charts
+@@ -1497,11 +1533,14 @@ function renderReceiver() {
    const nch = 84, gnd = new Array(nch).fill(null), scn = new Array(nch).fill(null);
    if (ls && Array.isArray(ls.noise)) ls.noise.forEach((v, i) => { if (ls.first + i < nch) gnd[ls.first + i] = v; });
    if (scv && Array.isArray(scv.noise)) scv.noise.forEach((v, i) => { if (scv.first_ch + i < nch && num(v)) scn[scv.first_ch + i] = v; });
 -  const allowed = R.allowed_channels || [];
-+  const allowed = R.allowed_channels || [], rej = (ls && ls.rejected) || {};
++  const allowed = R.allowed_channels || [], scanRej = (ls && ls.rejected) || {};
    barChart("rx-scan", {labels: [...Array(nch).keys()], lo: -130, hi: -50, unit: "dBm", marks: allowed, xTitle: "CH", every: 4,
      sets: [{name: "ground GSCAN", v: gnd, color: COL.s1}, {name: "spacecraft RFSCAN", v: scn, color: COL.s2, dots: true}],
 -    extra: i => ["f = " + (410.125 + i).toFixed(3) + " MHz" + (allowed.includes(i) ? " (allowed)" : "")]});
 -  setText("rx-scan-note", (ls ? "GSCAN " + iso(ls.t) + ": quietest CH" + ls.quietest + ", quietest allowed CH" + ls.quietest_allowed + ", " + fu(ls.duration_s, 2, "s")
-+    extra: i => ["f = " + (410.125 + i).toFixed(3) + " MHz" + (allowed.includes(i) ? " (allowed)" : "") + (rej[i] ? " · GSCAN " + rej[i] + ": no noise power (no bar)" : "")]});
++    extra: i => ["f = " + (410.125 + i).toFixed(3) + " MHz" + (allowed.includes(i) ? " (allowed)" : "") + (scanRej[i] ? " · GSCAN " + scanRej[i] + ": no noise power (no bar)" : "")]});
 +  // LS-5 (D-76): an end-of-range noise octet (or < −160 dBm) is no noise power: no bar, named here
-+  const rejText = Object.entries(rej).map(([ch, c]) => "CH" + ch + " " + c).join(", ");
++  const rejText = Object.entries(scanRej).map(([ch, c]) => "CH" + ch + " " + c).join(", ");
 +  setText("rx-scan-note", (ls ? "GSCAN " + iso(ls.t) + ": quietest CH" + ls.quietest + ", quietest allowed CH" + ls.quietest_allowed + ", " + fu(ls.duration_s, 2, "s") +
 +                           (rejText ? "; rejected (no noise power): " + rejText : "")
      : "no ground survey (GSCAN" + (!sx && !R.rcu ? ": needs the Radio Control Unit, [gds] rcu = false)" : ")")) +
            " · " + (scv ? "RFSCAN CH" + scv.first_ch + "..CH" + (scv.first_ch + scv.count - 1) + " in " + fint(scv.duration_ms, "ms") : "no spacecraft survey (RFSCAN)"));
    // ---- radio configuration
-@@ -1665,7 +1675,9 @@ function renderReceiver() {
+@@ -1643,14 +1682,22 @@ function renderReceiver() {
+     ["Serial octets / rate", sx ? "n/a (SX126x: packets over the Router Bridge)" : fint(se.octets) + " / " + fu(se.octets_per_s, 1, "B/s")], ["Noise queries / replies", fint(se.noise_queries) + " / " + fint(se.noise_replies)]]);
+   const tw = rx.two_way || {}, ul = rx.uplink || {}, mvd = marginView(rf), up2 = (rx.budget || {}).uplink || {};
+   const sid = (S.link || {}).station_id || {};
++  // the uplink values are the S/C's last uplink packet: none of this pass until an uplink reached it (LS-7);
++  // the S/C noise floor after the overload / invalid check (LS-8, D-76)
++  const ul2 = upNa(up2), ul2t = up2.measured_this_pass ? null : ul2;
++  const scNoise = up2.measured_sc_noise_state === "OVERLOAD" ? "n/a (end-of-range octet: no noise power)"
++    : up2.measured_sc_noise_state === "INVALID" ? "n/a (invalid reading: no noise power)" : fres(up2.measured_sc_noise_dbm, "db", "dBm");
+   table("rx-2way", ["", "DOWNLINK (station)", "UPLINK (spacecraft)"], [
+     ["RSSI", rf.rssi_state === "OVERLOAD" ? V("OVERLOAD", "bad", OVERLOAD_TEXT) : fres(rf.rssi_dbm, "rssi", "dBm"),
+-      up2.measured_uplink_rssi_state === "OVERLOAD" ? V("OVERLOAD", "bad") : fres(up2.measured_uplink_rssi_dbm, "rssi", "dBm")],
+-    sx ? ["SNR", fu(pk.snr_db, 2, "dB"), fu(tw.uplink_snr, 2, "dB")] : ["SNR / frequency error", "n/a (E22)", "n/a (E22)"],
+-    sx ? ["Frequency error", fu(pk.freq_err_hz, 1, "Hz"), fu(tw.uplink_freq_err, 1, "Hz")] : null,
+-    ["Noise floor", fres(rf.noise_dbm, "db", "dBm"), fres(tw.sc_noise_floor, "db", "dBm")],
++      up2.measured_this_pass && up2.measured_uplink_rssi_state === "OVERLOAD" ? V("OVERLOAD", "bad") : ul2 || fres(up2.measured_uplink_rssi_dbm, "rssi", "dBm")],
++    ["RSSI, in watts", num(rf.rssi_mw) ? fwatt(rf.rssi_mw / 1000, "rssi") : powerNa(rf.rssi_state), ul2 || fwatt(dbmW(up2.measured_uplink_rssi_dbm), "rssi")],
++    sx ? ["SNR", fu(pk.snr_db, 2, "dB"), ul2t || fu(tw.uplink_snr, 2, "dB")] : ["SNR / frequency error", "n/a (E22)", "n/a (E22)"],
++    sx ? ["Frequency error", fu(pk.freq_err_hz, 1, "Hz"), ul2t || fu(tw.uplink_freq_err, 1, "Hz")] : null,
++    ["Noise floor", fres(rf.noise_dbm, "db", "dBm"), scNoise],
++    ["Noise floor, in watts", num(rf.noise_dbm) ? fwatt(dbmW(rf.noise_dbm), "db") : "n/a (no noise reading)",
++      num(up2.measured_sc_noise_dbm) ? fwatt(dbmW(up2.measured_sc_noise_dbm), "rssi") : scNoise],
+     ["Margin est.", V(mvd.v === NA || mvd.v === "n/a" ? mvd.v : mvd.v + " dB", mvd.cls, mvd.title),
+-      up2.measured_margin_state === "NOISE_FLOOR" ? "≤ " + fres(up2.measured_margin_max_db, "db", "dB") + " (noise floor)" : fres(tw.uplink_margin_db_est, "db", "dB")],
++      ul2 || (up2.measured_margin_state === "NOISE_FLOOR" ? "≤ " + fres(up2.measured_margin_max_db, "db", "dB") + " (noise floor)" : fres(tw.uplink_margin_db_est, "db", "dB"))],
+     // the spacecraft counts the ground's plain-text identification as a bad CLTU (no CLTU start sequence) (F-P2-5)
+     ["Frames / CLTUs", fint(fr.ok) + " frames", fint(tw.cltu_ok) + " ok / " + fint(tw.cltu_bad) + " bad (incl. the station identifications: " + fint(sid.count) + " sent)"],
+     ["Errors corrected", sx ? fint(dec.symbols_corrected) + " RS sym" : fint(dec.symbols_corrected) + " RS sym (UART errors only)", fint(tw.bch_corrected) + " BCH"],
+@@ -1665,7 +1712,9 @@ function renderReceiver() {
      ["Recommendation", (rec.action || NA) + (rec.value !== undefined ? " " + rec.value : "") + (rec.why ? " — " + rec.why : "")],
      ["Margin p10 (vs " + (rec.sensitivity_basis || "sensitivity") + " " + fu(rec.sensitivity_dbm, 1, "dBm") + ")", (rec.noise_state === "NOISE_FLOOR" ? "≤ " : "") + fu(rec.margin_p10_db, 1, "dB") +
        (rec.noise_state ? " · " + (MSTATE_TEXT[rec.noise_state] || rec.noise_state).split(":")[0] : "")],
@@ -199,7 +318,7 @@ index 609c76a..9b115ee 100644
      ["Rate limits", (L2.rate_limits || []).join("..")], ["Hold-off", fu(L2.holdoff_s, 0, "s")]]);
    logLines("rx-events", (rx.events || []).slice().reverse(), e => h("div", {cls: e.event === "LOS" ? "warn" : "ok", text: iso(e.t) + " " + e.event + (e.duration_s !== undefined ? " (" + dur(e.duration_s) + ")" : "")}));
  }
-@@ -2345,7 +2357,7 @@ function clockRows(ck) {
+@@ -2345,7 +2394,7 @@ function clockRows(ck) {
    ck = ck || {};
    const v = clockView(ck);
    return [["Station clock (kernel)", V(v.text + (ck.state ? " (" + ck.state + (ck.reason ? ": " + ck.reason : "") + ")" : ck.reason ? " (" + ck.reason + ")" : ""), v.cls)],
@@ -692,7 +811,7 @@ index 9b62ec7..3534790 100644
  # Limits recomputed here from the documents: SX1261/2 DS rev 2.2 Table 3-8 FERR_L = +-25 % of
  # BW, at SF12 also +-50 ppm, the tighter applying; Table 6-1 SF12 demodulator SNR -20 dB.
 diff --git a/tests/test_web.py b/tests/test_web.py
-index 9203730..4bebe0f 100644
+index 9203730..07d5b63 100644
 --- a/tests/test_web.py
 +++ b/tests/test_web.py
 @@ -876,6 +876,9 @@ def test_dashboard_shows_only_what_the_receiver_can_measure(sim_station, tmp_pat
@@ -741,3 +860,82 @@ index 9203730..4bebe0f 100644
  TIMES = "\u00d7"                                       # the multiplication sign of "1.3 x 10^-15 W"
  SUPERSCRIPT = str.maketrans("-0123456789", "\u207b\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079")
  
+@@ -978,6 +1001,78 @@ def test_receiver_tab_shows_received_power_in_watts(sim_station, tmp_path):
+     assert "in wattsn/a (no reception yet)" in _render(tmp_path, st, sci, ids)["rx-now"][0]
+ 
+ 
++@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not installed")
++def test_receiver_tab_budget_two_way_link_manager_and_survey_follow_d76(sim_station, tmp_path):
++    """D-76 in the rendered RECEIVER tab (LS-1, LS-2, LS-5, LS-7, LS-8, LS-9) and the watt value
++    of every received power shown in dBm: at the noise floor no signal power and no budget
++    received power; no uplink RSSI of an earlier pass; no spacecraft noise floor of -256 dBm; no
++    FER without a decoded frame; a rejected survey octet named, not drawn."""
++    _, snap, sci = sim_station
++    ids = ["rx-now", "rx-budget", "rx-2way", "rx-lm", "rx-scan-note"]
++    st = json.loads(json.dumps(snap))
++    rf = st["rx"]["rf"]
++    rf.update(rssi_dbm=-117.0, rssi_mw=10 ** -11.7, rssi_state="OK", noise_dbm=-118.0, margin_state="NOISE_FLOOR",
++              pr_est_dbm=None, cn0_est_dbhz=None, ebn0_est_db=None, margin_est_db=None, margin_worst_est_db=None,
++              margin_max_db=10.0, margin_worst_max_db=8.0)
++    rf["packet"]["rssi_dbm"] = -117.0
++    b = st["rx"]["budget"]
++    b.update(predicted_pr_dbm=-135.0, thermal_noise_dbm=-123.0309, measured_pr_mean10m_dbm=None,
++             measured_pr_mean10m_mw=None, measured_power_state_10m="NOISE_FLOOR")
++    b["uplink"].update(predicted_pr_dbm=-120.0, measured_this_pass=False, measured_uplink_rssi_dbm=None,
++                       measured_uplink_rssi_state=None, measured_margin_state=None, measured_margin_db=None,
++                       measured_margin_max_db=None, measured_sc_noise_dbm=None, measured_sc_noise_state="OVERLOAD")
++    st["rx"]["two_way"].update(sc_noise_floor=-256, uplink_rssi=-95, uplink_margin_db_est=None)
++    st["rx"]["windows"]["10m"]["noise"] = {"n": 3, "mean": -118.0, "sem": 0.0, "std": 0.0, "min": -118.0,
++                                           "p10": -118.0, "p50": -118.0, "p90": -118.0, "max": -118.0,
++                                           "last": -118.0, "fade_depth": 0.0, "mean_mw": 10 ** -11.8}
++    st["linkmgr"]["recommendation"] = {"action": "NONE", "window_s": 600.0, "frames": 0, "lost": 0, "fer": None,
++                                       "why": "insufficient data (< 10 decoded frames in 600 s)"}
++    st["radio"]["last_scan"] = {"t": st["utc"], "first": 20, "noise": [-98.0, None, -102.0], "quietest": 22,
++                                "quietest_allowed": 22, "duration_s": 0.9, "home": 23, "home_restored": True,
++                                "calibrated": True, "rejected": {"21": "OVERLOAD"}}
++    got = _render(tmp_path, st, sci, ids)
++    now, bud, tw = got["rx-now"][0], got["rx-budget"][0], got["rx-2way"][0]
++    floor = "n/a (noise floor: the signal is below the noise)"
++    assert f"Signal power est. (noise removed){floor}" in now
++    assert f"Signal power est. (noise removed), in watts{floor}" in now
++    assert "RSSI, in watts" + _watts("2.0e-15") in now                              # last packet, -117 dBm
++    assert "= Received power-135.0000n/a (noise floor)dBm" in bud
++    assert "received power in watts" + _watts("3.2e-17") + "n/a (noise floor)W" in bud
++    assert "noise in watts" + _watts("5.0e-16") + _watts("1.6e-15") + " (linear mean)W" in bud
++    no_ul = "n/a (no uplink received this pass)"
++    assert f"Received power at the S/C-120.0000{no_ul}dBm" in bud
++    assert "received power at the S/C in watts" + _watts("1.0e-15") + no_ul + "W" in bud
++    assert f"Uplink margin" in bud and bud.count(no_ul) == 3
++    assert "-256" not in tw and "Noise floor-118 dBmn/a (end-of-range octet: no noise power)" in tw
++    assert f"RSSI-117 dBm{no_ul}" in tw and "RSSI, in watts" + _watts("2.0e-15") + no_ul in tw
++    assert "Noise floor, in watts" + _watts("1.6e-15") + "n/a (end-of-range octet: no noise power)" in tw
++    assert tw.count(no_ul) == 3                                                     # RSSI, its watts, the margin
++    assert "FER in the windown/a (no decoded frame in the window)" in got["rx-lm"][0]
++    assert "quietest CH22, quietest allowed CH22, 0.90 s; rejected (no noise power): CH21 OVERLOAD" in \
++        got["rx-scan-note"][0]
++    # 3-10 dB above the noise and an uplink of this pass: the noise removed, the linear mean in W
++    rf.update(margin_state="NEAR_NOISE", rssi_dbm=-113.0, rssi_mw=10 ** -11.3, noise_dbm=-119.0, pr_est_dbm=-114.26)
++    b.update(measured_pr_mean10m_dbm=-114.26, measured_pr_mean10m_mw=3.0e-12, measured_power_state_10m="NEAR_NOISE")
++    b["uplink"].update(measured_this_pass=True, measured_uplink_rssi_dbm=-113.0, measured_uplink_rssi_state="OK",
++                       measured_margin_state="SIGNAL", measured_margin_db=15.0, measured_sc_noise_dbm=-118.0,
++                       measured_sc_noise_state="OK")
++    st["rx"]["two_way"].update(sc_noise_floor=-118, uplink_rssi=-113, uplink_margin_db_est=15.0)
++    st["linkmgr"]["recommendation"].update(frames=40, lost=1, fer=1 / 41)
++    got = _render(tmp_path, st, sci, ids)
++    now, bud, tw = got["rx-now"][0], got["rx-budget"][0], got["rx-2way"][0]
++    n10 = st["rx"]["windows"]["10m"]["rssi"]["n"]
++    assert "Signal power est. (noise removed)-114 dBm" in now
++    assert "Signal power est. (noise removed), in watts" + _watts("3.7e-15") in now
++    assert f"= Received power-135.0000-114 (10-min mean, noise removed, n={n10})dBm" in bud
++    assert "received power in watts" + _watts("3.2e-17") + _watts("3.0e-15") + " (linear mean, noise removed)W" in bud
++    assert "Received power at the S/C-120.0000-113 (RF uplink_rssi)dBm" in bud
++    assert "received power at the S/C in watts" + _watts("1.0e-15") + _watts("5.0e-15") + "W" in bud
++    assert no_ul not in bud and no_ul not in tw and "Noise floor-119 dBm-118 dBm" in tw
++    assert "Noise floor, in watts" + _watts("1.3e-15") + _watts("1.6e-15") in tw
++    assert "RSSI, in watts" + _watts("5.0e-15") + _watts("5.0e-15") in tw
++    assert "FER in the window1 lost of 41 (2.44 %)" in got["rx-lm"][0]
++
++
+ # =============================================================================
+ # App Lab entry point (PB-6.2)
+ # =============================================================================
